@@ -63,7 +63,8 @@ function normalizePanel(p){
 }
 function normalizeSource(s){s.headers=s.headers||{};s.kind=s.kind||'http';s.enabled=s.enabled!==false;s.refresh_ms=s.refresh_ms||60000;s.timeout_ms=s.timeout_ms||10000;s.max_response_bytes=s.max_response_bytes||65536;s.tls_verify=s.tls_verify!==false;s.auth_token_ref=s.auth_token_ref||'';return s;}
 function defaultPlan(s){return {id:s.id,kind:s.kind,enabled:s.enabled,url:s.url||'',refresh_ms:s.refresh_ms,timeout_ms:s.timeout_ms,max_response_bytes:s.max_response_bytes,tls_verify:s.tls_verify,auth_token_ref:s.auth_token_ref,headers:clone(s.headers),response:'standard_json',method:'GET',body:'',static_body:'',text_path:'',reset_at_path:'$.reset_at',stale_after_ms:300000,conditional_get:true,max_json_depth:16};}
-function syncPlan(s){var p=byId(plans(),'id',s.id);if(!p)return;['id','kind','enabled','url','refresh_ms','timeout_ms','max_response_bytes','tls_verify','auth_token_ref','headers'].forEach(function(k){p[k]=clone(s[k]);});}
+function syncPlanFields(p,s){['id','kind','enabled','url','refresh_ms','timeout_ms','max_response_bytes','tls_verify','auth_token_ref','headers'].forEach(function(k){p[k]=clone(s[k]);});}
+function syncPlan(s){var p=byId(plans(),'id',s.id);if(p)syncPlanFields(p,s);}
 function items(){
  var d=dash(),out=[];
  if(S.view==='dashboard')return [{id:'dashboard',label:tr('仪表盘设置','Dashboard settings')}];
@@ -149,7 +150,7 @@ function formSource(parent){
  jsonArea(parent,tr('请求头（敏感值保持掩码；替换掩码即更新）','Headers (sensitive values stay masked; replace the mask to change)'),s.headers,function(v){s.headers=v;syncPlan(s);},'de-json',function(){return 'source:'+s.id+':headers';});
  var ps=section(parent,tr('查询与转换 SourcePlan（声明式，无脚本）','Query & transform SourcePlan (declarative, no scripts)'));var p=byId(plans(),'id',s.id);
  if(!p){button(ps,tr('添加 SourcePlan','Add SourcePlan'),function(){delete S.jsonBuffers['source:'+s.id+':plan'];plans().push(defaultPlan(s));dirty();render();},'sec');button(ps,tr('测试默认 Standard JSON','Test default Standard JSON'),function(){testSource(defaultPlan(s));},'sec');return;}
- jsonArea(ps,tr('response、JSONPath、metrics/events 映射、单位与安全表达式','response, JSONPath, metric/event mappings, units and safe expressions'),p,function(v){var current=byId(plans(),'id',s.id),i=plans().indexOf(current);if(i>=0)plans()[i]=v;syncPlan(s);},'de-plan',function(){return 'source:'+s.id+':plan';});
+ jsonArea(ps,tr('response、JSONPath、metrics/events 映射、单位与安全表达式','response, JSONPath, metric/event mappings, units and safe expressions'),p,function(v){if(!v||typeof v!=='object'||Array.isArray(v))throw new Error('SourcePlan must be an object');var current=byId(plans(),'id',s.id),i=plans().indexOf(current);if(i>=0){syncPlanFields(v,s);plans()[i]=v;}},'de-plan',function(){return 'source:'+s.id+':plan';});
  button(ps,tr('测试并归一化预览','Test & normalized preview'),function(){var current=byId(plans(),'id',s.id);if(current)testSource(current);},'');
  button(ps,tr('移除 SourcePlan（使用默认解析）','Remove SourcePlan (use default parser)'),function(){var current=byId(plans(),'id',s.id),i=plans().indexOf(current);if(i>=0)plans().splice(i,1);delete S.jsonBuffers['source:'+s.id+':plan'];dirty();render();},'danger');
 }
