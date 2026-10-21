@@ -60,7 +60,7 @@ struct NetStack::Impl {
   };
   struct HttpPayload {
     NetRequest req;
-    NetResponse* resp = nullptr;  // 调用方持有
+    NetResponse resp;  // net_task 写入；take 成功后调用方 move 出（防超时 UAF）
     PendingOp op;
   };
   struct IngestPayload {
@@ -70,7 +70,7 @@ struct NetStack::Impl {
     PendingOp op;
   };
   struct StatusPayload {
-    NetStatusSnapshot* out = nullptr;
+    NetStatusSnapshot snapshot;  // net_task 写入；take 成功后调用方 move 出
     PendingOp op;
   };
   struct SemPayload {  // WaitIdle / Stop
@@ -185,7 +185,7 @@ struct NetStack::Impl {
       }
       case CmdType::HttpSubmit: {
         auto p = std::static_pointer_cast<HttpPayload>(cmd->payload);
-        if (p->resp && self->pool_) *p->resp = self->pool_->execute(p->req);
+        if (self->pool_) p->resp = self->pool_->execute(p->req);
         p->op.ok = true;
         p->op.give();
         break;
@@ -208,17 +208,16 @@ struct NetStack::Impl {
       }
       case CmdType::QueryStatus: {
         auto p = std::static_pointer_cast<StatusPayload>(cmd->payload);
-        if (p->out) {
-          p->out->wifi.state = (int)self->wifi_.state();
-          p->out->wifi.ssid = self->wifi_.currentSsid();
-          p->out->wifi.rssi = self->wifi_.rssi();
-          p->out->wifi.ip = self->wifi_.currentIp();
-          p->out->wifi.last_reason = self->wifi_.lastReason();
-          p->out->wifi.reconnect_backoff_ms = wifi_backoff_ms_;
-          p->out->pool_sessions = self->pool_ ? self->pool_->sessionCount() : 0;
-          p->out->running = true;
-          for (const auto& s : sources_) p->out->sources.push_back(s->health);
-        }
+        p->snapshot = NetStatusSnapshot{};  // 快照整体重建（payload 自有，天然无追加）
+        p->snapshot.wifi.state = (int)self->wifi_.state();
+        p->snapshot.wifi.ssid = self->wifi_.currentSsid();
+        p->snapshot.wifi.rssi = self->wifi_.rssi();
+        p->snapshot.wifi.ip = self->wifi_.currentIp();
+        p->snapshot.wifi.last_reason = self->wifi_.lastReason();
+        p->snapshot.wifi.reconnect_backoff_ms = wifi_backoff_ms_;
+        p->snapshot.pool_sessions = self->pool_ ? self->pool_->sessionCount() : 0;
+        p->snapshot.running = true;
+        for (const auto& s : sources_) p->snapshot.sources.push_back(s->health);
         p->op.ok = true;
         p->op.give();
         break;
@@ -490,10 +489,10 @@ bool NetStack::reconnectNow(uint32_t wait_ms) {
 
 bool NetStack::queryStatus(NetStatusSnapshot& out, uint32_t wait_ms) {
   auto p = std::make_shared<Impl::StatusPayload>();
-  p->out = &out;
   if (!sendCmdAndWait(CmdType::QueryStatus, p, wait_ms) ||
       xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
     return false;
+  out = std::move(p->snapshot);
   return p->op.ok;
 }
 
@@ -501,10 +500,10 @@ bool NetStack::httpSubmit(const NetRequest& req, NetResponse* resp, uint32_t wai
   if (!resp) return false;
   auto p = std::make_shared<Impl::HttpPayload>();
   p->req = req;
-  p->resp = resp;
   if (!sendCmdAndWait(CmdType::HttpSubmit, p, wait_ms) ||
       xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
     return false;
+  *resp = std::move(p->resp);  // take 成功后才把结果移出负载
   return p->op.ok;
 }
 

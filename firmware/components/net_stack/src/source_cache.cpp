@@ -6,11 +6,7 @@
 #include <cctype>
 #include <cstdio>
 
-#include "esp_log.h"
-
 namespace eego::net {
-
-static const char* TAG = "net.cache";
 
 SourceCache::SourceCache(std::string dir) : dir_(std::move(dir)) {
   if (!dir_.empty() && dir_.back() == '/') dir_.pop_back();

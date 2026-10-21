@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -133,6 +134,10 @@ struct HttpPool::Impl {
     uint16_t port = 0;
     bool tls_verify = true;
     int64_t last_used_ms = 0;
+    // 本会话已设置过的请求头键（小写）。esp_http_client 的头存活于 handle 整个
+    // 生命周期，跨请求粘连——每请求必须删除"上次设置但本次未设置"的头，
+    // 否则同 host 的 Authorization/条件 GET 校验器会泄漏给后续请求。
+    std::set<std::string> req_headers;
     RxBuf rx;
   };
 
@@ -183,6 +188,9 @@ struct HttpPool::Impl {
       s->rx.ps = nullptr;
       s->rx.cap = s->rx.len = 0;
     }
+    s->rx.use_ps = false;
+    s->rx.overflow = false;
+    s->req_headers.clear();
   }
 
   void evictLruIfFull() {
@@ -298,7 +306,32 @@ struct HttpPool::Impl {
     s->rx.small.clear();
     s->rx.len = 0;
     s->rx.overflow = false;
-    if (!s->rx.use_ps && s->rx.ps) { /* 不应发生 */ }
+
+    // 本次请求将设置的头键（小写）
+    std::set<std::string> current_headers = {"user-agent", "accept"};
+    for (const auto& h : req.headers) {
+      std::string k = h.name;
+      std::transform(k.begin(), k.end(), k.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+      current_headers.insert(std::move(k));
+    }
+    if (req.method == "POST") current_headers.insert("content-type");
+    const Validator* val = nullptr;
+    if (req.conditional_get) {
+      auto vit = validators_.find(validatorKey(*s, u.path));
+      if (vit != validators_.end()) val = &vit->second;
+      if (val) {
+        if (!val->etag.empty()) current_headers.insert("if-none-match");
+        if (!val->last_modified.empty()) current_headers.insert("if-modified-since");
+      }
+    }
+    // 删除"上次设置但本次未设置"的头：esp_http_client 的头随 handle 生命周期
+    // 粘连，不删则同 host 的 Authorization/条件 GET 校验器/自定义头会随
+    // keep-alive 会话泄漏给后续请求（跨源凭证卫生，review r1 P2）
+    for (const auto& k : s->req_headers) {
+      if (!current_headers.count(k)) esp_http_client_delete_header(s->handle, k.c_str());
+    }
+    s->req_headers = current_headers;
 
     esp_http_client_set_url(s->handle, u.path.c_str());
     esp_http_client_set_timeout_ms(s->handle, (int)req.timeout_ms);
@@ -312,15 +345,11 @@ struct HttpPool::Impl {
       esp_http_client_set_header(s->handle, h.name.c_str(), h.value.c_str());
     }
 
-    if (req.conditional_get) {
-      auto it = validators_.find(validatorKey(*s, u.path));
-      if (it != validators_.end()) {
-        if (!it->second.etag.empty())
-          esp_http_client_set_header(s->handle, "If-None-Match", it->second.etag.c_str());
-        if (!it->second.last_modified.empty())
-          esp_http_client_set_header(s->handle, "If-Modified-Since",
-                                     it->second.last_modified.c_str());
-      }
+    if (val) {
+      if (!val->etag.empty())
+        esp_http_client_set_header(s->handle, "If-None-Match", val->etag.c_str());
+      if (!val->last_modified.empty())
+        esp_http_client_set_header(s->handle, "If-Modified-Since", val->last_modified.c_str());
     }
     if (req.method == "POST") {
       esp_http_client_set_header(s->handle, "Content-Type", "application/json");
