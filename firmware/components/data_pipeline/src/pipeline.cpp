@@ -237,6 +237,102 @@ bool parseChanged(const SourcePlan& plan, const VariableValues& previous,
   return false;
 }
 
+std::string sourceGenerationFingerprint(const SourcePlan& plan, const VariableValues& variables,
+                                        const TokenResolver& token_resolver) {
+  std::string key;
+  if (plan.source.kind == SourceKind::Http) {
+    net::NetRequest request;
+    std::string error;
+    if (buildSourceRequest(plan, variables, token_resolver, request, error)) {
+      appendPart(key, sourceRequestKey(request));
+    } else {
+      appendPart(key, "invalid-request");
+      appendPart(key, error);
+    }
+  } else {
+    std::string body;
+    std::string error;
+    if (interpolateVariables(plan.static_body, variables, body, error,
+                             plan.source.max_response_bytes)) {
+      appendPart(key, body);
+    } else {
+      appendPart(key, "invalid-static-body");
+      appendPart(key, error);
+    }
+  }
+  appendPart(key, sourceKindName(plan.source.kind));
+  appendPart(key, responseKindName(plan.response_kind));
+  appendPart(key, plan.method);
+  appendPart(key, plan.text_path);
+  appendPart(key, plan.reset_at_path);
+  appendPart(key, std::to_string(plan.max_json_depth));
+  appendPart(key, std::to_string(plan.source.max_response_bytes));
+  for (const MetricMapping& mapping : plan.metrics) {
+    appendPart(key, mapping.name);
+    appendPart(key, mapping.items_path);
+    appendPart(key, mapping.name_path);
+    appendPart(key, mapping.value_path);
+    appendPart(key, mapping.timestamp_path);
+    appendPart(key, mapping.unit);
+    appendPart(key, mapping.unit_path);
+    appendPart(key, mapping.target_unit);
+    appendPart(key, mapping.expression);
+    appendPart(key, mapping.reset_at_path);
+    for (const FieldMapping& field : mapping.fields) {
+      appendPart(key, field.name);
+      appendPart(key, field.path);
+    }
+    for (const LabelMapping& label : mapping.labels) {
+      appendPart(key, label.name);
+      appendPart(key, label.path);
+      appendPart(key, label.value);
+      if (label.path.empty()) {
+        std::string expanded;
+        std::string error;
+        if (interpolateVariables(label.value, variables, expanded, error, 512 * 4)) {
+          appendPart(key, expanded);
+        } else {
+          appendPart(key, "invalid-label");
+          appendPart(key, error);
+        }
+      }
+    }
+    if (!mapping.expression.empty()) {
+      for (const auto& variable : variables) {
+        if (expressionUsesVariable(mapping, variable.first)) {
+          appendPart(key, variable.first);
+          appendPart(key, variable.second);
+        }
+      }
+    }
+  }
+  for (const EventMapping& mapping : plan.events) {
+    appendPart(key, mapping.items_path);
+    appendPart(key, mapping.id_path);
+    appendPart(key, mapping.rule_id_path);
+    appendPart(key, mapping.timestamp_path);
+    appendPart(key, mapping.severity_path);
+    appendPart(key, mapping.state_path);
+    appendPart(key, mapping.title_path);
+    appendPart(key, mapping.message_path);
+    appendPart(key, mapping.linked_panel_id_path);
+    for (const auto& severity : mapping.severity_map) {
+      appendPart(key, severity.first);
+      appendPart(key, severity.second);
+    }
+    for (const std::string& state : mapping.clear_states) appendPart(key, state);
+  }
+  uint64_t hash = 1469598103934665603ULL;
+  for (const unsigned char c : key) {
+    hash ^= c;
+    hash *= 1099511628211ULL;
+  }
+  char fingerprint[17];
+  std::snprintf(fingerprint, sizeof(fingerprint), "%016llx",
+                static_cast<unsigned long long>(hash));
+  return fingerprint;
+}
+
 bool validRefreshOverride(uint32_t refresh_ms) {
   return refresh_ms == 0 || refresh_ms == 60000 || refresh_ms == 300000 ||
          refresh_ms == 900000 || refresh_ms == 1800000;
@@ -246,11 +342,13 @@ bool validRefreshOverride(uint32_t refresh_ms) {
 
 struct DataPipeline::SourceRuntime {
   SourcePlan plan;
+  std::string generation;
   std::shared_ptr<const SourceResult> result;
   std::shared_ptr<const SourceResult> static_result;
   SourceStatus status;
   int64_t next_poll_ms = 0;
   bool initial_fanout = true;
+  bool unconditional_retry = false;
   bool async_pending = false;
   uint64_t async_id = 0;
   int64_t async_deadline_ms = 0;
@@ -317,8 +415,13 @@ bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<Sourc
 
   for (auto& item : sources_) {
     SourceRuntime& runtime = *item.second;
+    runtime.generation = sourceGenerationFingerprint(runtime.plan, variables_, config_.token_resolver);
     if (cache_ != nullptr) {
       std::string cache_error;
+      if (!cache_->generationMatches(item.first, runtime.generation)) {
+        if (!cache_->clearSource(item.first, cache_error)) runtime.status.cache_error = cache_error;
+        continue;
+      }
       std::vector<HistoryEntry> entries;
       if (cache_->loadHistory(item.first, entries, cache_error))
         history_.replaceSource(item.first, entries, 0, cache_error);
@@ -397,6 +500,10 @@ bool DataPipeline::setVariables(const VariableValues& overrides, std::string& er
                  updates_.end());
   config_.variable_overrides = overrides;
   variables_ = std::move(values);
+  for (auto& source : sources_) {
+    source.second->generation =
+        sourceGenerationFingerprint(source.second->plan, variables_, config_.token_resolver);
+  }
   if (changed_sources != nullptr) *changed_sources = changed;
   return true;
 }
@@ -645,10 +752,12 @@ TickResult DataPipeline::tick(int64_t now_ms) {
           entries.push_back(std::move(entry));
         }
         std::string cache_error;
-        if (!entries.empty() && !cache_->appendHistory(current->source_id, entries, cache_error))
+        if (!entries.empty() &&
+            !cache_->appendHistory(current->source_id, entries, cache_error, source.generation))
           status.cache_error = cache_error;
         cache_error.clear();
-        if (!cache_->writeSnapshot(*current, cache_error) && status.cache_error.empty())
+        if (!cache_->writeSnapshot(*current, cache_error, source.generation) &&
+            status.cache_error.empty())
           status.cache_error = cache_error;
       }
     }
@@ -685,6 +794,7 @@ void DataPipeline::failSource(SourceRuntime& source, const std::string& failure,
       static_cast<uint64_t>(sourceInterval(source)) << shift, 1800000ULL);
   source.next_poll_ms = now_ms + static_cast<int64_t>(backoff);
   source.initial_fanout = false;
+  source.unconditional_retry = false;
   ++tick.failed;
 }
 
@@ -717,10 +827,13 @@ void DataPipeline::succeedSource(SourceRuntime& source,
         entries.push_back(std::move(entry));
       }
       std::string cache_error;
-      if (!entries.empty() && !cache_->appendHistory(source.result->source_id, entries, cache_error))
+      if (!entries.empty() &&
+          !cache_->appendHistory(source.result->source_id, entries, cache_error,
+                                 source.generation))
         status.cache_error = cache_error;
       cache_error.clear();
-      if (!cache_->writeSnapshot(*source.result, cache_error) && status.cache_error.empty())
+      if (!cache_->writeSnapshot(*source.result, cache_error, source.generation) &&
+          status.cache_error.empty())
         status.cache_error = cache_error;
     }
   }
@@ -730,6 +843,7 @@ void DataPipeline::succeedSource(SourceRuntime& source,
     markDirtyPanels(source, previous.get(), *source.result, now_ms, false);
   source.next_poll_ms = now_ms + sourceInterval(source);
   source.initial_fanout = false;
+  source.unconditional_retry = false;
   ++tick.succeeded;
 }
 
@@ -737,6 +851,11 @@ void DataPipeline::completeAsyncSource(SourceRuntime& source, const HttpResponse
                                        int64_t now_ms, TickResult& tick) {
   source.status.last_http_status = response.status;
   const bool not_modified = response.not_modified || response.status == 304;
+  if (not_modified && !source.result && !source.unconditional_retry) {
+    source.unconditional_retry = true;
+    source.next_poll_ms = 0;
+    return;
+  }
   std::shared_ptr<const SourceResult> current;
   std::string failure;
   if (not_modified) {
@@ -760,6 +879,7 @@ void DataPipeline::completeAsyncSource(SourceRuntime& source, const HttpResponse
 }
 
 void DataPipeline::detachAsync(SourceRuntime& source) {
+  source.unconditional_retry = false;
   if (!source.async_pending) return;
   const uint64_t id = source.async_id;
   source.async_pending = false;
@@ -871,6 +991,7 @@ TickResult DataPipeline::tickAsync(int64_t now_ms) {
       failSource(source, failure, now_ms, tick);
       continue;
     }
+    if (source.unconditional_retry) request.conditional_get = false;
     const std::string key = sourceRequestKey(request);
     const int64_t deadline = now_ms + static_cast<int64_t>(source.plan.source.timeout_ms) + 5000;
     const auto existing = async_request_keys_.find(key);

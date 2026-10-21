@@ -596,6 +596,21 @@ std::string SdCache::historyPath(const std::string& source_id) const {
 std::string SdCache::snapshotPath(const std::string& source_id) const {
   return directory_ + "/" + source_id + ".snapshot.json";
 }
+std::string SdCache::generationPath(const std::string& source_id) const {
+  return directory_ + "/" + source_id + ".generation";
+}
+bool SdCache::writeGeneration(const std::string& source_id, const std::string& generation,
+                              std::string& error) {
+  if (generation.empty()) return true;
+  return writeAtomic(generationPath(source_id), generation, error);
+}
+bool SdCache::generationMatches(const std::string& source_id, const std::string& expected) const {
+  if (expected.empty()) return true;
+  if (!validId(source_id)) return false;
+  std::string actual;
+  std::string error;
+  return readFile(generationPath(source_id), 64, actual, error) && actual == expected;
+}
 std::string SdCache::imagePath(const std::string& source_id) const {
   return directory_ + "/" + source_id + ".image";
 }
@@ -628,8 +643,10 @@ bool SdCache::clearSource(const std::string& source_id, std::string& error) {
   }
   const std::string history = historyPath(source_id);
   const std::string snapshot = snapshotPath(source_id);
+  const std::string generation = generationPath(source_id);
   const std::string paths[] = {history,          history + ".tmp",  snapshot,
                                snapshot + ".tmp", snapshot + ".next", snapshot + ".next.tmp",
+                               generation,        generation + ".tmp",
                                imagePath(source_id) + ".tmp"};
   bool ok = true;
   for (const std::string& path : paths) {
@@ -641,7 +658,8 @@ bool SdCache::clearSource(const std::string& source_id, std::string& error) {
 }
 
 bool SdCache::appendHistory(const std::string& source_id,
-                            const std::vector<HistoryEntry>& entries, std::string& error) {
+                            const std::vector<HistoryEntry>& entries, std::string& error,
+                            const std::string& generation) {
   error.clear();
   if (!validId(source_id)) {
     error = "invalid cache source id";
@@ -683,7 +701,8 @@ bool SdCache::appendHistory(const std::string& source_id,
     error = "history byte budget cannot preserve coverage";
     return false;
   }
-  return writeAtomic(historyPath(source_id), data, error);
+  if (!writeAtomic(historyPath(source_id), data, error)) return false;
+  return writeGeneration(source_id, generation, error);
 }
 
 bool SdCache::loadHistoryLimited(const std::string& source_id, std::vector<HistoryEntry>& out,
@@ -763,7 +782,8 @@ bool SdCache::loadHistory(const std::string& source_id, std::vector<HistoryEntry
   return loadHistoryLimited(source_id, out, error, limits_.max_history_bytes);
 }
 
-bool SdCache::writeSnapshot(const SourceResult& result, std::string& error) {
+bool SdCache::writeSnapshot(const SourceResult& result, std::string& error,
+                            const std::string& cache_generation) {
   error.clear();
   if (!validId(result.source_id) || result.metrics.size() > kMaxResultMetrics ||
       result.events.size() > kMaxResultEvents || result.fetched_at_ms < 0) {
@@ -851,7 +871,7 @@ bool SdCache::writeSnapshot(const SourceResult& result, std::string& error) {
     return false;
   }
   cleanupImages(result.source_id, generation);
-  return true;
+  return writeGeneration(result.source_id, cache_generation, error);
 }
 
 bool SdCache::readSnapshot(const std::string& source_id, SourceResult& out,

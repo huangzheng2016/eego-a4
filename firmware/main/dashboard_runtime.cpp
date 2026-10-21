@@ -1640,9 +1640,12 @@ struct DashboardRuntime::Impl {
     }
     ui::HitTarget target;
     if (ui::hitTest(layout, x, y, target) && target.panel != nullptr && target.action != nullptr) {
+      const std::string old = focusedPanel() == nullptr ? "" : focusedPanel()->id;
       for (size_t i = 0; i < layout.panels.size(); ++i) {
         if (layout.panels[i].panel == target.panel) focus = i;
       }
+      action_focus = target.action_index;
+      invalidateFocus(old);
       dispatchAction(*target.panel, *target.action);
       return;
     }
