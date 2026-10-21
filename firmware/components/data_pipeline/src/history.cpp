@@ -571,9 +571,9 @@ bool MetricHistory::replaceSource(const std::string& source_id,
   for (const HistoryEntry& entry : ordered) {
     if (!entry.window_state) continue;
     if (entry.sample.source_id != source_id || entry.window_kind == WindowKind::Rolling24h ||
-        entry.window_from_ms < 0 || (!entry.coverage_sample && entry.count == 0) ||
-        !std::isfinite(entry.sum) ||
-        !std::isfinite(entry.min) || !std::isfinite(entry.max) ||
+        entry.window_from_ms < 0 ||
+        (!entry.coverage_sample && entry.count == 0 && !entry.coverage_lost) ||
+        !std::isfinite(entry.sum) || !std::isfinite(entry.min) || !std::isfinite(entry.max) ||
         !std::isfinite(entry.first_value) || !std::isfinite(entry.last_value) ||
         entry.first_timestamp_ms < 0 ||
         entry.first_timestamp_ms > entry.sample.timestamp_ms) {
@@ -599,6 +599,7 @@ bool MetricHistory::replaceSource(const std::string& source_id,
     }
     Series& series = it->second;
     series.reset_at_ms = entry.reset_at_ms;
+    series.raw_gap_before_ms = std::max(series.raw_gap_before_ms, entry.raw_gap_before_ms);
     if (series.unit.empty()) series.unit = canonical.unit;
     if (entry.coverage_sample) {
       if (entry.coverage_windows.empty()) {
@@ -802,6 +803,7 @@ std::vector<HistoryEntry> MetricHistory::entries(const std::string& source_id) c
         entry.window_state = true;
         entry.window_kind = window.first.kind;
         entry.window_from_ms = window.first.from_ms;
+        entry.raw_gap_before_ms = series.raw_gap_before_ms;
         entry.fixed_gap = series.fixed_gap;
         entry.coverage_lost = state.coverage_lost;
         out.push_back(std::move(entry));
@@ -826,6 +828,7 @@ std::vector<HistoryEntry> MetricHistory::entries(const std::string& source_id) c
       entry.window_from_ms = coverage_sample.windows.front().from_ms;
       for (const WindowKey& window : coverage_sample.windows)
         entry.coverage_windows.emplace_back(window.kind, window.from_ms);
+      entry.raw_gap_before_ms = series.raw_gap_before_ms;
       entry.fixed_gap = series.fixed_gap;
       entry.coverage_lost = coverage_sample.coverage_lost;
       out.push_back(std::move(entry));
