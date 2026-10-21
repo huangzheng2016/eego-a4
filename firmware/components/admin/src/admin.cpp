@@ -396,7 +396,7 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       ADMIN_LOG_WARN("factory reset executing");
       net::NetStack::instance().stop();
       bool ok = true;
-      for (const char* ns : {"sec", "wifi", "ui", "ble"}) {
+      for (const char* ns : {"sec", "wifi", "ui", "ble", "dashboard"}) {
         if (net::CredentialStore::clearNamespace(ns) != ESP_OK) {
           ADMIN_LOG_ERROR("factory reset: clear namespace failed: %s", ns);
           ok = false;

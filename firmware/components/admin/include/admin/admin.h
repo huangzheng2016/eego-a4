@@ -57,7 +57,7 @@ void setAdminEventCallback(AdminEventCallback cb, void* ctx);
 // 默认命令处理器：ApplyConfig/ApplySettings（校验、事务回滚、订阅热生效）、
 // ApplyDashboard/DeleteDashboard（完整 bundle 校验、revision 检查与原子持久化）、
 // ApplyWifi、WifiReset（仅清 WiFi + 限时恢复 AP）、FactoryReset（清
-// sec/wifi/ui/ble/device + 指定 SD 配置，保留字体）、Reboot。仅在 app_task 执行。
+// sec/wifi/ui/ble/device/dashboard + 指定 SD 配置，保留字体）、Reboot。仅在 app_task 执行。
 void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx);
 
 // 组件内部共用：事件发射（portal/httpd → app_task 回调）。
