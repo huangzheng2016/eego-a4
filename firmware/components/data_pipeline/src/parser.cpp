@@ -465,6 +465,7 @@ bool parseStandard(const SourcePlan& plan, const JsonValue& root,
       MetricMapping mapping;
       mapping.items_path = "$";
       mapping.name_path = "$.metric";
+      mapping.unit_path = "$.unit";
       mapping.reset_at_path = "$.reset_at";
       std::vector<const JsonValue*> records;
       if (!selectRecords(*metric_root, "$", records, error)) return false;

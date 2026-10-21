@@ -274,16 +274,6 @@ bool MetricHistory::appendEntry(HistoryEntry entry, std::string& error) {
     return false;
   }
   entry.sample.labels = canonicalLabels(std::move(entry.sample.labels));
-  initializeStats(entry);
-  const BucketStats stats = statsFor(entry);
-  if (stats.count == 0 || !std::isfinite(stats.sum) || !std::isfinite(stats.min) ||
-      !std::isfinite(stats.max) || !std::isfinite(stats.first_value) ||
-      !std::isfinite(stats.last_value) || stats.min > stats.max ||
-      stats.first_timestamp_ms < 0 ||
-      stats.first_timestamp_ms > entry.sample.timestamp_ms) {
-    error = "history rejected invalid bucket metadata";
-    return false;
-  }
   const std::string key = keyFor(entry.sample);
   auto it = series_.find(key);
   if (it == series_.end()) {
@@ -295,74 +285,72 @@ bool MetricHistory::appendEntry(HistoryEntry entry, std::string& error) {
   }
   Series& series = it->second;
   series.reset_at_ms = entry.reset_at_ms;
-  if (series.compacted && !series.points.empty() &&
-      entry.sample.timestamp_ms <= series.points.back().sample.timestamp_ms) {
-    return true;
-  }
-  auto position = std::lower_bound(series.points.begin(), series.points.end(),
+  auto position = std::lower_bound(series.raw_points.begin(), series.raw_points.end(),
                                    entry.sample.timestamp_ms,
-                                   [](const HistoryEntry& point, int64_t timestamp) {
-                                     return point.sample.timestamp_ms < timestamp;
+                                   [](const MetricSample& point, int64_t timestamp) {
+                                     return point.timestamp_ms < timestamp;
                                    });
-  if (position != series.points.end() &&
-      position->sample.timestamp_ms == entry.sample.timestamp_ms) {
-    if (!position->aggregated && !entry.aggregated) *position = std::move(entry);
+  if (position != series.raw_points.end() &&
+      position->timestamp_ms == entry.sample.timestamp_ms) {
+    *position = std::move(entry.sample);
   } else {
-    series.points.insert(position, std::move(entry));
+    series.raw_points.insert(position, std::move(entry.sample));
   }
-  if (series.points.back().aggregated) series.compacted = true;
   downsample(series);
   return true;
 }
 
 void MetricHistory::downsample(Series& series) {
-  if (series.points.size() <= limits_.max_points_per_series) return;
   std::vector<HistoryEntry> points;
-  points.reserve(series.points.size());
-  for (const HistoryEntry& entry : series.points) points.push_back(entry);
-  downsampleEntries(points, limits_.downsample_points);
+  points.reserve(series.raw_points.size());
+  for (const MetricSample& raw : series.raw_points) {
+    HistoryEntry entry;
+    entry.sample = raw;
+    entry.reset_at_ms = series.reset_at_ms;
+    points.push_back(std::move(entry));
+  }
+  if (points.size() > limits_.max_points_per_series)
+    downsampleEntries(points, limits_.downsample_points);
   series.points.clear();
   for (HistoryEntry& point : points) series.points.push_back(std::move(point));
-  series.compacted = true;
+}
+
+void MetricHistory::recomputeCounts() {
+  point_count_ = 0;
+  raw_point_count_ = 0;
+  for (const auto& item : series_) {
+    point_count_ += item.second.points.size();
+    raw_point_count_ += item.second.raw_points.size();
+  }
 }
 
 void MetricHistory::enforceLimits() {
-  point_count_ = 0;
-  for (const auto& item : series_) point_count_ += item.second.points.size();
+  recomputeCounts();
   while (series_.size() > limits_.max_series) {
     auto oldest = series_.begin();
     for (auto it = std::next(series_.begin()); it != series_.end(); ++it) {
-      const int64_t it_time =
-          it->second.points.empty() ? 0 : it->second.points.back().sample.timestamp_ms;
-      const int64_t oldest_time = oldest->second.points.empty()
-                                      ? 0
-                                      : oldest->second.points.back().sample.timestamp_ms;
-      if (it_time < oldest_time) oldest = it;
+      if (it->second.raw_points.back().timestamp_ms <
+          oldest->second.raw_points.back().timestamp_ms) {
+        oldest = it;
+      }
     }
     series_.erase(oldest);
+    recomputeCounts();
   }
-  point_count_ = 0;
-  for (const auto& item : series_) point_count_ += item.second.points.size();
-  while (point_count_ > limits_.max_total_points && !series_.empty()) {
+  while (raw_point_count_ > limits_.max_total_points && !series_.empty()) {
     auto oldest = series_.begin();
     for (auto it = std::next(series_.begin()); it != series_.end(); ++it) {
-      if (it->second.points.empty()) {
-        oldest = it;
-        break;
-      }
-      if (!oldest->second.points.empty() &&
-          it->second.points.front().sample.timestamp_ms <
-              oldest->second.points.front().sample.timestamp_ms) {
+      if (it->second.raw_points.front().timestamp_ms <
+          oldest->second.raw_points.front().timestamp_ms) {
         oldest = it;
       }
     }
-    if (oldest->second.points.empty()) {
+    oldest->second.raw_points.pop_front();
+    if (oldest->second.raw_points.empty())
       series_.erase(oldest);
-      continue;
-    }
-    oldest->second.points.pop_front();
-    --point_count_;
-    if (oldest->second.points.empty()) series_.erase(oldest);
+    else
+      downsample(oldest->second);
+    recomputeCounts();
   }
 }
 
@@ -413,22 +401,26 @@ void MetricHistory::clearSource(const std::string& source_id) {
     else
       ++it;
   }
-  point_count_ = 0;
-  for (const auto& item : series_) point_count_ += item.second.points.size();
+  recomputeCounts();
 }
 
 void MetricHistory::prune(int64_t now_ms) {
   const int64_t cutoff = now_ms > limits_.retention_ms ? now_ms - limits_.retention_ms : 0;
   for (auto it = series_.begin(); it != series_.end();) {
-    auto& points = it->second.points;
-    while (!points.empty() && points.front().sample.timestamp_ms < cutoff) points.pop_front();
-    if (points.empty())
+    bool changed = false;
+    auto& points = it->second.raw_points;
+    while (!points.empty() && points.front().timestamp_ms < cutoff) {
+      points.pop_front();
+      changed = true;
+    }
+    if (points.empty()) {
       it = series_.erase(it);
-    else
+    } else {
+      if (changed) downsample(it->second);
       ++it;
+    }
   }
-  point_count_ = 0;
-  for (const auto& item : series_) point_count_ += item.second.points.size();
+  recomputeCounts();
 }
 
 std::vector<MetricSample> MetricHistory::query(const std::string& source_id,
@@ -463,28 +455,32 @@ AggregationResult MetricHistory::aggregate(const std::string& source_id,
                                            int32_t timezone_offset_minutes) const {
   const ResolvedWindow resolved = resolveWindow(window, now_ms, resetAt(source_id, metric),
                                                 timezone_offset_minutes);
-  std::vector<HistoryEntry> selected;
+  std::vector<MetricSample> selected;
   for (const auto& item : series_) {
     const Series& series = item.second;
     if (series.source_id != source_id || series.metric != metric ||
         !labelsMatch(series.labels, labels))
       continue;
-    for (const HistoryEntry& entry : series.points) {
-      if (entry.sample.timestamp_ms >= resolved.from_ms &&
-          entry.sample.timestamp_ms <= resolved.to_ms) {
-        selected.push_back(entry);
-      }
+    for (const MetricSample& raw : series.raw_points) {
+      if (raw.timestamp_ms >= resolved.from_ms && raw.timestamp_ms <= resolved.to_ms)
+        selected.push_back(raw);
     }
   }
-  return aggregateHistoryEntries(selected, aggregation);
+  return aggregateSamples(selected, aggregation);
 }
 
 std::vector<HistoryEntry> MetricHistory::entries(const std::string& source_id) const {
   std::vector<HistoryEntry> out;
-  out.reserve(point_count_);
+  out.reserve(raw_point_count_);
   for (const auto& item : series_) {
-    if (!source_id.empty() && item.second.source_id != source_id) continue;
-    for (const HistoryEntry& entry : item.second.points) out.push_back(entry);
+    const Series& series = item.second;
+    if (!source_id.empty() && series.source_id != source_id) continue;
+    for (const MetricSample& raw : series.raw_points) {
+      HistoryEntry entry;
+      entry.sample = raw;
+      entry.reset_at_ms = series.reset_at_ms;
+      out.push_back(std::move(entry));
+    }
   }
   return out;
 }

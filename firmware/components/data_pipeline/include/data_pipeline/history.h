@@ -77,10 +77,12 @@ class MetricHistory {
                               const std::vector<KeyValue>& labels, WindowKind window,
                               int64_t now_ms, Aggregation aggregation,
                               int32_t timezone_offset_minutes = 0) const;
+  // Raw samples for exact aggregation and SD persistence; query() returns display buckets.
   std::vector<HistoryEntry> entries(const std::string& source_id = "") const;
   int64_t resetAt(const std::string& source_id, const std::string& metric) const;
 
-  size_t pointCount() const { return point_count_; }
+  size_t pointCount() const { return point_count_; }  // display buckets
+  size_t rawPointCount() const { return raw_point_count_; }
   size_t seriesCount() const { return series_.size(); }
   const HistoryLimits& limits() const { return limits_; }
 
@@ -90,18 +92,20 @@ class MetricHistory {
     std::string metric;
     std::vector<KeyValue> labels;
     int64_t reset_at_ms = 0;
-    bool compacted = false;
+    std::deque<MetricSample> raw_points;
     std::deque<HistoryEntry> points;
   };
 
   static std::string keyFor(const MetricSample& sample);
   bool appendEntry(HistoryEntry entry, std::string& error);
+  void recomputeCounts();
   void enforceLimits();
   void downsample(Series& series);
 
   HistoryLimits limits_;
   std::map<std::string, Series> series_;
   size_t point_count_ = 0;
+  size_t raw_point_count_ = 0;
 };
 
 }  // namespace eego::dashboard::pipeline
