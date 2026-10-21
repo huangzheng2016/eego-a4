@@ -11,6 +11,8 @@
 
 namespace eego::dashboard {
 
+// Canonical v2 budgets. Callers may only tighten these values; larger custom
+// profiles are rejected so export always remains valid for default import.
 struct Limits {
   size_t max_json_bytes = 128 * 1024;
   size_t max_depth = 16;

@@ -526,6 +526,15 @@ bool jsonIsValidUtf8(std::string_view text) {
   return true;
 }
 
+size_t jsonCodePointCount(std::string_view text) {
+  if (!jsonIsValidUtf8(text)) return std::string_view::npos;
+  size_t count = 0;
+  for (const unsigned char c : text) {
+    if ((c & 0xc0) != 0x80) ++count;
+  }
+  return count;
+}
+
 std::string jsonEscape(std::string_view text) {
   std::string out;
   out.reserve(text.size() + 2);

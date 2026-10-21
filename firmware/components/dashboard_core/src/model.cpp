@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "dashboard_core/model.h"
 
+#include "dashboard_core/json.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
@@ -238,8 +240,8 @@ bool defaultVariableValues(const std::vector<Variable>& variables,
       error = "unknown variable override: " + override_value.first;
       return false;
     }
-    if (override_value.second.size() > kMaxVariableValueBytes) {
-      error = "variable value too long: " + override_value.first;
+    if (jsonCodePointCount(override_value.second) > kMaxVariableValueCodePoints) {
+      error = "variable value is invalid UTF-8 or too long: " + override_value.first;
       return false;
     }
     current->second = override_value.second;
@@ -247,8 +249,8 @@ bool defaultVariableValues(const std::vector<Variable>& variables,
   for (size_t i = 0; i < variables.size(); ++i) {
     const auto& variable = variables[i];
     const std::string& value = out[i].second;
-    if (value.size() > kMaxVariableValueBytes) {
-      error = "variable value too long: " + variable.name;
+    if (jsonCodePointCount(value) > kMaxVariableValueCodePoints) {
+      error = "variable value is invalid UTF-8 or too long: " + variable.name;
       return false;
     }
     if (!variable.options.empty()) {

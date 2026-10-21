@@ -17,7 +17,7 @@ std::string child(const std::string& parent, const std::string& name) {
 }
 
 bool validId(std::string_view id) {
-  if (id.empty() || id.size() > kMaxIdBytes) return false;
+  if (id.empty() || id.size() > kMaxIdCodePoints) return false;
   for (const char c : id) {
     if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
           (c >= '0' && c <= '9') || c == '_' || c == '-'))
@@ -27,7 +27,7 @@ bool validId(std::string_view id) {
 }
 
 bool validVariableName(std::string_view name) {
-  if (name.empty() || name.size() > kMaxIdBytes ||
+  if (name.empty() || name.size() > kMaxIdCodePoints ||
       !((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z') ||
         name[0] == '_'))
     return false;
@@ -141,7 +141,8 @@ class Validator {
 
   void run() {
     check(validId(dashboard_.id), "id", "must match [A-Za-z0-9_-]{1,64}");
-    check(dashboard_.title.size() <= kMaxTitleBytes, "title", "exceeds size limit");
+    check(jsonCodePointCount(dashboard_.title) <= kMaxTitleCodePoints, "title",
+          "exceeds code-point limit");
     check(dashboard_.refresh_ms >= 1000 && dashboard_.refresh_ms <= 86400000, "refresh_ms",
           "must be in 1000..86400000");
     count(dashboard_.sources.size(), limits_.max_sources, "sources");
@@ -233,7 +234,7 @@ class Validator {
             field, "header is managed by the runtime and cannot be configured");
       check(validHeaderValue(values[i].value), field,
             "HTTP header value contains a forbidden control character");
-      check(values[i].value.size() <= 512, field, "exceeds 512 bytes");
+      check(jsonCodePointCount(values[i].value) <= 512, field, "exceeds 512 code points");
       for (size_t j = 0; j < i; ++j)
         check(!asciiEqual(values[i].key, values[j].key), field, "duplicate HTTP header");
     }
@@ -242,9 +243,9 @@ class Validator {
   void labels(const std::vector<KeyValue>& values, const std::string& path) {
     count(values.size(), kMaxLabels, path);
     for (size_t i = 0; i < values.size(); ++i) {
-      check(!values[i].key.empty() && values[i].key.size() <= 64, path + "." + values[i].key,
-            "invalid label key");
-      check(values[i].value.size() <= 512, path + "." + values[i].key, "label value too long");
+      check(!values[i].key.empty() && jsonCodePointCount(values[i].key) <= 64,
+            path + "." + values[i].key, "invalid label key");
+      check(jsonCodePointCount(values[i].value) <= 512, path + "." + values[i].key, "label value too long");
       for (size_t j = 0; j < i; ++j)
         check(values[i].key != values[j].key, path + "." + values[i].key, "duplicate label key");
     }
@@ -284,11 +285,12 @@ class Validator {
       check(std::string_view(variableKindName(variable.kind)) != "unknown", child(path, "kind"),
             "invalid variable kind");
       count(variable.options.size(), limits_.max_variable_options, child(path, "options"));
-      check(variable.default_value.size() <= kMaxVariableValueBytes, child(path, "default_value"),
-            "exceeds size limit");
+      check(jsonCodePointCount(variable.default_value) <= kMaxVariableValueCodePoints,
+            child(path, "default_value"), "exceeds code-point limit");
       for (size_t j = 0; j < variable.options.size(); ++j) {
-        check(variable.options[j].value.size() <= kMaxVariableValueBytes,
-              child(path, "options") + "[" + std::to_string(j) + "].value", "exceeds size limit");
+        check(jsonCodePointCount(variable.options[j].value) <= kMaxVariableValueCodePoints,
+              child(path, "options") + "[" + std::to_string(j) + "].value",
+              "exceeds code-point limit");
         for (size_t k = 0; k < j; ++k)
           check(variable.options[j].value != variable.options[k].value,
                 child(path, "options") + "[" + std::to_string(j) + "].value", "duplicate option value");
@@ -342,7 +344,8 @@ class Validator {
         break;
       case ActionKind::SetVariable:
         check(containsVariable(action.target), child(path, "target"), "unknown target variable");
-        check(action.value.size() <= kMaxVariableValueBytes, child(path, "value"), "exceeds size limit");
+        check(jsonCodePointCount(action.value) <= kMaxVariableValueCodePoints, child(path, "value"),
+              "exceeds code-point limit");
         break;
       case ActionKind::Refresh:
         // Data poll only: all enabled sources, current-page sources, or one source.
@@ -399,7 +402,8 @@ class Validator {
         check(!panel.source_id.empty(), child(path, "source_id"), "metric requires a source");
       if (!panel.source_id.empty())
         check(!panel.metric.empty(), child(path, "metric"), "source query requires a metric");
-      check(panel.metric.size() <= 128, child(path, "metric"), "exceeds size limit");
+      check(jsonCodePointCount(panel.metric) <= 128, child(path, "metric"),
+            "exceeds code-point limit");
       expression(panel.value_expression, child(path, "value_expression"));
       count(panel.thresholds.size(), limits_.max_thresholds_per_panel, child(path, "thresholds"));
       for (size_t j = 0; j < panel.thresholds.size(); ++j) {
@@ -509,7 +513,8 @@ class Validator {
       const AlertRule& rule = dashboard_.alert_rules[i];
       const std::string path = "alert_rules[" + std::to_string(i) + "]";
       check(containsSource(rule.source_id), child(path, "source_id"), "unknown source ID");
-      check(!rule.metric.empty() && rule.metric.size() <= 128, child(path, "metric"), "metric is required");
+      check(!rule.metric.empty() && jsonCodePointCount(rule.metric) <= 128, child(path, "metric"),
+            "metric is required and bounded");
       check(!rule.expression.empty(), child(path, "expression"), "expression is required");
       expression(rule.expression, child(path, "expression"));
       check(rule.for_ms <= 604800000, child(path, "for_ms"), "invalid alert duration");
@@ -529,8 +534,8 @@ class Validator {
       const std::string path = "samples[" + std::to_string(i) + "]";
       if (!sample.source_id.empty())
         check(containsSource(sample.source_id), child(path, "source_id"), "unknown source ID");
-      check(!sample.metric.empty() && sample.metric.size() <= 128, child(path, "metric"),
-            "metric is required and bounded");
+      check(!sample.metric.empty() && jsonCodePointCount(sample.metric) <= 128,
+            child(path, "metric"), "metric is required and bounded");
       check(sample.timestamp_ms >= 0, child(path, "timestamp_ms"), "must be non-negative");
       check(std::isfinite(sample.value), child(path, "value"), "must be finite");
       labels(sample.labels, child(path, "labels"));
@@ -609,6 +614,11 @@ bool validateDashboardSemantics(const Dashboard& dashboard, const Limits& limits
 
 bool validateDashboard(const Dashboard& dashboard, const Limits& limits,
                        std::vector<ValidationError>& errors) {
+  ValidationError limit_error;
+  if (!validateLimits(limits, limit_error)) {
+    errors.push_back(std::move(limit_error));
+    return false;
+  }
   ParseOptions options;
   options.limits = limits;
   Dashboard normalized;

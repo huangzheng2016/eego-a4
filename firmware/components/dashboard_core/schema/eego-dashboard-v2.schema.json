@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eego.local/schemas/eego-dashboard-v2.schema.json",
   "title": "EEGO Dashboard v2",
-  "description": "Canonical eego.dashboard/2 configuration. Cross-reference validity, 128 KiB input budget, JSON depth 16, and total panel count 72 are enforced by dashboard_core. ParseOptions may only tighten these collection limits.",
+  "description": "Canonical eego.dashboard/2 configuration. Cross-reference validity, the 128 KiB input byte budget, JSON depth 16, and total panel count 72 are enforced by dashboard_core. ParseOptions may only tighten canonical byte, depth, and collection budgets. String maxLength values count Unicode code points, matching Draft 2020-12.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "schema_version", "id", "pages"],
@@ -10,7 +10,7 @@
     "schema": {"const": "eego.dashboard/2"},
     "schema_version": {"const": 2},
     "id": {"$ref": "#/$defs/id"},
-    "title": {"type": "string", "maxLength": 160, "default": ""},
+    "title": {"type": "string", "maxLength": 160, "default": "", "description": "Missing and explicitly empty titles are preserved as empty; no ID substitution occurs."},
     "default_page_id": {"$ref": "#/$defs/referenceId", "default": ""},
     "refresh_ms": {"type": "integer", "minimum": 1000, "maximum": 86400000, "default": 60000},
     "sources": {"type": "array", "maxItems": 12, "default": [], "items": {"$ref": "#/$defs/source"}},
@@ -254,7 +254,7 @@
         },
         {
           "if": {"properties": {"kind": {"const": "button"}}},
-          "then": {"properties": {"actions": {"minItems": 1}}}
+          "then": {"required": ["actions"], "properties": {"actions": {"minItems": 1}}}
         },
         {
           "if": {"properties": {"kind": {"enum": ["text", "card", "alert"]}}},
@@ -369,8 +369,8 @@
       },
       "allOf": [
         {
-          "if": {"properties": {"uri": {"pattern": "^sd:"}}},
-          "then": {"properties": {"uri": {"not": {"pattern": "(^|[/:])\\.\\.(/|$)"}}}}
+          "if": {"properties": {"uri": {"pattern": "^(sd:|/)"}}},
+          "then": {"properties": {"uri": {"not": {"pattern": "(^|[/:\\u005C])\\.\\.([/\\u005C]|$)"}}}}
         }
       ]
     },

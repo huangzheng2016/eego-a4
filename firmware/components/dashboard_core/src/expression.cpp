@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "dashboard_core/expression.h"
 
+#include "dashboard_core/json.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
@@ -45,7 +47,8 @@ class Parser {
 
   bool parse(Node& out) {
     if (expression_.empty()) return fail("expression is empty");
-    if (expression_.size() > kMaxExpressionBytes) return fail("expression exceeds size limit");
+    if (jsonCodePointCount(expression_) > kMaxExpressionCodePoints)
+      return fail("expression exceeds code-point limit");
     if (!parseConditional(out, 0)) return false;
     skipWhitespace();
     if (position_ != expression_.size()) return fail("unexpected token");

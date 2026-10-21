@@ -59,8 +59,8 @@ class Reader {
       error(fieldPath(path, key), "must contain valid UTF-8");
       return false;
     }
-    if (value->stringValue().size() > maximum) {
-      error(fieldPath(path, key), "exceeds " + std::to_string(maximum) + " bytes");
+    if (jsonCodePointCount(value->stringValue()) > maximum) {
+      error(fieldPath(path, key), "exceeds " + std::to_string(maximum) + " code points");
       return false;
     }
     out = value->stringValue();
@@ -176,7 +176,7 @@ class Reader {
   }
 
   void stringArray(const JsonValue& object_value, const char* key, const std::string& path,
-                   std::vector<std::string>& out, size_t maximum, size_t max_bytes) {
+                   std::vector<std::string>& out, size_t maximum, size_t max_code_points) {
     out.clear();
     array(object_value, key, path, maximum, false,
           [&](const JsonValue& item, const std::string& item_path) {
@@ -184,8 +184,8 @@ class Reader {
               error(item_path, "must be a string");
             } else if (!jsonIsValidUtf8(item.stringValue())) {
               error(item_path, "must contain valid UTF-8");
-            } else if (item.stringValue().size() > max_bytes) {
-              error(item_path, "string exceeds size limit");
+            } else if (jsonCodePointCount(item.stringValue()) > max_code_points) {
+              error(item_path, "string exceeds code-point limit");
             } else {
               out.push_back(item.stringValue());
             }
@@ -204,16 +204,16 @@ class Reader {
     const size_t count = std::min(value->objectItems().size(), maximum);
     for (size_t i = 0; i < count; ++i) {
       const auto& member = value->objectItems()[i];
-      if (member.first.empty() || member.first.size() > 64) {
-        error(fieldPath(field, member.first.c_str()), "key must contain 1..64 bytes");
-      } else if (!jsonIsValidUtf8(member.first)) {
+      if (!jsonIsValidUtf8(member.first)) {
         error(field, "map key must contain valid UTF-8");
+      } else if (member.first.empty() || jsonCodePointCount(member.first) > 64) {
+        error(fieldPath(field, member.first.c_str()), "key must contain 1..64 code points");
       } else if (member.second.type() != JsonValue::Type::String) {
         error(fieldPath(field, member.first.c_str()), "value must be a string");
       } else if (!jsonIsValidUtf8(member.second.stringValue())) {
         error(fieldPath(field, member.first.c_str()), "value must contain valid UTF-8");
-      } else if (member.second.stringValue().size() > 512) {
-        error(fieldPath(field, member.first.c_str()), "value exceeds 512 bytes");
+      } else if (jsonCodePointCount(member.second.stringValue()) > 512) {
+        error(fieldPath(field, member.first.c_str()), "value exceeds 512 code points");
       } else {
         out.push_back({member.first, member.second.stringValue()});
       }
@@ -259,11 +259,11 @@ void parseAction(Reader& reader, const JsonValue& value, const std::string& path
   out = Action{};
   if (!reader.object(value, path, "action")) return;
   reader.known(value, path, {"id", "kind", "label", "target", "value", "confirm"});
-  reader.string(value, "id", path, out.id, kMaxIdBytes, true);
+  reader.string(value, "id", path, out.id, kMaxIdCodePoints, true);
   reader.enumeration(value, "kind", path, out.kind, actionKindFromString, true);
-  reader.string(value, "label", path, out.label, kMaxTitleBytes);
-  reader.string(value, "target", path, out.target, kMaxIdBytes);
-  reader.string(value, "value", path, out.value, kMaxVariableValueBytes);
+  reader.string(value, "label", path, out.label, kMaxTitleCodePoints);
+  reader.string(value, "target", path, out.target, kMaxIdCodePoints);
+  reader.string(value, "value", path, out.value, kMaxVariableValueCodePoints);
   reader.boolean(value, "confirm", path, out.confirm);
   if (out.kind == ActionKind::AckAlert && value.find("confirm") == nullptr) out.confirm = true;
 }
@@ -276,7 +276,7 @@ void parsePanel(Reader& reader, const JsonValue& value, const std::string& path,
                {"id", "kind", "grid", "title", "visible", "source_id", "metric", "value_path",
                 "value_expression", "time_window", "refresh_ms", "thresholds", "style",
                 "linked_panel_ids", "actions", "text", "image", "chart", "columns"});
-  reader.string(value, "id", path, out.id, kMaxIdBytes, true);
+  reader.string(value, "id", path, out.id, kMaxIdCodePoints, true);
   reader.enumeration(value, "kind", path, out.kind, panelKindFromString, true);
   const bool text_kind = out.kind == PanelKind::Text || out.kind == PanelKind::Card ||
                          out.kind == PanelKind::Alert;
@@ -288,12 +288,12 @@ void parsePanel(Reader& reader, const JsonValue& value, const std::string& path,
     reader.error(fieldPath(path, "chart"), "chart spec is only valid for chart panels");
   if (value.find("columns") != nullptr && out.kind != PanelKind::Table)
     reader.error(fieldPath(path, "columns"), "columns are only valid for table panels");
-  reader.string(value, "title", path, out.title, kMaxTitleBytes);
+  reader.string(value, "title", path, out.title, kMaxTitleCodePoints);
   reader.boolean(value, "visible", path, out.visible);
-  reader.string(value, "source_id", path, out.source_id, kMaxIdBytes);
+  reader.string(value, "source_id", path, out.source_id, kMaxIdCodePoints);
   reader.string(value, "metric", path, out.metric, 128);
   reader.string(value, "value_path", path, out.value_path, 256);
-  reader.string(value, "value_expression", path, out.value_expression, kMaxExpressionBytes);
+  reader.string(value, "value_expression", path, out.value_expression, kMaxExpressionCodePoints);
   reader.uint32(value, "refresh_ms", path, out.refresh_ms, 0, 86400000);
   if (const JsonValue* item = value.find("grid")) parseGrid(reader, *item, fieldPath(path, "grid"), out.grid);
   if (const JsonValue* item = value.find("time_window"))
@@ -301,7 +301,7 @@ void parsePanel(Reader& reader, const JsonValue& value, const std::string& path,
   if (const JsonValue* item = value.find("style"))
     parseStyle(reader, *item, fieldPath(path, "style"), out.style);
   reader.stringArray(value, "linked_panel_ids", path, out.linked_panel_ids,
-                     limits.max_links_per_panel, kMaxIdBytes);
+                     limits.max_links_per_panel, kMaxIdCodePoints);
   reader.array(value, "actions", path, limits.max_actions_per_panel, false,
                [&](const JsonValue& item, const std::string& item_path) {
                  Action action;
@@ -316,7 +316,7 @@ void parsePanel(Reader& reader, const JsonValue& value, const std::string& path,
                    reader.number(item, "value", item_path, threshold.value, true);
                    reader.enumeration(item, "severity", item_path, threshold.severity,
                                       severityFromString);
-                   reader.string(item, "label", item_path, threshold.label, kMaxTitleBytes);
+                   reader.string(item, "label", item_path, threshold.label, kMaxTitleCodePoints);
                  }
                  out.thresholds.push_back(threshold);
                });
@@ -324,7 +324,7 @@ void parsePanel(Reader& reader, const JsonValue& value, const std::string& path,
     const std::string text_path = fieldPath(path, "text");
     if (reader.object(*item, text_path, "text spec")) {
       reader.known(*item, text_path, {"content", "multiline", "max_lines"});
-      reader.string(*item, "content", text_path, out.text.content, kMaxTextBytes);
+      reader.string(*item, "content", text_path, out.text.content, kMaxTextCodePoints);
       reader.boolean(*item, "multiline", text_path, out.text.multiline);
       reader.uint32(*item, "max_lines", text_path, out.text.max_lines, 1, 64);
       if (out.text.multiline && item->find("max_lines") == nullptr) out.text.max_lines = 8;
@@ -334,8 +334,8 @@ void parsePanel(Reader& reader, const JsonValue& value, const std::string& path,
     const std::string image_path = fieldPath(path, "image");
     if (reader.object(*item, image_path, "image spec")) {
       reader.known(*item, image_path, {"asset_id", "alt_text", "fit"});
-      reader.string(*item, "asset_id", image_path, out.image.asset_id, kMaxIdBytes);
-      reader.string(*item, "alt_text", image_path, out.image.alt_text, kMaxTitleBytes);
+      reader.string(*item, "asset_id", image_path, out.image.asset_id, kMaxIdCodePoints);
+      reader.string(*item, "alt_text", image_path, out.image.alt_text, kMaxTitleCodePoints);
       reader.enumeration(*item, "fit", image_path, out.image.fit, imageFitFromString);
     }
   }
@@ -360,7 +360,7 @@ void parsePanel(Reader& reader, const JsonValue& value, const std::string& path,
                  if (reader.object(item, item_path, "table column")) {
                    reader.known(item, item_path, {"key", "title", "unit", "width"});
                    reader.string(item, "key", item_path, column.key, 64, true);
-                   reader.string(item, "title", item_path, column.title, kMaxTitleBytes);
+                   reader.string(item, "title", item_path, column.title, kMaxTitleCodePoints);
                    reader.string(item, "unit", item_path, column.unit, 32);
                    reader.uint32(item, "width", item_path, column.width, 1, 64);
                  }
@@ -374,10 +374,10 @@ void parseSource(Reader& reader, const JsonValue& value, const std::string& path
   reader.known(value, path,
                {"id", "kind", "enabled", "url", "refresh_ms", "timeout_ms",
                 "max_response_bytes", "tls_verify", "auth_token_ref", "headers"});
-  reader.string(value, "id", path, out.id, kMaxIdBytes, true);
+  reader.string(value, "id", path, out.id, kMaxIdCodePoints, true);
   reader.enumeration(value, "kind", path, out.kind, sourceKindFromString);
   reader.boolean(value, "enabled", path, out.enabled);
-  reader.string(value, "url", path, out.url, kMaxUrlBytes);
+  reader.string(value, "url", path, out.url, kMaxUrlCodePoints);
   reader.uint32(value, "refresh_ms", path, out.refresh_ms, 1000, 86400000);
   reader.uint32(value, "timeout_ms", path, out.timeout_ms, 100, 120000);
   reader.uint32(value, "max_response_bytes", path, out.max_response_bytes, 1024, 262144);
@@ -393,11 +393,11 @@ void parseVariable(Reader& reader, const JsonValue& value, const std::string& pa
   reader.known(value, path,
                {"name", "label", "kind", "default_value", "options", "source_id", "value_path",
                 "multi", "include_all"});
-  reader.string(value, "name", path, out.name, kMaxIdBytes, true);
-  reader.string(value, "label", path, out.label, kMaxTitleBytes);
+  reader.string(value, "name", path, out.name, kMaxIdCodePoints, true);
+  reader.string(value, "label", path, out.label, kMaxTitleCodePoints);
   reader.enumeration(value, "kind", path, out.kind, variableKindFromString);
-  reader.string(value, "default_value", path, out.default_value, kMaxVariableValueBytes);
-  reader.string(value, "source_id", path, out.source_id, kMaxIdBytes);
+  reader.string(value, "default_value", path, out.default_value, kMaxVariableValueCodePoints);
+  reader.string(value, "source_id", path, out.source_id, kMaxIdCodePoints);
   reader.string(value, "value_path", path, out.value_path, 256);
   reader.boolean(value, "multi", path, out.multi);
   reader.boolean(value, "include_all", path, out.include_all);
@@ -406,8 +406,8 @@ void parseVariable(Reader& reader, const JsonValue& value, const std::string& pa
                  VariableOption option;
                  if (reader.object(item, item_path, "variable option")) {
                    reader.known(item, item_path, {"label", "value"});
-                   reader.string(item, "label", item_path, option.label, kMaxTitleBytes);
-                   reader.string(item, "value", item_path, option.value, kMaxVariableValueBytes, true);
+                   reader.string(item, "label", item_path, option.label, kMaxTitleCodePoints);
+                   reader.string(item, "value", item_path, option.value, kMaxVariableValueCodePoints, true);
                  }
                  out.options.push_back(std::move(option));
                });
@@ -419,14 +419,14 @@ void parseAlertRule(Reader& reader, const JsonValue& value, const std::string& p
   reader.known(value, path,
                {"id", "title", "enabled", "source_id", "metric", "expression", "for_ms",
                 "message", "style"});
-  reader.string(value, "id", path, out.id, kMaxIdBytes, true);
-  reader.string(value, "title", path, out.title, kMaxTitleBytes);
+  reader.string(value, "id", path, out.id, kMaxIdCodePoints, true);
+  reader.string(value, "title", path, out.title, kMaxTitleCodePoints);
   reader.boolean(value, "enabled", path, out.enabled);
-  reader.string(value, "source_id", path, out.source_id, kMaxIdBytes);
+  reader.string(value, "source_id", path, out.source_id, kMaxIdCodePoints);
   reader.string(value, "metric", path, out.metric, 128);
-  reader.string(value, "expression", path, out.expression, kMaxExpressionBytes, true);
+  reader.string(value, "expression", path, out.expression, kMaxExpressionCodePoints, true);
   reader.uint32(value, "for_ms", path, out.for_ms, 0, 604800000);
-  reader.string(value, "message", path, out.message, kMaxTextBytes);
+  reader.string(value, "message", path, out.message, kMaxTextCodePoints);
   if (const JsonValue* item = value.find("style")) {
     const std::string style_path = fieldPath(path, "style");
     if (reader.object(*item, style_path, "alert style")) {
@@ -447,7 +447,7 @@ void parseAlertRule(Reader& reader, const JsonValue& value, const std::string& p
                      out.style.surfaces |= bit;
                    });
       reader.enumeration(*item, "severity", style_path, out.style.severity, severityFromString);
-      reader.string(*item, "linked_panel_id", style_path, out.style.linked_panel_id, kMaxIdBytes);
+      reader.string(*item, "linked_panel_id", style_path, out.style.linked_panel_id, kMaxIdCodePoints);
     }
   }
 }
@@ -457,9 +457,9 @@ void parseAsset(Reader& reader, const JsonValue& value, const std::string& path,
   if (!reader.object(value, path, "asset")) return;
   reader.known(value, path,
                {"id", "kind", "uri", "media_type", "sha256", "size_bytes", "cache_seconds"});
-  reader.string(value, "id", path, out.id, kMaxIdBytes, true);
+  reader.string(value, "id", path, out.id, kMaxIdCodePoints, true);
   reader.enumeration(value, "kind", path, out.kind, assetKindFromString);
-  reader.string(value, "uri", path, out.uri, kMaxUrlBytes, true);
+  reader.string(value, "uri", path, out.uri, kMaxUrlCodePoints, true);
   reader.string(value, "media_type", path, out.media_type, 128);
   reader.string(value, "sha256", path, out.sha256, 64);
   reader.uint64(value, "size_bytes", path, out.size_bytes, 0, 64 * 1024 * 1024);
@@ -470,7 +470,7 @@ void parseSample(Reader& reader, const JsonValue& value, const std::string& path
   out = MetricSample{};
   if (!reader.object(value, path, "metric sample")) return;
   reader.known(value, path, {"source_id", "metric", "timestamp_ms", "value", "unit", "labels"});
-  reader.string(value, "source_id", path, out.source_id, kMaxIdBytes);
+  reader.string(value, "source_id", path, out.source_id, kMaxIdCodePoints);
   reader.string(value, "metric", path, out.metric, 128, true);
   reader.int64(value, "timestamp_ms", path, out.timestamp_ms, 0,
                std::numeric_limits<int64_t>::max());
@@ -485,16 +485,16 @@ void parseEvent(Reader& reader, const JsonValue& value, const std::string& path,
   reader.known(value, path,
                {"id", "rule_id", "source_id", "timestamp_ms", "severity", "state", "title",
                 "message", "linked_panel_id"});
-  reader.string(value, "id", path, out.id, kMaxIdBytes, true);
-  reader.string(value, "rule_id", path, out.rule_id, kMaxIdBytes);
-  reader.string(value, "source_id", path, out.source_id, kMaxIdBytes);
+  reader.string(value, "id", path, out.id, kMaxIdCodePoints, true);
+  reader.string(value, "rule_id", path, out.rule_id, kMaxIdCodePoints);
+  reader.string(value, "source_id", path, out.source_id, kMaxIdCodePoints);
   reader.int64(value, "timestamp_ms", path, out.timestamp_ms, 0,
                std::numeric_limits<int64_t>::max());
   reader.enumeration(value, "severity", path, out.severity, severityFromString);
   reader.enumeration(value, "state", path, out.state, eventStateFromString);
-  reader.string(value, "title", path, out.title, kMaxTitleBytes);
-  reader.string(value, "message", path, out.message, kMaxTextBytes);
-  reader.string(value, "linked_panel_id", path, out.linked_panel_id, kMaxIdBytes);
+  reader.string(value, "title", path, out.title, kMaxTitleCodePoints);
+  reader.string(value, "message", path, out.message, kMaxTextCodePoints);
+  reader.string(value, "linked_panel_id", path, out.linked_panel_id, kMaxIdCodePoints);
 }
 
 void parseV2(const JsonValue& root, Dashboard& out, const ParseOptions& options,
@@ -505,9 +505,9 @@ void parseV2(const JsonValue& root, Dashboard& out, const ParseOptions& options,
   reader.known(root, "",
                {"schema", "schema_version", "id", "title", "default_page_id", "refresh_ms",
                 "sources", "variables", "pages", "alert_rules", "assets", "samples", "events"});
-  reader.string(root, "id", "", out.id, kMaxIdBytes, true);
-  reader.string(root, "title", "", out.title, kMaxTitleBytes);
-  reader.string(root, "default_page_id", "", out.default_page_id, kMaxIdBytes);
+  reader.string(root, "id", "", out.id, kMaxIdCodePoints, true);
+  reader.string(root, "title", "", out.title, kMaxTitleCodePoints);
+  reader.string(root, "default_page_id", "", out.default_page_id, kMaxIdCodePoints);
   reader.uint32(root, "refresh_ms", "", out.refresh_ms, 1000, 86400000);
   reader.array(root, "sources", "", options.limits.max_sources, false,
                [&](const JsonValue& item, const std::string& path) {
@@ -527,8 +527,8 @@ void parseV2(const JsonValue& root, Dashboard& out, const ParseOptions& options,
                  if (reader.object(item, path, "page")) {
                    reader.known(item, path,
                                 {"id", "title", "visible", "grid_columns", "row_height", "panels"});
-                   reader.string(item, "id", path, page.id, kMaxIdBytes, true);
-                   reader.string(item, "title", path, page.title, kMaxTitleBytes);
+                   reader.string(item, "id", path, page.id, kMaxIdCodePoints, true);
+                   reader.string(item, "title", path, page.title, kMaxTitleCodePoints);
                    reader.boolean(item, "visible", path, page.visible);
                    reader.uint32(item, "grid_columns", path, page.grid_columns, 1, 64);
                    reader.uint32(item, "row_height", path, page.row_height, 1, 256);
@@ -565,7 +565,6 @@ void parseV2(const JsonValue& root, Dashboard& out, const ParseOptions& options,
                  parseEvent(reader, item, path, event);
                  out.events.push_back(std::move(event));
                });
-  if (out.title.empty()) out.title = out.id;
   if (out.default_page_id.empty() && !out.pages.empty()) out.default_page_id = out.pages.front().id;
 }
 
@@ -622,22 +621,30 @@ bool schemaVersion(const std::string& schema, uint32_t& version) {
 }  // namespace
 
 bool validateLimits(const Limits& limits, ValidationError& error) {
-  return checkLimitValue(limits.max_json_bytes, 512 * 1024, "max_json_bytes", error) &&
-         checkLimitValue(limits.max_depth, 24, "max_depth", error) &&
-         checkLimitValue(limits.max_sources, 64, "max_sources", error) &&
-         checkLimitValue(limits.max_variables, 128, "max_variables", error) &&
-         checkLimitValue(limits.max_variable_options, 256, "max_variable_options", error) &&
-         checkLimitValue(limits.max_pages, 64, "max_pages", error) &&
-         checkLimitValue(limits.max_panels_per_page, 128, "max_panels_per_page", error) &&
-         checkLimitValue(limits.max_total_panels, 256, "max_total_panels", error) &&
-         checkLimitValue(limits.max_actions_per_panel, 32, "max_actions_per_panel", error) &&
-         checkLimitValue(limits.max_thresholds_per_panel, 64, "max_thresholds_per_panel", error) &&
-         checkLimitValue(limits.max_links_per_panel, 64, "max_links_per_panel", error) &&
-         checkLimitValue(limits.max_columns_per_panel, 64, "max_columns_per_panel", error) &&
-         checkLimitValue(limits.max_alert_rules, 256, "max_alert_rules", error) &&
-         checkLimitValue(limits.max_assets, 128, "max_assets", error) &&
-         checkLimitValue(limits.max_samples, 16384, "max_samples", error) &&
-         checkLimitValue(limits.max_events, 4096, "max_events", error);
+  const Limits canonical;
+  return checkLimitValue(limits.max_json_bytes, canonical.max_json_bytes, "max_json_bytes", error) &&
+         checkLimitValue(limits.max_depth, canonical.max_depth, "max_depth", error) &&
+         checkLimitValue(limits.max_sources, canonical.max_sources, "max_sources", error) &&
+         checkLimitValue(limits.max_variables, canonical.max_variables, "max_variables", error) &&
+         checkLimitValue(limits.max_variable_options, canonical.max_variable_options,
+                         "max_variable_options", error) &&
+         checkLimitValue(limits.max_pages, canonical.max_pages, "max_pages", error) &&
+         checkLimitValue(limits.max_panels_per_page, canonical.max_panels_per_page,
+                         "max_panels_per_page", error) &&
+         checkLimitValue(limits.max_total_panels, canonical.max_total_panels,
+                         "max_total_panels", error) &&
+         checkLimitValue(limits.max_actions_per_panel, canonical.max_actions_per_panel,
+                         "max_actions_per_panel", error) &&
+         checkLimitValue(limits.max_thresholds_per_panel, canonical.max_thresholds_per_panel,
+                         "max_thresholds_per_panel", error) &&
+         checkLimitValue(limits.max_links_per_panel, canonical.max_links_per_panel,
+                         "max_links_per_panel", error) &&
+         checkLimitValue(limits.max_columns_per_panel, canonical.max_columns_per_panel,
+                         "max_columns_per_panel", error) &&
+         checkLimitValue(limits.max_alert_rules, canonical.max_alert_rules, "max_alert_rules", error) &&
+         checkLimitValue(limits.max_assets, canonical.max_assets, "max_assets", error) &&
+         checkLimitValue(limits.max_samples, canonical.max_samples, "max_samples", error) &&
+         checkLimitValue(limits.max_events, canonical.max_events, "max_events", error);
 }
 
 ParseResult parseDashboard(std::string_view json, const ParseOptions& options) {

@@ -49,8 +49,9 @@ void set(JsonValue& object, const char* key, JsonValue value) {
   }
 }
 
-bool legacyMilliseconds(JsonValue& value) {
-  if (value.type() == JsonValue::Type::Int) return value.intValue() >= 0;
+bool legacyMilliseconds(JsonValue& value, int64_t maximum) {
+  if (value.type() == JsonValue::Type::Int)
+    return value.intValue() >= 0 && value.intValue() <= maximum;
   if (value.type() != JsonValue::Type::String) return false;
   const std::string& text = value.stringValue();
   static constexpr std::pair<const char*, double> kSuffixes[] = {
@@ -65,7 +66,7 @@ bool legacyMilliseconds(JsonValue& value) {
     char* end = nullptr;
     const double parsed = std::strtod(number.c_str(), &end);
     if (errno == 0 && end == number.c_str() + number.size() && std::isfinite(parsed) &&
-        parsed >= 0.0 && parsed * suffix.second <= 86400000.0) {
+        parsed >= 0.0 && parsed * suffix.second <= static_cast<double>(maximum)) {
       value = JsonValue::makeInt(static_cast<int64_t>(parsed * suffix.second));
       return true;
     }
@@ -152,7 +153,7 @@ void migratePanel(JsonValue& panel, const std::string& path,
   rename(panel, "refresh", "refresh_ms", path, errors);
   rename(panel, "refresh_interval", "refresh_ms", path, errors);
   if (JsonValue* refresh = panel.find("refresh_ms");
-      refresh != nullptr && !legacyMilliseconds(*refresh))
+      refresh != nullptr && !legacyMilliseconds(*refresh, 86400000))
     fail(errors, path + ".refresh_ms", "invalid legacy refresh interval");
 
   rename(panel, "timeRange", "time_window", path, errors);
@@ -279,7 +280,8 @@ void migrateAlert(JsonValue& alert, const std::string& path,
   if (alert.type() != JsonValue::Type::Object) return;
   rename(alert, "condition", "expression", path, errors);
   rename(alert, "for", "for_ms", path, errors);
-  if (JsonValue* duration = alert.find("for_ms"); duration != nullptr && !legacyMilliseconds(*duration))
+  if (JsonValue* duration = alert.find("for_ms");
+      duration != nullptr && !legacyMilliseconds(*duration, 604800000))
     fail(errors, path + ".for_ms", "invalid legacy alert duration");
   rename(alert, "link", "linked_panel_id", path, errors);
 
@@ -360,7 +362,7 @@ bool migrateV1ToV2(const JsonValue& input, JsonValue& output,
       rename(*source, "type", "kind", path, errors);
       rename(*source, "refresh", "refresh_ms", path, errors);
       rename(*source, "interval_ms", "refresh_ms", path, errors);
-      if (JsonValue* refresh = source->find("refresh_ms"); refresh != nullptr && !legacyMilliseconds(*refresh))
+      if (JsonValue* refresh = source->find("refresh_ms"); refresh != nullptr && !legacyMilliseconds(*refresh, 86400000))
         fail(errors, path + ".refresh_ms", "invalid legacy source refresh interval");
       if (JsonValue* kind = source->find("kind"); kind != nullptr && kind->type() == JsonValue::Type::String &&
           (kind->stringValue() == "http_poll" || kind->stringValue() == "http_json"))

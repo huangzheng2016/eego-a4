@@ -13,12 +13,14 @@ namespace eego::dashboard {
 inline constexpr char kSchemaName[] = "eego.dashboard/2";
 inline constexpr uint32_t kSchemaVersion = 2;
 
-inline constexpr size_t kMaxIdBytes = 64;
-inline constexpr size_t kMaxTitleBytes = 160;
-inline constexpr size_t kMaxTextBytes = 4096;
-inline constexpr size_t kMaxUrlBytes = 1024;
-inline constexpr size_t kMaxExpressionBytes = 512;
-inline constexpr size_t kMaxVariableValueBytes = 512;
+// Schema-facing string maxima are Unicode code points. Document and runtime
+// memory budgets remain byte-based and are named explicitly where used.
+inline constexpr size_t kMaxIdCodePoints = 64;
+inline constexpr size_t kMaxTitleCodePoints = 160;
+inline constexpr size_t kMaxTextCodePoints = 4096;
+inline constexpr size_t kMaxUrlCodePoints = 1024;
+inline constexpr size_t kMaxExpressionCodePoints = 512;
+inline constexpr size_t kMaxVariableValueCodePoints = 512;
 inline constexpr size_t kMaxLabels = 16;
 inline constexpr size_t kMaxHeaders = 16;
 
@@ -274,9 +276,10 @@ bool defaultVariableValues(const std::vector<Variable>& variables,
 
 // ${name} interpolates one pass only; $${name} emits a literal ${name}.
 // Values are never re-scanned, so variable content cannot inject expressions.
+// The default byte budget admits the largest UTF-8 form of a maximum-size text field.
 bool interpolateVariables(std::string_view input, const VariableValues& values,
                           std::string& out, std::string& error,
-                          size_t max_output_bytes = kMaxTextBytes);
+                          size_t max_output_bytes = kMaxTextCodePoints * 4);
 
 // Dimensioned, finite conversions. Supported families: temperature (C/F/K),
 // ratio (ratio/percent), bytes (B/KB/MB/GB/TB/KiB/MiB/GiB/TiB), time
