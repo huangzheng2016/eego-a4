@@ -58,6 +58,8 @@ struct HistoryEntry {
   int64_t raw_gap_before_ms = 0;
   bool fixed_gap = false;
   bool coverage_lost = false;
+  int64_t loss_from_ms = -1;
+  int64_t loss_to_ms = -1;
 };
 
 struct HistoryLimits {
@@ -117,6 +119,8 @@ class MetricHistory {
     int64_t first_timestamp_ms = 0;
     int64_t last_timestamp_ms = 0;
     bool coverage_lost = false;
+  int64_t loss_from_ms = -1;
+  int64_t loss_to_ms = -1;
     std::vector<std::pair<int64_t, double>> samples;
   };
 
@@ -136,8 +140,10 @@ class MetricHistory {
   static std::string keyFor(const MetricSample& sample);
   bool appendEntry(HistoryEntry entry, std::string& error, bool add_fixed = true);
   void addFixed(Series& series, const MetricSample& sample);
+  static void recordLoss(WindowAccumulator& state, int64_t from_ms, int64_t to_ms);
   void addWindowSample(Series& series, WindowKind kind, int64_t from_ms,
-                       const MetricSample& sample, bool coverage_lost = false);
+                       const MetricSample& sample, bool coverage_lost = false,
+                       int64_t loss_from_ms = -1, int64_t loss_to_ms = -1);
   void propagateCoverageLoss(Series& series, const WindowKey& key);
   void pruneFixed(Series& series, int64_t cutoff_ms);
   AggregationResult aggregateFixed(const Series& series, WindowKind kind,

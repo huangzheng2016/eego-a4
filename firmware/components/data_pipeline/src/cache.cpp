@@ -261,6 +261,8 @@ bool historyEntryFromJson(const JsonValue& root, HistoryEntry& out) {
   const JsonValue* coverage_sample = root.find("coverage_sample");
   const JsonValue* coverage_windows = root.find("coverage_windows");
   const JsonValue* coverage_lost = root.find("coverage_lost");
+  const JsonValue* loss_from = root.find("loss_from_ms");
+  const JsonValue* loss_to = root.find("loss_to_ms");
   if ((window_state != nullptr && window_state->type() != JsonValue::Type::Bool) ||
       (coverage_sample != nullptr && coverage_sample->type() != JsonValue::Type::Bool) ||
       (window_kind != nullptr && window_kind->type() != JsonValue::Type::String) ||
@@ -269,7 +271,15 @@ bool historyEntryFromJson(const JsonValue& root, HistoryEntry& out) {
       (raw_gap != nullptr &&
        (raw_gap->type() != JsonValue::Type::Int || raw_gap->intValue() < 0)) ||
       (fixed_gap != nullptr && fixed_gap->type() != JsonValue::Type::Bool) ||
-      (coverage_lost != nullptr && coverage_lost->type() != JsonValue::Type::Bool)) {
+      (coverage_lost != nullptr && coverage_lost->type() != JsonValue::Type::Bool) ||
+      ((loss_from == nullptr) != (loss_to == nullptr)) ||
+      (loss_from != nullptr &&
+       (loss_from->type() != JsonValue::Type::Int || loss_from->intValue() < 0)) ||
+      (loss_to != nullptr &&
+       (loss_to->type() != JsonValue::Type::Int || loss_to->intValue() < 0)) ||
+      (loss_from != nullptr && loss_to != nullptr &&
+       (loss_to->intValue() < loss_from->intValue() || coverage_lost == nullptr ||
+        !coverage_lost->boolValue()))) {
     return false;
   }
   if (window_state != nullptr) out.window_state = window_state->boolValue();
@@ -294,18 +304,25 @@ bool historyEntryFromJson(const JsonValue& root, HistoryEntry& out) {
   if (raw_gap != nullptr) out.raw_gap_before_ms = raw_gap->intValue();
   if (fixed_gap != nullptr) out.fixed_gap = fixed_gap->boolValue();
   if (coverage_lost != nullptr) out.coverage_lost = coverage_lost->boolValue();
+  if (loss_from != nullptr) {
+    out.loss_from_ms = loss_from->intValue();
+    out.loss_to_ms = loss_to->intValue();
+  }
   return (bucket == nullptr ||
           (out.min <= out.max &&
            (out.count > 0 || (out.window_state && !out.coverage_sample && out.coverage_lost)))) &&
          (!out.window_state ||
-          (window_kind != nullptr && (out.coverage_sample || bucket != nullptr)));
+          (window_kind != nullptr &&
+           (out.coverage_sample || bucket != nullptr || (out.coverage_lost && out.count == 0))));
 }
 
 std::string historyEntryToJson(const HistoryEntry& entry) {
   JsonValue::Object object;
   object.emplace_back("sample", sampleToJson(entry.sample));
   object.emplace_back("reset_at", integer(entry.reset_at_ms));
-  if ((entry.aggregated || entry.window_state) && !entry.coverage_sample) {
+  const bool empty_loss = entry.window_state && !entry.coverage_sample && entry.count == 0 &&
+                          entry.coverage_lost;
+  if ((entry.aggregated || entry.window_state) && !entry.coverage_sample && !empty_loss) {
     const size_t count = entry.count == 0 && !entry.coverage_lost ? 1 : entry.count;
     const double sum = entry.count == 0 ? entry.sample.value : entry.sum;
     const double min = entry.count == 0 ? entry.sample.value : entry.min;
@@ -345,6 +362,11 @@ std::string historyEntryToJson(const HistoryEntry& entry) {
     object.emplace_back("raw_gap_before_ms", integer(entry.raw_gap_before_ms));
   if (entry.fixed_gap) object.emplace_back("fixed_gap", JsonValue::makeBool(true));
   if (entry.coverage_lost) object.emplace_back("coverage_lost", JsonValue::makeBool(true));
+  if (entry.coverage_lost && entry.loss_from_ms >= 0 &&
+      entry.loss_to_ms >= entry.loss_from_ms) {
+    object.emplace_back("loss_from_ms", integer(entry.loss_from_ms));
+    object.emplace_back("loss_to_ms", integer(entry.loss_to_ms));
+  }
   return JsonValue::makeObject(std::move(object)).toString();
 }
 
@@ -383,11 +405,22 @@ std::string seriesKey(const MetricSample& sample) {
 }
 
 std::string serializeHistory(std::vector<HistoryEntry> entries, size_t max_bytes) {
+  struct WindowLoss {
+    int64_t from_ms = -1;
+    int64_t to_ms = -1;
+  };
   struct DroppedSeries {
     HistoryEntry representative;
-    std::set<std::pair<int, int64_t>> windows;
+    std::map<std::pair<int, int64_t>, WindowLoss> windows;
     int64_t raw_gap_before_ms = 0;
     bool fixed_gap = false;
+  };
+  const auto extend_loss = [](int64_t& from_ms, int64_t& to_ms, int64_t other_from,
+                              int64_t other_to) {
+    if (other_from < 0 || other_to < 0) return;
+    if (other_from > other_to) std::swap(other_from, other_to);
+    from_ms = from_ms < 0 ? other_from : std::min(from_ms, other_from);
+    to_ms = to_ms < 0 ? other_to : std::max(to_ms, other_to);
   };
   std::map<std::string, DroppedSeries> dropped;
   bool generated_tombstones = false;
@@ -409,6 +442,13 @@ std::string serializeHistory(std::vector<HistoryEntry> entries, size_t max_bytes
       for (const std::string& line : lines) out += line;
       return out;
     }
+    if (generated_tombstones &&
+        std::all_of(entries.begin(), entries.end(), [](const HistoryEntry& entry) {
+          return entry.window_state && !entry.coverage_sample && entry.count == 0 &&
+                 entry.coverage_lost;
+        })) {
+      return {};
+    }
     size_t first = 0;
     while (total > max_bytes && first < lines.size()) {
       total -= lines[first].size();
@@ -420,12 +460,20 @@ std::string serializeHistory(std::vector<HistoryEntry> entries, size_t max_bytes
       series.fixed_gap = series.fixed_gap || dropped_entry.fixed_gap;
       if (dropped_entry.window_state) {
         series.fixed_gap = true;
+        const auto record_window = [&](WindowKind kind, int64_t from_ms) {
+          WindowLoss& loss = series.windows[{static_cast<int>(kind), from_ms}];
+          extend_loss(loss.from_ms, loss.to_ms, dropped_entry.first_timestamp_ms,
+                      dropped_entry.sample.timestamp_ms);
+          if (dropped_entry.coverage_lost) {
+            extend_loss(loss.from_ms, loss.to_ms, dropped_entry.loss_from_ms,
+                        dropped_entry.loss_to_ms);
+          }
+        };
         if (dropped_entry.coverage_windows.empty()) {
-          series.windows.emplace(static_cast<int>(dropped_entry.window_kind),
-                                 dropped_entry.window_from_ms);
+          record_window(dropped_entry.window_kind, dropped_entry.window_from_ms);
         } else {
           for (const auto& window : dropped_entry.coverage_windows) {
-            series.windows.emplace(static_cast<int>(window.first), window.second);
+            record_window(window.first, window.second);
           }
         }
       } else {
@@ -455,17 +503,18 @@ std::string serializeHistory(std::vector<HistoryEntry> entries, size_t max_bytes
       entry.raw_gap_before_ms = std::max(entry.raw_gap_before_ms, series.raw_gap_before_ms);
       entry.fixed_gap = entry.fixed_gap || series.fixed_gap;
       if (!entry.window_state) continue;
-      const auto affected = [&](WindowKind kind, int64_t from_ms) {
-        return series.windows.count({static_cast<int>(kind), from_ms}) != 0;
+      const auto mark_loss = [&](WindowKind kind, int64_t from_ms) {
+        const auto loss = series.windows.find({static_cast<int>(kind), from_ms});
+        if (loss == series.windows.end()) return;
+        entry.coverage_lost = true;
+        extend_loss(entry.loss_from_ms, entry.loss_to_ms, loss->second.from_ms,
+                    loss->second.to_ms);
       };
       if (entry.coverage_windows.empty()) {
-        if (affected(entry.window_kind, entry.window_from_ms)) entry.coverage_lost = true;
+        mark_loss(entry.window_kind, entry.window_from_ms);
       } else {
         for (const auto& window : entry.coverage_windows) {
-          if (affected(window.first, window.second)) {
-            entry.coverage_lost = true;
-            break;
-          }
+          mark_loss(window.first, window.second);
         }
       }
     }
@@ -489,10 +538,17 @@ std::string serializeHistory(std::vector<HistoryEntry> entries, size_t max_bytes
       tombstone.first_timestamp_ms = tombstone.sample.timestamp_ms;
       tombstone.raw_gap_before_ms = series.raw_gap_before_ms;
       tombstone.coverage_windows.clear();
+      tombstone.loss_from_ms = -1;
+      tombstone.loss_to_ms = -1;
       for (const auto& window : series.windows) {
-        if (surviving_it != surviving.end() && surviving_it->second.count(window) != 0) continue;
-        tombstone.window_kind = static_cast<WindowKind>(window.first);
-        tombstone.window_from_ms = window.second;
+        if (surviving_it != surviving.end() &&
+            surviving_it->second.count(window.first) != 0) {
+          continue;
+        }
+        tombstone.window_kind = static_cast<WindowKind>(window.first.first);
+        tombstone.window_from_ms = window.first.second;
+        tombstone.loss_from_ms = window.second.from_ms;
+        tombstone.loss_to_ms = window.second.to_ms;
         entries.push_back(tombstone);
       }
     }
