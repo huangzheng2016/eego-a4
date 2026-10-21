@@ -33,9 +33,15 @@ std::vector<const MetricSample*> plotSeries(const Dashboard& dashboard, const Pa
   const std::vector<const MetricSample*> input = series(dashboard, panel);
   std::vector<const MetricSample*> out;
   if (input.empty() || maximum == 0) return out;
+  if (input.size() == 1 || maximum == 1) {
+    out.push_back(input.back());
+    return out;
+  }
   const size_t count = std::min(maximum, input.size());
   out.reserve(count);
-  for (size_t i = 0; i < count; ++i) out.push_back(input[i * input.size() / count]);
+  for (size_t i = 0; i < count; ++i) {
+    out.push_back(input[i * (input.size() - 1) / (count - 1)]);
+  }
   return out;
 }
 
@@ -372,7 +378,7 @@ void drawStatusGrid(PortraitCanvas& canvas, FontManager& font, const PanelSpec& 
   }
 }
 
-void drawHeatmap(PortraitCanvas& canvas, FontManager& font, const PanelSpec& panel,
+void drawHeatmap(PortraitCanvas& canvas, FontManager& font, const PanelSpec&,
                  const std::vector<const MetricSample*>& samples, const Rect& bounds) {
   if (samples.empty()) {
     emptyState(canvas, font, bounds);

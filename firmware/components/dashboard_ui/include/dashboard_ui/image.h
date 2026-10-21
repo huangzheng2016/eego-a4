@@ -23,13 +23,13 @@ class ImageProvider {
  public:
   virtual ~ImageProvider() = default;
   virtual bool load(const Asset& asset, std::string_view resolved_uri,
-                    ImageBuffer output) = 0;
+                    ImageBuffer& output) = 0;
 };
 
 class SdImageProvider final : public ImageProvider {
  public:
   bool load(const Asset& asset, std::string_view resolved_uri,
-            ImageBuffer output) override;
+            ImageBuffer& output) override;
 };
 
 bool inspectImage(const uint8_t* data, size_t size, uint32_t& width, uint32_t& height);

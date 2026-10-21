@@ -168,7 +168,7 @@ struct ImagePipeline::Impl {
   size_t bytes = 0;
 };
 
-bool SdImageProvider::load(const Asset&, std::string_view resolved_uri, ImageBuffer output) {
+bool SdImageProvider::load(const Asset&, std::string_view resolved_uri, ImageBuffer& output) {
   if (output.data == nullptr || output.capacity == 0 || !validUri(resolved_uri) ||
       resolved_uri.substr(0, 7) == "http://" || resolved_uri.substr(0, 8) == "https://") {
     return false;
