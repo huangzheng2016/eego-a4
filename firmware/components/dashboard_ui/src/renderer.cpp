@@ -140,6 +140,22 @@ uint64_t fingerprint(const Dashboard& dashboard, const PanelSpec& panel,
       if (source_matches && metric_matches) hashSample(hash, sample);
     }
   }
+  if (panel.kind == PanelKind::Card &&
+      (panel.style.variant == "dual" || panel.style.variant == "triple")) {
+    for (const std::string& id : panel.linked_panel_ids) {
+      for (const Page& page : dashboard.pages) {
+        for (const PanelSpec& linked : page.panels) {
+          if (linked.id != id) continue;
+          hashPanel(hash, linked);
+          hashInterpolated(hash, linked.title, variables);
+          for (const MetricSample& sample : dashboard.samples) {
+            if (sample.source_id == linked.source_id && sample.metric == linked.metric)
+              hashSample(hash, sample);
+          }
+        }
+      }
+    }
+  }
   if (panel.kind == PanelKind::Alert) {
     for (const Event& event : dashboard.events) {
       hash.string(event.id);
@@ -214,9 +230,11 @@ void drawPanel(PortraitCanvas& canvas, const Dashboard& dashboard, const PanelLa
       break;
     case PanelKind::Image: {
       const Rect image_clip = intersect(clip, body);
-      canvas.setClip(image_clip.x, image_clip.y, image_clip.w, image_clip.h);
-      images.draw(canvas, dashboard, panel, body, variables);
-      canvas.setClip(clip.x, clip.y, clip.w, clip.h);
+      if (!image_clip.empty()) {
+        canvas.setClip(image_clip.x, image_clip.y, image_clip.w, image_clip.h);
+        images.draw(canvas, dashboard, panel, body, variables);
+        canvas.setClip(clip.x, clip.y, clip.w, clip.h);
+      }
       break;
     }
     case PanelKind::Card:

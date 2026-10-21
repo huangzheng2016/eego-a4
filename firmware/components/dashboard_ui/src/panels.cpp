@@ -45,6 +45,54 @@ std::vector<const MetricSample*> plotSeries(const Dashboard& dashboard, const Pa
   return out;
 }
 
+const MetricSample* firstFiniteSample(const std::vector<const MetricSample*>& samples) {
+  for (const MetricSample* sample : samples) {
+    if (std::isfinite(sample->value)) return sample;
+  }
+  return nullptr;
+}
+
+void expandConstantRange(double& minimum, double& maximum) {
+  if (maximum > minimum) return;
+  const double center = minimum;
+  const double margin = std::max(1.0, std::fabs(center) * 0.000001);
+  minimum = center - margin;
+  maximum = center + margin;
+  if (std::isfinite(minimum) && std::isfinite(maximum) && maximum > minimum) return;
+  if (center > 0) {
+    minimum = center / 2;
+    maximum = center;
+  } else if (center < 0) {
+    minimum = center;
+    maximum = center / 2;
+  } else {
+    minimum = -1;
+    maximum = 1;
+  }
+}
+
+bool normalizedRatio(double value, double minimum, double maximum, double& ratio) {
+  if (!std::isfinite(value) || !std::isfinite(minimum) || !std::isfinite(maximum) ||
+      maximum <= minimum) {
+    return false;
+  }
+  const double range = maximum - minimum;
+  if (std::isfinite(range) && range > 0) {
+    ratio = (value - minimum) / range;
+  } else {
+    const double scale = std::max(std::fabs(minimum), std::fabs(maximum));
+    if (!std::isfinite(scale) || scale == 0) return false;
+    const double low = minimum / scale;
+    const double high = maximum / scale;
+    const double scaled_range = high - low;
+    if (!std::isfinite(scaled_range) || scaled_range <= 0) return false;
+    ratio = (value / scale - low) / scaled_range;
+  }
+  if (!std::isfinite(ratio)) return false;
+  ratio = std::clamp(ratio, 0.0, 1.0);
+  return true;
+}
+
 std::string formatValue(double value, std::string_view unit, uint32_t precision) {
   if (!std::isfinite(value)) return "--";
   char number[80];
@@ -130,18 +178,29 @@ void drawDefaultCard(PortraitCanvas& canvas, FontManager& font, const PanelSpec&
   const std::string value = formatValue(latest.value,
                                         panel.style.unit.empty() ? std::string_view(latest.unit) : std::string_view(panel.style.unit),
                                         panel.style.precision);
-  int16_t scale = std::min<int16_t>(6, std::max<int16_t>(1, bounds.h / 12));
-  while (scale > 1 && measureText(font, value, scale) > bounds.w) --scale;
+  const int16_t font_height = font.uiFontHeight();
+  if (font_height <= 0 || bounds.h < font_height) return;
+  bool show_delta = samples.size() > 1 && bounds.h >= font_height * 2 + 6;
   Rect value_bounds = bounds;
-  if (samples.size() > 1 && bounds.h >= 40) value_bounds.h -= font.uiFontHeight() + 6;
-  centered(canvas, font, value_bounds, value, scale, true, severity == Severity::Info ? 0 : severityFill(severity));
-  if (samples.size() > 1 && bounds.h >= 40) {
+  if (show_delta) value_bounds.h -= font_height + 6;
+  if (value_bounds.h < font_height) {
+    show_delta = false;
+    value_bounds = bounds;
+  }
+  int16_t scale = std::min<int16_t>(6, std::max<int16_t>(1, value_bounds.h / font_height));
+  while (scale > 1 &&
+         (measureText(font, value, scale) > value_bounds.w || font_height * scale > value_bounds.h)) {
+    --scale;
+  }
+  centered(canvas, font, value_bounds, value, scale, true,
+           severity == Severity::Info ? 0 : severityFill(severity));
+  if (show_delta) {
     const MetricSample& previous = *samples[samples.size() - 2];
     const double delta = latest.value - previous.value;
     const std::string delta_text = std::string(delta >= 0 ? "+" : "") +
                                    formatValue(delta, panel.style.unit.empty() ? std::string_view(latest.unit) : std::string_view(panel.style.unit),
                                                panel.style.precision);
-    drawTextFit(canvas, font, bounds.x, bounds.y + bounds.h - font.uiFontHeight(), bounds.w,
+    drawTextFit(canvas, font, bounds.x, bounds.y + bounds.h - font_height, bounds.w,
                 delta_text, 1, false, 6);
   }
 }
@@ -218,8 +277,13 @@ void drawChartSeries(PortraitCanvas& canvas, FontManager& font, const PanelSpec&
     emptyState(canvas, font, bounds);
     return;
   }
-  double minimum = panel.chart.has_y_min ? panel.chart.y_min : samples.front()->value;
-  double maximum = panel.chart.has_y_max ? panel.chart.y_max : samples.front()->value;
+  const MetricSample* first = firstFiniteSample(samples);
+  if (first == nullptr) {
+    emptyState(canvas, font, bounds);
+    return;
+  }
+  double minimum = panel.chart.has_y_min ? panel.chart.y_min : first->value;
+  double maximum = panel.chart.has_y_max ? panel.chart.y_max : first->value;
   for (const MetricSample* sample : samples) {
     if (!std::isfinite(sample->value)) continue;
     if (!panel.chart.has_y_min) minimum = std::min(minimum, sample->value);
@@ -233,13 +297,10 @@ void drawChartSeries(PortraitCanvas& canvas, FontManager& font, const PanelSpec&
     if (!panel.chart.has_y_min) minimum = std::min(0.0, minimum);
     if (!panel.chart.has_y_max) maximum = std::max(0.0, maximum);
   }
-  if (maximum <= minimum) {
-    minimum -= 1;
-    maximum += 1;
-  }
+  expandConstantRange(minimum, maximum);
   const auto y_for = [&](double value) {
-    double ratio = (value - minimum) / (maximum - minimum);
-    ratio = std::clamp(ratio, 0.0, 1.0);
+    double ratio = 0.5;
+    if (!normalizedRatio(value, minimum, maximum, ratio)) ratio = 0.5;
     if (panel.style.invert) ratio = 1.0 - ratio;
     return static_cast<int16_t>(plot.y + plot.h - 1 - ratio * (plot.h - 1));
   };
@@ -385,21 +446,27 @@ void drawHeatmap(PortraitCanvas& canvas, FontManager& font, const PanelSpec&,
     return;
   }
   const size_t count = std::min<size_t>(samples.size(), 64);
-  double minimum = samples.front()->value;
-  double maximum = samples.front()->value;
+  const MetricSample* first = firstFiniteSample(samples);
+  if (first == nullptr) {
+    emptyState(canvas, font, bounds);
+    return;
+  }
+  double minimum = first->value;
+  double maximum = first->value;
   for (const MetricSample* sample : samples) {
     if (!std::isfinite(sample->value)) continue;
     minimum = std::min(minimum, sample->value);
     maximum = std::max(maximum, sample->value);
   }
-  if (maximum <= minimum) maximum = minimum + 1;
+  expandConstantRange(minimum, maximum);
   const size_t columns = count <= 8 ? count : 8;
   const size_t rows = (count + columns - 1) / columns;
   const int16_t cell_w = bounds.w / columns;
   const int16_t cell_h = bounds.h / rows;
   for (size_t i = 0; i < count; ++i) {
     const MetricSample& sample = *samples[samples.size() - count + i];
-    const double ratio = std::clamp((sample.value - minimum) / (maximum - minimum), 0.0, 1.0);
+    double ratio = 0;
+    if (!normalizedRatio(sample.value, minimum, maximum, ratio)) continue;
     const uint8_t gray = static_cast<uint8_t>(15 - static_cast<int>(ratio * 15));
     const Rect cell{static_cast<int16_t>(bounds.x + (i % columns) * cell_w),
                     static_cast<int16_t>(bounds.y + (i / columns) * cell_h), cell_w, cell_h};
@@ -431,11 +498,75 @@ void drawTimeline(PortraitCanvas& canvas, FontManager& font, const PanelSpec& pa
   }
 }
 
+const PanelSpec* findDashboardPanel(const Dashboard& dashboard, std::string_view id) {
+  for (const Page& page : dashboard.pages) {
+    for (const PanelSpec& panel : page.panels) {
+      if (panel.id == id) return &panel;
+    }
+  }
+  return nullptr;
+}
+
+void drawLinkedCards(PortraitCanvas& canvas, FontManager& font, const Dashboard& dashboard,
+                     const PanelSpec& panel, const Rect& bounds,
+                     const VariableValues& variables) {
+  const size_t count = panel.style.variant == "dual" ? 2 : 3;
+  std::vector<const PanelSpec*> cards{&panel};
+  for (const std::string& id : panel.linked_panel_ids) {
+    const PanelSpec* linked = findDashboardPanel(dashboard, id);
+    if (linked == nullptr || linked->kind != PanelKind::Card) {
+      emptyState(canvas, font, bounds, "Invalid links");
+      return;
+    }
+    cards.push_back(linked);
+  }
+  if (cards.size() != count) {
+    emptyState(canvas, font, bounds, "Invalid links");
+    return;
+  }
+
+  const size_t columns = bounds.w >= static_cast<int16_t>(count * 96) ? count : 1;
+  const size_t rows = (count + columns - 1) / columns;
+  const int16_t gap = 6;
+  const int16_t cell_w = (bounds.w - static_cast<int16_t>(columns - 1) * gap) /
+                         static_cast<int16_t>(columns);
+  const int16_t cell_h = (bounds.h - static_cast<int16_t>(rows - 1) * gap) /
+                         static_cast<int16_t>(rows);
+  if (cell_w <= 0 || cell_h <= 0) return;
+  for (size_t i = 0; i < count; ++i) {
+    const PanelSpec& card = *cards[i];
+    Rect cell{bounds.x, bounds.y, cell_w, cell_h};
+    cell.x = static_cast<int16_t>(bounds.x + (i % columns) * (cell_w + gap));
+    cell.y = static_cast<int16_t>(bounds.y + (i / columns) * (cell_h + gap));
+    canvas.drawRect(cell.x, cell.y, cell.w, cell.h, 0);
+    const int16_t label_height = font.uiFontHeight() + 4;
+    std::string label = card.title.empty() ? card.metric : card.title;
+    std::string interpolated;
+    std::string error;
+    if (!card.title.empty() && interpolateVariables(card.title, variables, interpolated, error))
+      label = interpolated;
+    drawTextFit(canvas, font, cell.x + 3, cell.y + 2, cell.w - 6, label, 1, false, 6);
+    Rect value = inset(cell, 3);
+    value.y += label_height;
+    value.h -= label_height;
+    const std::vector<const MetricSample*> samples = series(dashboard, card);
+    if (samples.empty()) {
+      emptyState(canvas, font, value);
+    } else {
+      drawDefaultCard(canvas, font, card, samples, value);
+    }
+  }
+}
+
 }  // namespace
 
 void drawCardPanel(PortraitCanvas& canvas, FontManager& font, const Dashboard& dashboard,
                    const PanelSpec& panel, const Rect& bounds,
                    const VariableValues& variables) {
+  if (panel.style.variant == "dual" || panel.style.variant == "triple") {
+    drawLinkedCards(canvas, font, dashboard, panel, bounds, variables);
+    return;
+  }
   const std::vector<const MetricSample*> samples = series(dashboard, panel);
   if (samples.empty()) {
     drawStaticText(canvas, font, panel, bounds, variables);
