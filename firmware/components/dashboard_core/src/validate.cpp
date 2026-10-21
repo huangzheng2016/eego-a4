@@ -26,6 +26,21 @@ bool validId(std::string_view id) {
   return true;
 }
 
+bool validVariant(PanelKind kind, std::string_view variant) {
+  if (variant == "default") return true;
+  switch (kind) {
+    case PanelKind::Text:
+      return variant == "single" || variant == "multiline" || variant == "key_value" ||
+             variant == "description" || variant == "log_tail" || variant == "markdown";
+    case PanelKind::Card:
+      return variant == "delta" || variant == "progress" || variant == "status";
+    case PanelKind::Table:
+      return variant == "status_grid" || variant == "heatmap" || variant == "timeline";
+    default:
+      return false;
+  }
+}
+
 bool validVariableName(std::string_view name) {
   if (name.empty() || name.size() > kMaxIdCodePoints ||
       !((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z') ||
@@ -433,6 +448,9 @@ class Validator {
       }
       check(panel.style.precision <= 8 && panel.style.line_width >= 1 && panel.style.line_width <= 8,
             child(path, "style"), "invalid style values");
+      check(jsonCodePointCount(panel.style.variant) <= 32 &&
+                validVariant(panel.kind, panel.style.variant),
+            child(path, "style.variant"), "unsupported variant for panel kind");
       const bool text_kind = panel.kind == PanelKind::Text || panel.kind == PanelKind::Card ||
                              panel.kind == PanelKind::Alert;
       if (!text_kind)

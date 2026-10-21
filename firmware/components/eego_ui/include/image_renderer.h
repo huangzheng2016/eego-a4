@@ -65,7 +65,7 @@ private:
 
     // 灰度缓冲（0-255）双线性缩放到目标区域并上屏（0-15 + Bayer 抖动）。
     // 等比适配进 (maxW × maxH)，居中。
-    void drawGrayToCanvas(PortraitCanvas& canvas, const uint8_t* gray,
+    bool drawGrayToCanvas(PortraitCanvas& canvas, const uint8_t* gray,
                           int srcW, int srcH, int16_t x, int16_t y,
                           int16_t maxW, int16_t maxH);
 };

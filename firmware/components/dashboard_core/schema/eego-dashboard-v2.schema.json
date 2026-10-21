@@ -90,6 +90,7 @@
       "additionalProperties": false,
       "properties": {
         "unit": {"type": "string", "maxLength": 32, "default": ""},
+        "variant": {"enum": ["default", "single", "multiline", "key_value", "description", "log_tail", "markdown", "delta", "progress", "status", "status_grid", "heatmap", "timeline"], "default": "default", "description": "Optional rendering variant. Text: single/multiline/key_value/description/log_tail/markdown; Card: default/delta/progress/status; Table: default/status_grid/heatmap/timeline. Other kinds accept default only."},
         "precision": {"type": "integer", "minimum": 0, "maximum": 8, "default": 2},
         "line_width": {"type": "integer", "minimum": 1, "maximum": 8, "default": 1},
         "show_legend": {"type": "boolean", "default": true},

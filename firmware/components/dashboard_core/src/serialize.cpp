@@ -37,6 +37,7 @@ JsonValue timeWindowToJson(const TimeWindow& window) {
 JsonValue styleToJson(const Style& style) {
   JsonValue::Object object;
   object.emplace_back("unit", string(style.unit));
+  object.emplace_back("variant", string(style.variant));
   object.emplace_back("precision", integer(style.precision));
   object.emplace_back("line_width", integer(style.line_width));
   object.emplace_back("show_legend", boolean(style.show_legend));
