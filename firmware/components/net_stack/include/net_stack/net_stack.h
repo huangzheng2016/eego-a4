@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// net_stack 聚合头 —— FW3 网络栈与来源适配器（M16）。
+// net_stack 聚合头 —— FW3 网络栈与来源适配器（M16）+ FW3B 告警动作与快照（M20）。
 //
 // 组件边界（M12 §2）：main → {admin, alert_core, diag} → net_stack →
 // {eego_ui, eego_hal} → board；net_stack 不得 include 任何 UI 头。
-// 本组件只依赖 alert_core（纯 C++ 领域核）与 ESP-IDF 系统组件。
+// 本组件只依赖 alert_core（纯 C++ 领域核）、eego_hal（SD 挂载守卫）与
+// ESP-IDF 系统组件。
 //
 // 快速上手（app 组合根，M18 接线）：
 //   NetStack::instance().start(cfg, &store, &registry, time_fn);
@@ -14,12 +15,18 @@
 // httpd 推送摄入（admin，M17）：
 //   #include "net_stack/http_push_bridge.h"
 //   auto r = eego::net::httpPushIngest(body, client_ip);
+// 告警动作与快照（M20；admin 注入点，未接线 503 不崩溃）：
+//   cfg.snapshot_publisher = &pub;                  // start 前注入
+//   admin.setAlertSnapshotSource(net.alertSnapshotSource());
+//   admin.setAlertActionSink(net.alertActionSink());
 
+#include "net_stack/alert_actions.h"
 #include "net_stack/credentials.h"
 #include "net_stack/http_poll_adapter.h"
 #include "net_stack/http_pool.h"
 #include "net_stack/http_push_bridge.h"
 #include "net_stack/net_task.h"
+#include "net_stack/sd_alert_file_io.h"
 #include "net_stack/source_adapter.h"
 #include "net_stack/source_cache.h"
 #include "net_stack/source_config.h"

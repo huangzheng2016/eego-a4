@@ -14,6 +14,7 @@
 #include "mbedtls/platform.h"
 
 #include "net_stack/http_poll_adapter.h"
+#include "store_digest.h"
 
 namespace eego::net {
 
@@ -69,11 +70,16 @@ struct NetStack::Impl {
     std::vector<alert_core::IngestOutcome> outcomes;  // net_task 回填
     PendingOp op;
   };
+  struct AlertActionPayload {
+    AlertAction action;
+    AlertActionResult result;  // net_task 回填
+    PendingOp op;
+  };
   struct StatusPayload {
     NetStatusSnapshot snapshot;  // net_task 写入；take 成功后调用方 move 出
     PendingOp op;
   };
-  struct SemPayload {  // WaitIdle / Stop
+  struct SemPayload {  // WaitIdle / Stop / RepublishSnapshot
     PendingOp op;
   };
 
@@ -95,9 +101,40 @@ struct NetStack::Impl {
   uint32_t wifi_backoff_ms_ = kWifiBackoffStartMs;
   WifiState last_wifi_state_ = WifiState::Disconnected;
 
+  // 快照发布状态（net_task 上下文私有）：摘要变了才重建发布
+  uint64_t last_digest_ = 0;
+  bool have_digest_ = false;
+  int64_t next_expire_ms_ = 0;
+
   static int64_t nowMs() { return esp_timer_get_time() / 1000; }
   uint64_t nowUnix() const {
     return self->time_fn_ ? self->time_fn_() : (uint64_t)time(nullptr);
+  }
+
+  // 任何 store 变更点（摄入/告警动作/适配器 runCycle/过期）之后调用：
+  // 摘要变了才 buildSnapshot + publish；force = 跳过比较（启动首帧/加载后）。
+  void publishSnapshotIfChanged(bool force) {
+    if (!self->store_ || !self->cfg_.snapshot_publisher) return;
+    const uint64_t d = internal::alertStoreDigest(*self->store_);
+    if (!force && have_digest_ && d == last_digest_) return;
+    auto* pub = self->cfg_.snapshot_publisher;
+    pub->publish(alert_core::buildSnapshot(self->store_->allRecords(), nowUnix(),
+                                           pub->publishedSeq() + 1));
+    last_digest_ = d;
+    have_digest_ = true;
+  }
+
+  // expire 巡检（TTL 到期 → Expired）：按 alert_expire_interval_ms 节拍；
+  // 有记录过期即发布快照（digest 判定会确认变化）。
+  void expireDue(int64_t now) {
+    if (!self->store_ || self->cfg_.alert_expire_interval_ms == 0) return;
+    if (now < next_expire_ms_) return;
+    next_expire_ms_ = now + self->cfg_.alert_expire_interval_ms;
+    const size_t n = self->store_->expire(nowUnix());
+    if (n > 0) {
+      ESP_LOGI(TAG, "alert expire: %u record(s) expired", (unsigned)n);
+      publishSnapshotIfChanged(false);
+    }
   }
 
   SourceRuntime* findSource(const std::string& id) {
@@ -203,6 +240,70 @@ struct NetStack::Impl {
           }
         }
         p->op.ok = true;
+        publishSnapshotIfChanged(false);  // 摄入可能新建/更新记录（digest 判定）
+        p->op.give();
+        break;
+      }
+      case CmdType::AlertActionCmd: {
+        auto p = std::static_pointer_cast<AlertActionPayload>(cmd->payload);
+        AlertActionResult& r = p->result;
+        if (!self->store_) {
+          r.code = AlertActionResult::Code::NoStore;
+          r.detail = "alert store not attached";
+        } else {
+          const uint64_t now = nowUnix();
+          const std::string& id = p->action.id;
+          switch (p->action.type) {
+            case AlertActionType::Ack:
+              if (id.empty()) {
+                r.code = AlertActionResult::Code::InvalidAction;
+                r.detail = "ack requires alert id";
+              } else if (self->store_->ack(id, p->action.ack_by, now)) {
+                r.code = AlertActionResult::Code::Ok;
+                r.affected = 1;
+                publishSnapshotIfChanged(false);
+              } else if (self->store_->find(id)) {
+                r.code = AlertActionResult::Code::InvalidState;
+                r.detail = "alert not active (already acked/cleared/expired)";
+              } else {
+                r.code = AlertActionResult::Code::NotFound;
+                r.detail = "alert id not found";
+              }
+              break;
+            case AlertActionType::AckAll: {
+              // 幂等：0 条可确认也是成功（affected=0），不视为错误
+              const size_t n = self->store_->ackAll(p->action.ack_by, now);
+              r.code = AlertActionResult::Code::Ok;
+              r.affected = n;
+              if (n > 0) publishSnapshotIfChanged(false);
+              break;
+            }
+            case AlertActionType::Clear:
+              if (id.empty()) {
+                r.code = AlertActionResult::Code::InvalidAction;
+                r.detail = "clear requires alert id";
+              } else if (self->store_->clear(id, now)) {
+                r.code = AlertActionResult::Code::Ok;
+                r.affected = 1;
+                publishSnapshotIfChanged(false);
+              } else if (self->store_->find(id)) {
+                r.code = AlertActionResult::Code::InvalidState;
+                r.detail = "alert already cleared/expired";
+              } else {
+                r.code = AlertActionResult::Code::NotFound;
+                r.detail = "alert id not found";
+              }
+              break;
+          }
+        }
+        p->op.ok = (r.code == AlertActionResult::Code::Ok);
+        p->op.give();
+        break;
+      }
+      case CmdType::RepublishSnapshot: {
+        auto p = std::static_pointer_cast<SemPayload>(cmd->payload);
+        publishSnapshotIfChanged(true);  // 强制重建（store 可能在 net_task 外被加载）
+        p->op.ok = true;
         p->op.give();
         break;
       }
@@ -303,6 +404,8 @@ struct NetStack::Impl {
         s->last_ok = ok;
         self->emit({NetEventType::SourceHealthChanged, (int)self->wifi_.state(), s->cfg.id});
       }
+      // 适配器本轮可能已摄入/自动清除（runCycle 内部直写 store，net_task 上下文）
+      publishSnapshotIfChanged(false);
     }
   }
 
@@ -319,6 +422,7 @@ struct NetStack::Impl {
   static void taskTrampoline(void* arg) { static_cast<Impl*>(arg)->loop(); }
 
   void loop() {
+    publishSnapshotIfChanged(true);  // 首帧快照（覆盖 start 前的 loadFrom 加载）
     self->emit({NetEventType::Started, 0, {}});
     while (self->running_) {
       int64_t now = nowMs();
@@ -333,6 +437,7 @@ struct NetStack::Impl {
       now = nowMs();
       pumpWifi(now);
       pumpSources(now);
+      expireDue(now);
       if (self->pool_) self->pool_->housekeeping(now);
       // 阻塞等命令/到期（上限 1s 保 housekeeping 与事件及时性）
       TickType_t wait = pdMS_TO_TICKS((uint32_t)nextWakeMs(now));
@@ -394,6 +499,9 @@ esp_err_t NetStack::start(const NetStackConfig& cfg, alert_core::AlertStore* sto
   impl_->next_wifi_retry_ms_ = 0;
   impl_->wifi_backoff_ms_ = kWifiBackoffStartMs;
   impl_->last_wifi_state_ = WifiState::Disconnected;
+  impl_->last_digest_ = 0;
+  impl_->have_digest_ = false;
+  impl_->next_expire_ms_ = 0;
   if (!impl_->queue) impl_->queue = xQueueCreate(16, sizeof(Impl::Command*));
   if (!impl_->queue) return ESP_ERR_NO_MEM;
 
@@ -494,6 +602,53 @@ bool NetStack::queryStatus(NetStatusSnapshot& out, uint32_t wait_ms) {
     return false;
   out = std::move(p->snapshot);
   return p->op.ok;
+}
+
+AlertActionResult NetStack::alertAction(const AlertAction& action, uint32_t wait_ms) {
+  AlertActionResult r;
+  auto p = std::make_shared<Impl::AlertActionPayload>();
+  p->action = action;
+  if (!sendCmdAndWait(CmdType::AlertActionCmd, p, wait_ms) ||
+      xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE) {
+    r.code = AlertActionResult::Code::Unavailable;
+    r.detail = "net_task busy/unavailable";
+    return r;
+  }
+  return p->result;  // take 成功后拷贝出负载（shared_ptr 保活，无悬垂）
+}
+
+AlertSnapshotSource NetStack::alertSnapshotSource() {
+  alert_core::SnapshotPublisher* pub = cfg_.snapshot_publisher;
+  // publisher 与 store 同生命周期契约（必须 outlive NetStack）；未接线时返回
+  // nullptr 快照而非崩溃 —— admin 端点据此渲染空表/503（M17）。
+  return [pub]() -> std::shared_ptr<const alert_core::AlertSnapshot> {
+    if (!pub) return nullptr;
+    return pub->acquire();
+  };
+}
+
+AlertActionSink NetStack::alertActionSink() {
+  return [this](const AlertAction& action) { return alertAction(action); };
+}
+
+bool NetStack::republishSnapshot(uint32_t wait_ms) {
+  auto p = std::make_shared<Impl::SemPayload>();
+  if (!sendCmdAndWait(CmdType::RepublishSnapshot, p, wait_ms) ||
+      xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
+    return false;
+  return p->op.ok;
+}
+
+const char* toString(AlertActionResult::Code code) {
+  switch (code) {
+    case AlertActionResult::Code::Ok: return "ok";
+    case AlertActionResult::Code::NotFound: return "not_found";
+    case AlertActionResult::Code::InvalidState: return "invalid_state";
+    case AlertActionResult::Code::InvalidAction: return "invalid_action";
+    case AlertActionResult::Code::Unavailable: return "unavailable";
+    case AlertActionResult::Code::NoStore: return "no_store";
+  }
+  return "unknown";
 }
 
 bool NetStack::httpSubmit(const NetRequest& req, NetResponse* resp, uint32_t wait_ms) {
