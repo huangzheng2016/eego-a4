@@ -10,7 +10,9 @@
 // alerts.db format: one canonical AlertRecord JSON per line, append-only
 // upsert — loading applies lines in order and the last line for an id wins,
 // so a torn tail loses at most the newest mutations and never corrupts older
-// records. Compaction rewrites the live set: write tmp → read back → verify
+// records. Ring evictions append `{"tombstone":"<id>"}` lines; tombstoned ids
+// never re-enter the live set, so the retention ring survives reboot.
+// Compaction rewrites the live set: write tmp → read back → verify
 // (line count and id sequence) → rename over the original; any failure
 // removes the tmp file and leaves the original intact (rollback).
 
@@ -50,13 +52,24 @@ class AlertDb {
   // Appends one full-record line (upsert-on-load semantics).
   bool appendRecord(const AlertRecord& r);
 
-  // Loads the live record set: lines applied in order, last per id wins;
-  // malformed lines are skipped and counted in `malformed_out`.
+  // Appends a tombstone line for an evicted id so ring eviction survives
+  // reboot: on load, tombstoned ids never re-enter the live set, whether the
+  // tombstone lands before or after the record's own lines.
+  bool appendTombstone(const std::string& id);
+
+  // Loads the live record set: lines applied in order, last per id wins,
+  // tombstones remove ids; malformed lines are skipped and counted in
+  // `malformed_out`.
   size_t load(std::vector<AlertRecord>& out, size_t& malformed_out);
 
   // Rewrites the db with exactly `records` via tmp + read-back verify +
   // rename. On failure `err` explains and the original file is untouched.
   bool compact(const std::vector<AlertRecord>& records, std::string& err);
+
+  // Failed write/rename operations since construction — the ingest owner
+  // polls this (or IngestOutcome::persist_failed) to react to SD trouble
+  // instead of silently diverging from memory.
+  size_t ioFailures() const { return io_failures_; }
 
   // Appended-but-superseded lines since construction/load; the ingest owner
   // uses this to decide when to compact (e.g. dead ratio > 50%).
@@ -72,6 +85,7 @@ class AlertDb {
   std::string path_;
   size_t dead_lines_ = 0;
   size_t total_lines_ = 0;
+  size_t io_failures_ = 0;
   std::unordered_set<std::string> live_ids_;  // ids with a live (latest) line
 };
 

@@ -1,5 +1,6 @@
 #include "alert_core/persistence.h"
 
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -30,9 +31,26 @@ AlertDb::AlertDb(IAlertFileIo& io, std::string path) : io_(io), path_(std::move(
 
 bool AlertDb::appendRecord(const AlertRecord& r) {
   const std::string line = recordToJsonText(r);
-  if (!io_.append(path_, line + "\n")) return false;
+  if (!io_.append(path_, line + "\n")) {
+    ++io_failures_;
+    return false;
+  }
   ++total_lines_;
   if (!live_ids_.insert(r.id).second) ++dead_lines_;
+  return true;
+}
+
+bool AlertDb::appendTombstone(const std::string& id) {
+  JsonValue::Object obj;
+  obj.emplace_back("tombstone", JsonValue::makeString(id));
+  const std::string line = JsonValue::makeObject(std::move(obj)).toString();
+  if (!io_.append(path_, line + "\n")) {
+    ++io_failures_;
+    return false;
+  }
+  ++total_lines_;
+  ++dead_lines_;  // tombstones are dead on arrival by nature
+  live_ids_.erase(id);
   return true;
 }
 
@@ -47,6 +65,7 @@ size_t AlertDb::load(std::vector<AlertRecord>& out, size_t& malformed_out) {
 
   size_t pos = 0;
   std::unordered_map<std::string, size_t> index_by_id;
+  std::unordered_set<std::string> tombstoned;
   while (pos <= text.size()) {
     size_t eol = text.find('\n', pos);
     if (eol == std::string::npos) eol = text.size();
@@ -59,11 +78,26 @@ size_t AlertDb::load(std::vector<AlertRecord>& out, size_t& malformed_out) {
     ++total_lines_;
     JsonValue v;
     JsonParseError perr;
-    AlertRecord r;
-    if (!jsonParse(line, v, perr) || !recordFromJson(v, r)) {
+    if (!jsonParse(line, v, perr)) {
       ++malformed_out;
       if (eol == text.size()) break;
       continue;
+    }
+    if (const JsonValue* t = v.find("tombstone");
+        t != nullptr && t->type() == JsonValue::Type::String && !t->stringValue().empty()) {
+      tombstoned.insert(t->stringValue());
+      if (eol == text.size()) break;
+      continue;
+    }
+    AlertRecord r;
+    if (!recordFromJson(v, r)) {
+      ++malformed_out;
+      if (eol == text.size()) break;
+      continue;
+    }
+    if (tombstoned.count(r.id) != 0) {
+      if (eol == text.size()) break;
+      continue;  // record line after its tombstone: stays dead
     }
     auto it = index_by_id.find(r.id);
     if (it == index_by_id.end()) {
@@ -73,6 +107,14 @@ size_t AlertDb::load(std::vector<AlertRecord>& out, size_t& malformed_out) {
       out[it->second] = std::move(r);  // last line for an id wins
     }
     if (eol == text.size()) break;
+  }
+  if (!tombstoned.empty()) {
+    // Records loaded before their tombstone line are removed here.
+    out.erase(std::remove_if(out.begin(), out.end(),
+                             [&](const AlertRecord& r) {
+                               return tombstoned.count(r.id) != 0;
+                             }),
+              out.end());
   }
   live_ids_.clear();
   for (const AlertRecord& r : out) live_ids_.insert(r.id);
@@ -88,6 +130,7 @@ bool AlertDb::compact(const std::vector<AlertRecord>& records, std::string& err)
   }
   const std::string tmp = path_ + ".tmp";
   if (!io_.writeAll(tmp, data)) {
+    ++io_failures_;
     io_.remove(tmp);
     err = "write failed: " + tmp;
     return false;
@@ -96,11 +139,13 @@ bool AlertDb::compact(const std::vector<AlertRecord>& records, std::string& err)
   // same id sequence before it is allowed to replace the original.
   std::string verify;
   if (!io_.readAll(tmp, verify)) {
+    ++io_failures_;
     io_.remove(tmp);
     err = "read-back failed: " + tmp;
     return false;
   }
   if (verify != data) {
+    ++io_failures_;
     io_.remove(tmp);
     err = "read-back mismatch: " + tmp;
     return false;
@@ -123,11 +168,13 @@ bool AlertDb::compact(const std::vector<AlertRecord>& records, std::string& err)
     pos = eol + 1;
   }
   if (mismatch || lines != records.size()) {
+    ++io_failures_;
     io_.remove(tmp);
     err = "read-back verify failed: " + tmp;
     return false;
   }
   if (!io_.rename(tmp, path_)) {
+    ++io_failures_;
     io_.remove(tmp);  // rollback: original stays untouched
     err = "rename failed: " + tmp + " -> " + path_;
     return false;

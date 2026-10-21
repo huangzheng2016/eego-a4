@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 #include "alert_core/sha1.h"
 #include "alert_core/time_util.h"
@@ -126,9 +127,11 @@ bool parseEventObject(const JsonValue& obj, AlertEvent& out, ValidationError& er
     if (ttl->type() != JsonValue::Type::Int && ttl->type() != JsonValue::Type::Double) {
       return fail(err, prefix + "ttl_s", "ttl_s must be a number of seconds");
     }
-    double v = ttl->doubleValue();
-    if (v != static_cast<double>(static_cast<int64_t>(v)) || v < 1 ||
-        v > static_cast<double>(kMaxTtlSeconds)) {
+    // Range/integrality checks run before any cast — double→int64 is UB for
+    // non-finite or out-of-range values.
+    const double v = ttl->doubleValue();
+    if (!std::isfinite(v) || v < 1.0 || v > static_cast<double>(kMaxTtlSeconds) ||
+        v != std::trunc(v)) {
       return fail(err, prefix + "ttl_s",
                   "ttl_s must be an integer in 1.." + std::to_string(kMaxTtlSeconds));
     }
@@ -400,8 +403,10 @@ bool recordFromJson(const JsonValue& obj, AlertRecord& out) {
   r.first_seen = jsonTimeOrZero(obj.find("first_seen"));
   r.last_seen = jsonTimeOrZero(obj.find("last_seen"));
   if (const JsonValue* v = obj.find("occurrences")) {
-    int64_t n = v->intValue(1);
-    r.occurrences = static_cast<uint32_t>(n < 1 ? 1 : n);
+    int64_t n = v->intValue(1);  // guarded: non-finite/huge doubles fall back to 1
+    if (n < 1) n = 1;
+    if (n > 1000000000LL) n = 1000000000LL;  // clamp corrupt values into uint32
+    r.occurrences = static_cast<uint32_t>(n);
   }
   r.ack_at = jsonTimeOrZero(obj.find("ack_at"));
   if (const JsonValue* v = obj.find("ack_by"))

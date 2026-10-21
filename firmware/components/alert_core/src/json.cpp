@@ -30,7 +30,17 @@ void writeJsonValue(std::string& out, const JsonValue& v) {
       break;
     case JsonValue::Type::Double: {
       double d = v.doubleValue();
-      if (d == static_cast<double>(static_cast<int64_t>(d)) && std::fabs(d) < 1e15) {
+      if (!std::isfinite(d)) {
+        // Defense in depth: the parser rejects non-finite numbers, so this
+        // can only come from a programmatic makeDouble(inf/nan). Emit null
+        // rather than invalid JSON ("inf" does not re-parse).
+        out += "null";
+        break;
+      }
+      // The int64 cast is only defined inside [-2^63, 2^63); range-check
+      // before casting (short-circuit order matters).
+      if (d >= -9223372036854775808.0 && d < 9223372036854775808.0 &&
+          d == static_cast<int64_t>(d)) {
         out += std::to_string(static_cast<int64_t>(d));
       } else {
         char buf[40];
@@ -329,7 +339,11 @@ class Parser {
       }
       // Fall through to double on overflow.
     }
-    out = JsonValue::makeDouble(std::strtod(token.c_str(), nullptr));
+    const double d = std::strtod(token.c_str(), nullptr);
+    // RFC 8259 allows huge exponents syntactically, but inf/NaN are not
+    // representable in JSON and would poison every downstream conversion.
+    if (!std::isfinite(d)) return fail("number out of range");
+    out = JsonValue::makeDouble(d);
     return true;
   }
 
@@ -392,7 +406,14 @@ bool JsonValue::boolValue(bool fallback) const {
 
 int64_t JsonValue::intValue(int64_t fallback) const {
   if (type_ == Type::Int) return int_;
-  if (type_ == Type::Double) return static_cast<int64_t>(double_);
+  if (type_ == Type::Double) {
+    // double→int64 is UB for NaN/inf and out-of-range values; fall back.
+    if (!std::isfinite(double_) || double_ >= 9223372036854775808.0 ||
+        double_ < -9223372036854775808.0) {
+      return fallback;
+    }
+    return static_cast<int64_t>(double_);
+  }
   if (type_ == Type::Bool) return bool_ ? 1 : 0;
   return fallback;
 }
@@ -440,7 +461,9 @@ std::string JsonValue::scalarText() const {
       return std::to_string(int_);
     case Type::Double: {
       double d = double_;
-      if (d == static_cast<double>(static_cast<int64_t>(d)) && std::fabs(d) < 1e15) {
+      if (!std::isfinite(d)) return "null";  // see writeJsonValue
+      if (d >= -9223372036854775808.0 && d < 9223372036854775808.0 &&
+          d == static_cast<int64_t>(d)) {
         return std::to_string(static_cast<int64_t>(d));
       }
       char buf[40];

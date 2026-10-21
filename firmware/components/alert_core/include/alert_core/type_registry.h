@@ -33,8 +33,16 @@ struct AlertTypeDescriptor {
   uint32_t ttl_default_s = 0;              // 0 → derive from severity band
   // Group: system|network|service|power_env|security|home|self|generic.
   std::string group;
+  // Type-level mute from config overrides. Consumed inside alert_core:
+  // AlertStore treats it as a permanent mute rule for the type (records are
+  // stored/updated as usual but flagged muted). Surfaced here so API/UI
+  // consumers of resolve() see the effective value.
+  bool muted_default = false;
 };
 
+// Config overrides for one type id (config.json "alert_type_overrides{}").
+// All members optional; severity/ttl/names apply via TypeRegistry::resolve();
+// muted is wired into AlertStore's mute evaluation (see descriptor above).
 struct AlertTypeOverride {
   bool has_severity = false;
   Severity severity = Severity::Info;
@@ -62,6 +70,9 @@ class TypeRegistry {
   const AlertTypeOverride* findOverride(const std::string& type_id) const;
   bool isKnown(const std::string& type_id) const;
   const AlertTypeDescriptor* findBuiltin(const std::string& type_id) const;
+  // True when the override for `type_id` sets muted:true — AlertStore applies
+  // it as a type-level mute (see AlertTypeDescriptor::muted_default).
+  bool isTypeMuted(const std::string& type_id) const;
 
   // Effective descriptor for an id: built-in merged with override when known;
   // otherwise generic.any with the queried id substituted (rendering falls

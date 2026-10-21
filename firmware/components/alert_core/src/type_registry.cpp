@@ -1,6 +1,7 @@
 #include "alert_core/type_registry.h"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace alert_core {
@@ -213,8 +214,14 @@ AlertTypeDescriptor TypeRegistry::resolve(const std::string& type_id) const {
     if (o->has_ttl) d.ttl_default_s = o->ttl_s;
     if (o->has_name_zh) d.name_zh = o->name_zh;
     if (o->has_name_en) d.name_en = o->name_en;
+    if (o->has_muted) d.muted_default = o->muted;
   }
   return d;
+}
+
+bool TypeRegistry::isTypeMuted(const std::string& type_id) const {
+  const AlertTypeOverride* o = findOverride(type_id);
+  return o != nullptr && o->has_muted && o->muted;
 }
 
 void TypeRegistry::setOverride(const std::string& type_id, const AlertTypeOverride& o) {
@@ -260,7 +267,8 @@ bool TypeRegistry::applyOverridesJson(const JsonValue& obj, ValidationError& err
       return false;
     }
     AlertTypeOverride o;
-    if (const JsonValue* v = kv.second.find("severity")) {
+    // Optional members: explicit null is treated the same as absent.
+    if (const JsonValue* v = kv.second.find("severity"); v != nullptr && !v->isNull()) {
       if (v->type() != JsonValue::Type::String ||
           !severityFromString(v->stringValue(), o.severity)) {
         err.field = id + ".severity";
@@ -269,18 +277,21 @@ bool TypeRegistry::applyOverridesJson(const JsonValue& obj, ValidationError& err
       }
       o.has_severity = true;
     }
-    if (const JsonValue* v = kv.second.find("ttl_s")) {
-      int64_t t = v->intValue(-1);
-      if ((v->type() != JsonValue::Type::Int && v->type() != JsonValue::Type::Double) || t < 1 ||
-          t > static_cast<int64_t>(kMaxTtlSeconds)) {
+    if (const JsonValue* v = kv.second.find("ttl_s"); v != nullptr && !v->isNull()) {
+      // Same strictness as the event path: integer-valued only and in range;
+      // checks run before any cast (double→int64 is UB for inf/out-of-range).
+      const double d = v->doubleValue(-1.0);
+      if ((v->type() != JsonValue::Type::Int && v->type() != JsonValue::Type::Double) ||
+          !std::isfinite(d) || d < 1.0 || d > static_cast<double>(kMaxTtlSeconds) ||
+          d != std::trunc(d)) {
         err.field = id + ".ttl_s";
         err.message = "ttl_s must be an integer in 1.." + std::to_string(kMaxTtlSeconds);
         return false;
       }
       o.has_ttl = true;
-      o.ttl_s = static_cast<uint32_t>(t);
+      o.ttl_s = static_cast<uint32_t>(d);
     }
-    if (const JsonValue* v = kv.second.find("name_zh")) {
+    if (const JsonValue* v = kv.second.find("name_zh"); v != nullptr && !v->isNull()) {
       if (v->type() != JsonValue::Type::String || v->stringValue().empty() ||
           v->stringValue().size() > 64) {
         err.field = id + ".name_zh";
@@ -290,7 +301,7 @@ bool TypeRegistry::applyOverridesJson(const JsonValue& obj, ValidationError& err
       o.has_name_zh = true;
       o.name_zh = v->stringValue();
     }
-    if (const JsonValue* v = kv.second.find("name_en")) {
+    if (const JsonValue* v = kv.second.find("name_en"); v != nullptr && !v->isNull()) {
       if (v->type() != JsonValue::Type::String || v->stringValue().empty() ||
           v->stringValue().size() > 64) {
         err.field = id + ".name_en";
@@ -300,7 +311,7 @@ bool TypeRegistry::applyOverridesJson(const JsonValue& obj, ValidationError& err
       o.has_name_en = true;
       o.name_en = v->stringValue();
     }
-    if (const JsonValue* v = kv.second.find("muted")) {
+    if (const JsonValue* v = kv.second.find("muted"); v != nullptr && !v->isNull()) {
       if (v->type() != JsonValue::Type::Bool) {
         err.field = id + ".muted";
         err.message = "muted must be a boolean";

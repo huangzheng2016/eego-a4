@@ -48,8 +48,11 @@ struct IngestOutcome {
     Rejected,  // store_full — capacity reached with only Active records (503)
   };
   Status status = Status::Rejected;
-  std::string id;  // record id for Created/Updated
-  bool store_full = false;
+  std::string id;            // record id for Created/Updated
+  bool store_full = false;   // Rejected because at capacity with all-Active
+  bool persist_failed = false;  // mutation applied in memory but the alerts.db
+                                // append failed — owner should log/5xx and can
+                                // watch AlertStore::dbIoFailures()
 };
 
 struct MuteRule {
@@ -67,9 +70,9 @@ struct StoreStats {
   size_t total = 0;
   size_t active = 0;    // Active, non-muted
   size_t acked = 0;     // Acked, non-muted
-  size_t cleared = 0;
-  size_t expired = 0;
-  size_t muted = 0;
+  size_t cleared = 0;   // Cleared, non-muted
+  size_t expired = 0;   // Expired, non-muted
+  size_t muted = 0;     // all muted records regardless of state
   size_t critical = 0;  // Active+Acked by severity, non-muted
   size_t warning = 0;
   size_t info = 0;
@@ -130,9 +133,12 @@ class AlertStore {
   std::vector<AlertRecord> allRecords() const;
 
   // Persistence wiring (see persistence.h). With a db attached, every mutation
-  // appends a full-record JSONL line; loadFrom replaces the whole store.
+  // appends a full-record JSONL line; loadFrom replaces the whole store and
+  // enforces the retention cap. dbIoFailures() surfaces alerts.db write
+  // trouble so the owner can log/react instead of silently diverging.
   void attachDb(AlertDb* db) { db_ = db; }
   size_t loadFrom(AlertDb& db);
+  size_t dbIoFailures() const;
   // Rewrites the whole db from memory (atomic tmp + read-back verify + rename).
   bool compactDb(std::string& err);
 
@@ -153,8 +159,8 @@ class AlertStore {
   bool evictOne();
   std::string newId(uint64_t now_seconds);
   bool evaluateMuted(const AlertRecord& r, uint64_t now) const;
-  void touch(Entry& e, uint64_t now);  // bump seq, mark dirty, append db line
-  void markDirty(const AlertRecord& r);
+  bool touch(Entry& e, uint64_t now);  // bump seq, append db line; false on IO failure
+  bool markDirty(const AlertRecord& r);
 
   TypeRegistry& registry_;
   EntropyFn entropy_;

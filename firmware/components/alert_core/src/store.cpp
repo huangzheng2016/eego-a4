@@ -56,16 +56,19 @@ AlertStore::Entry* AlertStore::findEntryByFingerprint(const std::string& fingerp
   return nullptr;
 }
 
-void AlertStore::markDirty(const AlertRecord& r) {
-  if (db_ != nullptr) db_->appendRecord(r);
+bool AlertStore::markDirty(const AlertRecord& r) {
+  if (db_ == nullptr) return true;
+  return db_->appendRecord(r);
 }
 
-void AlertStore::touch(Entry& e, uint64_t /*now*/) {
+bool AlertStore::touch(Entry& e, uint64_t /*now*/) {
   e.seq = ++seq_counter_;
-  markDirty(e.record);
+  return markDirty(e.record);
 }
 
 bool AlertStore::evaluateMuted(const AlertRecord& r, uint64_t now) const {
+  // Type-level mute from config overrides acts as a permanent mute rule.
+  if (registry_.isTypeMuted(r.type)) return true;
   for (const MuteRule& rule : mute_rules_) {
     if (rule.expires_at != 0 && rule.expires_at <= now) continue;
     bool match = false;
@@ -132,7 +135,7 @@ IngestOutcome AlertStore::ingest(const AlertEvent& ev, const AlertSource& source
     }
     r.expires_at = seen + effectiveTtl(ev, desc);
     r.muted = evaluateMuted(r, now);
-    touch(*e, now);
+    outcome.persist_failed = !touch(*e, now);
     outcome.status = IngestOutcome::Status::Updated;
     outcome.id = r.id;
     return outcome;
@@ -164,7 +167,7 @@ IngestOutcome AlertStore::ingest(const AlertEvent& ev, const AlertSource& source
   e.record.cleared_at = ev.cleared ? now : 0;
   e.record.muted = evaluateMuted(e.record, now);
   entries_.push_back(std::move(e));
-  touch(entries_.back(), now);
+  outcome.persist_failed = !touch(entries_.back(), now);
   outcome.status = IngestOutcome::Status::Created;
   outcome.id = entries_.back().record.id;
   return outcome;
@@ -242,9 +245,15 @@ bool AlertStore::evictOne() {
     }
   }
   if (victim == nullptr) return false;
-  victim->record = entries_.back().record;
-  victim->seq = entries_.back().seq;
+  // Persist the eviction: a tombstone line keeps the ring retention durable
+  // across reboot (load honors tombstones, so this id never resurrects).
+  const std::string evicted_id = victim->record.id;
+  if (victim != &entries_.back()) {
+    victim->record = entries_.back().record;
+    victim->seq = entries_.back().seq;
+  }
   entries_.pop_back();
+  if (db_ != nullptr) db_->appendTombstone(evicted_id);
   return true;
 }
 
@@ -294,13 +303,13 @@ StoreStats AlertStore::stats() const {
   s.total = entries_.size();
   for (const Entry& e : entries_) {
     const AlertRecord& r = e.record;
-    if (r.muted) ++s.muted;
+    if (r.muted) ++s.muted;  // muted counted once, regardless of state
     switch (r.state) {
       case AlertState::Cleared:
-        ++s.cleared;
+        if (!r.muted) ++s.cleared;
         break;
       case AlertState::Expired:
-        ++s.expired;
+        if (!r.muted) ++s.expired;
         break;
       case AlertState::Acked:
         if (!r.muted) {
@@ -355,8 +364,15 @@ size_t AlertStore::loadFrom(AlertDb& db) {
     e.seq = ++seq_counter_;
     entries_.push_back(std::move(e));
   }
-  return records.size();
+  // Boot-time retention: tombstones already prevent evicted ids from coming
+  // back; this also enforces the (possibly re-configured) cap on legacy dbs,
+  // appending tombstones for anything it has to drop. Returns the live record
+  // count after enforcement.
+  purge();
+  return entries_.size();
 }
+
+size_t AlertStore::dbIoFailures() const { return db_ != nullptr ? db_->ioFailures() : 0; }
 
 bool AlertStore::compactDb(std::string& err) {
   if (db_ == nullptr) return false;
