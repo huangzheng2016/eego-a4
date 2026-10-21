@@ -828,11 +828,7 @@ struct DashboardRuntime::Impl {
         source_id = source.id;
         break;
       }
-      std::string expanded;
-      std::string error;
-      if (ui::dashboardAssetMatchesSource(asset, source, variables) &&
-          dash::interpolateVariables(source.url, variables, expanded, error, 4096) &&
-          expanded == resolved_uri) {
+      if (ui::dashboardSourceMatchesUri(source, resolved_uri, variables)) {
         source_id = source.id;
         break;
       }
@@ -872,6 +868,19 @@ struct DashboardRuntime::Impl {
         if (source.id == source_id &&
             ui::dashboardAssetMatchesSource(asset, source, variables)) {
           renderer.invalidateImage(asset.id);
+        }
+      }
+    }
+    for (const dash::Page& current_page : view.pages) {
+      for (const dash::PanelSpec& panel : current_page.panels) {
+        if (panel.kind != dash::PanelKind::Image) continue;
+        const ui::ImageDependency dependency = ui::resolveImageDependency(view, panel, variables);
+        if (dependency.asset == nullptr) continue;
+        for (const dash::Source& source : config.sources) {
+          if (source.id == source_id &&
+              ui::dashboardSourceMatchesUri(source, dependency.uri, variables)) {
+            renderer.invalidateImage(dependency.asset->id);
+          }
         }
       }
     }
@@ -922,7 +931,16 @@ struct DashboardRuntime::Impl {
     if (dashboardAggregationForExpression(panel.value_expression, aggregation)) {
       const int64_t now = pipelineMs();
       dp::AggregationResult aggregate;
-      if (dashboardPanelHasCustomWindow(panel)) {
+      if (injected.count(panel.source_id) != 0) {
+        const std::shared_ptr<const dp::SourceResult> effective = currentResult(panel.source_id);
+        const dp::ResolvedWindow window =
+            dashboardPanelHasCustomWindow(panel)
+                ? dashboardResolvePanelWindow(panel, now)
+                : dp::resolveWindow(dashboardWindowFromPanel(panel), now,
+                                    pipeline->history().resetAt(panel.source_id, panel.metric), 0);
+        aggregate = pipeline->history().aggregate(panel.source_id, panel.metric, {}, window,
+                                                  aggregation, effective->metrics);
+      } else if (dashboardPanelHasCustomWindow(panel)) {
         aggregate = pipeline->history().aggregate(panel.source_id, panel.metric, {},
                                                   dashboardResolvePanelWindow(panel, now),
                                                   aggregation);
@@ -933,25 +951,18 @@ struct DashboardRuntime::Impl {
       }
       return dashboardAggregatePublication(panel, aggregate, now);
     }
+    const dp::ResolvedWindow window = dashboardResolvePanelWindow(panel, pipelineMs());
     std::set<std::string> seen;
     auto append = [&](const dash::MetricSample& sample) {
       if (sample.source_id == panel.source_id && sample.metric == panel.metric &&
-          seen.insert(sampleKey(sample)).second) {
+          dashboardSampleWithinWindow(sample, window) && seen.insert(sampleKey(sample)).second) {
         out.push_back(sample);
       }
     };
     for (const dash::MetricSample& sample : config.samples) append(sample);
 
-    const int64_t now = pipelineMs();
-    int64_t from = 0;
-    int64_t to = now;
-    if (!dash::parseTimeExpression(panel.time_window.from, now, from) ||
-        !dash::parseTimeExpression(panel.time_window.to, now, to)) {
-      from = std::max<int64_t>(0, now - 3600000);
-      to = now;
-    }
-    const std::vector<dash::MetricSample> history = pipeline->history().query(
-        panel.source_id, panel.metric, {}, {std::min(from, to), std::max(from, to)});
+    const std::vector<dash::MetricSample> history =
+        pipeline->history().query(panel.source_id, panel.metric, {}, window);
     for (const dash::MetricSample& sample : history) append(sample);
     const std::shared_ptr<const dp::SourceResult> current = currentResult(panel.source_id);
     if (current != nullptr) {
@@ -981,9 +992,13 @@ struct DashboardRuntime::Impl {
   void publishPanel(const dash::PanelSpec& panel, const dp::PanelUpdate* update = nullptr) {
     dp::Aggregation aggregation;
     if (update != nullptr && dashboardAggregationForExpression(panel.value_expression, aggregation)) {
-      published_panels.publish(
-          panel.id, panel.metric,
-          dashboardAggregatePublication(panel, update->aggregate, pipelineMs()));
+      if (injected.count(panel.source_id) != 0) {
+        published_panels.publish(panel.id, panel.metric, computePanelSamples(panel));
+      } else {
+        published_panels.publish(
+            panel.id, panel.metric,
+            dashboardAggregatePublication(panel, update->aggregate, pipelineMs()));
+      }
       return;
     }
     published_panels.publish(panel.id, panel.metric, computePanelSamples(panel));

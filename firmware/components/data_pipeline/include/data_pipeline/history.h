@@ -93,6 +93,10 @@ class MetricHistory {
   AggregationResult aggregate(const std::string& source_id, const std::string& metric,
                               const std::vector<KeyValue>& labels,
                               const ResolvedWindow& window, Aggregation aggregation) const;
+  AggregationResult aggregate(const std::string& source_id, const std::string& metric,
+                              const std::vector<KeyValue>& labels,
+                              const ResolvedWindow& window, Aggregation aggregation,
+                              const std::vector<MetricSample>& effective_samples) const;
   // Raw samples and exact fixed-window state for SD persistence; query() returns display buckets.
   // The ResolvedWindow aggregate overload uses exact raw points and rolling coverage semantics.
   std::vector<HistoryEntry> entries(const std::string& source_id = "") const;

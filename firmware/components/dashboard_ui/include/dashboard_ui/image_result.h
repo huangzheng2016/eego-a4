@@ -20,6 +20,14 @@ inline bool dashboardAssetMatchesSource(const Asset& asset, const Source& source
          source_url == asset_uri;
 }
 
+inline bool dashboardSourceMatchesUri(const Source& source, std::string_view resolved_uri,
+                                      const VariableValues& variables) {
+  std::string expanded;
+  std::string error;
+  return interpolateVariables(source.url, variables, expanded, error, 4096) &&
+         expanded == resolved_uri;
+}
+
 inline bool copySourceImage(const pipeline::SourceResult& result, uint8_t* output,
                             size_t capacity, size_t& output_size) {
   output_size = 0;

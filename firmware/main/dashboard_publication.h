@@ -91,6 +91,12 @@ inline eego::dashboard::pipeline::ResolvedWindow dashboardResolvePanelWindow(
           std::max(resolved.from_ms, resolved.to_ms)};
 }
 
+inline bool dashboardSampleWithinWindow(
+    const eego::dashboard::MetricSample& sample,
+    const eego::dashboard::pipeline::ResolvedWindow& window) {
+  return sample.timestamp_ms >= window.from_ms && sample.timestamp_ms <= window.to_ms;
+}
+
 inline eego::dashboard::MetricSample dashboardAggregateSample(
     const eego::dashboard::PanelSpec& panel,
     const eego::dashboard::pipeline::AggregationResult& aggregate, int64_t now_ms) {
