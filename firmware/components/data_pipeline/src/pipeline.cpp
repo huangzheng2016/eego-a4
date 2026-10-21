@@ -2,6 +2,7 @@
 #include "data_pipeline/pipeline.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -10,6 +11,10 @@
 
 namespace eego::dashboard::pipeline {
 namespace {
+
+std::atomic<uint64_t> g_next_async_id{1};
+
+uint64_t nextAsyncId() { return g_next_async_id.fetch_add(1); }
 
 void appendPart(std::string& out, std::string_view value) {
   out += std::to_string(value.size());
@@ -124,6 +129,9 @@ struct DataPipeline::SourceRuntime {
   SourceStatus status;
   int64_t next_poll_ms = 0;
   bool initial_fanout = true;
+  bool async_pending = false;
+  uint64_t async_id = 0;
+  int64_t async_deadline_ms = 0;
 };
 
 DataPipeline::~DataPipeline() = default;
@@ -149,6 +157,8 @@ bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<Sourc
   panels_.clear();
   updates_.clear();
   dirty_panels_.clear();
+  async_batches_.clear();
+  async_request_keys_.clear();
 
   for (const SourcePlan& plan : plans) {
     if (!validateSourcePlan(plan, error)) return false;
@@ -228,6 +238,7 @@ bool DataPipeline::setVariables(const VariableValues& overrides, std::string& er
   if (!defaultVariableValues(dashboard_.variables, overrides, values, error)) return false;
   config_.variable_overrides = overrides;
   variables_ = std::move(values);
+  detachAllAsync();
   for (auto& source : sources_) source.second->next_poll_ms = 0;
   return true;
 }
@@ -343,6 +354,7 @@ void DataPipeline::servicePanels(const SourceRuntime& source, int64_t now_ms) {
 }
 
 TickResult DataPipeline::tick(int64_t now_ms) {
+  if (transport_.asyncSupported()) return tickAsync(now_ms);
   TickResult tick;
   std::map<std::string, std::shared_ptr<HttpResponse>> responses;
   for (auto& item : sources_) {
@@ -485,9 +497,253 @@ TickResult DataPipeline::tick(int64_t now_ms) {
   return tick;
 }
 
+void DataPipeline::failSource(SourceRuntime& source, const std::string& failure,
+                              int64_t now_ms, TickResult& tick) {
+  SourceStatus& status = source.status;
+  const bool initial = source.initial_fanout;
+  const bool offline_before = status.offline;
+  const bool stale_before = status.stale;
+  status.error = failure.empty() ? "source produced no result" : failure;
+  status.offline = true;
+  status.consecutive_failures = std::min<uint32_t>(status.consecutive_failures + 1, 1000000);
+  if (!source.result) {
+    status.stale = true;
+  } else if (source.plan.stale_after_ms == 0) {
+    status.stale = false;
+  }
+  if (initial || status.offline != offline_before || status.stale != stale_before)
+    markStatusPanels(source, now_ms);
+  const uint32_t shift = std::min<uint32_t>(status.consecutive_failures, 6);
+  const uint64_t backoff = std::min<uint64_t>(
+      static_cast<uint64_t>(sourceInterval(source)) << shift, 1800000ULL);
+  source.next_poll_ms = now_ms + static_cast<int64_t>(backoff);
+  source.initial_fanout = false;
+  ++tick.failed;
+}
+
+void DataPipeline::succeedSource(SourceRuntime& source,
+                                 std::shared_ptr<const SourceResult> current,
+                                 bool not_modified, int64_t now_ms, TickResult& tick) {
+  SourceStatus& status = source.status;
+  const std::shared_ptr<const SourceResult> previous = source.result;
+  const bool initial = source.initial_fanout;
+  const bool offline_before = status.offline;
+  const bool stale_before = status.stale;
+  source.result = std::move(current);
+  status.last_success_ms = now_ms;
+  status.offline = false;
+  status.stale = false;
+  status.error.clear();
+  status.cache_error.clear();
+  status.consecutive_failures = 0;
+  if (!not_modified) {
+    std::string history_error;
+    if (!history_.append(*source.result, now_ms, history_error))
+      status.cache_error = "history: " + history_error;
+    if (cache_ != nullptr) {
+      std::vector<HistoryEntry> entries;
+      entries.reserve(source.result->metrics.size());
+      for (const MetricSample& sample : source.result->metrics) {
+        HistoryEntry entry;
+        entry.sample = sample;
+        entry.reset_at_ms = source.result->resetAtFor(sample.metric);
+        entries.push_back(std::move(entry));
+      }
+      std::string cache_error;
+      if (!entries.empty() && !cache_->appendHistory(source.result->source_id, entries, cache_error))
+        status.cache_error = cache_error;
+      cache_error.clear();
+      if (!cache_->writeSnapshot(*source.result, cache_error) && status.cache_error.empty())
+        status.cache_error = cache_error;
+    }
+  }
+  if (initial || status.offline != offline_before || status.stale != stale_before)
+    markDirtyPanels(source, previous.get(), *source.result, now_ms, true);
+  else
+    markDirtyPanels(source, previous.get(), *source.result, now_ms, false);
+  source.next_poll_ms = now_ms + sourceInterval(source);
+  source.initial_fanout = false;
+  ++tick.succeeded;
+}
+
+void DataPipeline::completeAsyncSource(SourceRuntime& source, const HttpResponse& response,
+                                       int64_t now_ms, TickResult& tick) {
+  source.status.last_http_status = response.status;
+  const bool not_modified = response.not_modified || response.status == 304;
+  std::shared_ptr<const SourceResult> current;
+  std::string failure;
+  if (not_modified) {
+    if (!source.result) {
+      failure = "304 response has no cached data";
+    } else {
+      auto copy = std::make_shared<SourceResult>(*source.result);
+      copy->fetched_at_ms = now_ms;
+      current = std::move(copy);
+    }
+  } else {
+    SourceResult parsed;
+    if (parseSourceResponse(source.plan, response, variables_, now_ms, parsed, failure))
+      current = std::make_shared<const SourceResult>(std::move(parsed));
+  }
+  if (!failure.empty() || !current) {
+    failSource(source, failure, now_ms, tick);
+  } else {
+    succeedSource(source, std::move(current), not_modified, now_ms, tick);
+  }
+}
+
+void DataPipeline::detachAsync(SourceRuntime& source) {
+  if (!source.async_pending) return;
+  const uint64_t id = source.async_id;
+  source.async_pending = false;
+  source.async_id = 0;
+  source.async_deadline_ms = 0;
+  const auto batch = async_batches_.find(id);
+  if (batch == async_batches_.end()) return;
+  auto& ids = batch->second.source_ids;
+  ids.erase(std::remove(ids.begin(), ids.end(), source.plan.source.id), ids.end());
+  if (ids.empty()) {
+    async_request_keys_.erase(batch->second.key);
+    async_batches_.erase(batch);
+  }
+}
+
+void DataPipeline::detachAllAsync() {
+  for (auto& item : sources_) detachAsync(*item.second);
+}
+
+void DataPipeline::drainAsync(int64_t now_ms, TickResult& tick) {
+  for (size_t count = 0; count < 32; ++count) {
+    AsyncHttpResult result;
+    if (!transport_.pollAsync(result)) break;
+    const auto batch = async_batches_.find(result.id);
+    if (batch == async_batches_.end()) continue;
+    const AsyncBatch completed = batch->second;
+    async_request_keys_.erase(completed.key);
+    async_batches_.erase(batch);
+    for (const std::string& source_id : completed.source_ids) {
+      const auto found = sources_.find(source_id);
+      if (found == sources_.end()) continue;
+      SourceRuntime& source = *found->second;
+      if (!source.async_pending || source.async_id != result.id) continue;
+      source.async_pending = false;
+      source.async_id = 0;
+      source.async_deadline_ms = 0;
+      completeAsyncSource(source, result.response, now_ms, tick);
+    }
+  }
+  for (auto& item : sources_) {
+    SourceRuntime& source = *item.second;
+    if (!source.async_pending || now_ms <= source.async_deadline_ms) continue;
+    detachAsync(source);
+    HttpResponse timeout;
+    timeout.status = -1;
+    timeout.error = "asynchronous HTTP request timed out";
+    completeAsyncSource(source, timeout, now_ms, tick);
+  }
+}
+
+TickResult DataPipeline::tickAsync(int64_t now_ms) {
+  TickResult tick;
+  drainAsync(now_ms, tick);
+  for (auto& item : sources_) {
+    SourceRuntime& source = *item.second;
+    SourceStatus& status = source.status;
+    const bool was_stale = status.stale;
+    if (source.result) {
+      status.stale = source.plan.stale_after_ms != 0 &&
+                     (status.last_success_ms <= 0 ||
+                      (now_ms >= status.last_success_ms &&
+                       now_ms - status.last_success_ms > source.plan.stale_after_ms));
+    } else {
+      status.stale = true;
+    }
+    if (status.stale != was_stale) markStatusPanels(source, now_ms);
+    if (!source.plan.source.enabled || source.async_pending || now_ms < source.next_poll_ms)
+      continue;
+
+    ++tick.due_sources;
+    status.last_attempt_ms = now_ms;
+    if (source.plan.source.kind == SourceKind::Static) {
+      status.last_http_status = 200;
+      std::shared_ptr<const SourceResult> current;
+      std::string failure;
+      if (source.static_result) {
+        auto copy = std::make_shared<SourceResult>(*source.static_result);
+        copy->fetched_at_ms = now_ms;
+        current = std::move(copy);
+      } else {
+        HttpResponse response;
+        response.status = 200;
+        if (!interpolateVariables(source.plan.static_body, variables_, response.body, failure,
+                                  source.plan.source.max_response_bytes)) {
+          // failure already contains the interpolation error.
+        } else {
+          SourceResult parsed;
+          if (parseSourceResponse(source.plan, response, variables_, now_ms, parsed, failure))
+            current = std::make_shared<const SourceResult>(std::move(parsed));
+        }
+      }
+      if (!failure.empty() || !current) {
+        failSource(source, failure, now_ms, tick);
+      } else {
+        succeedSource(source, std::move(current), false, now_ms, tick);
+      }
+      continue;
+    }
+
+    net::NetRequest request;
+    std::string failure;
+    if (!buildSourceRequest(source.plan, variables_, config_.token_resolver, request, failure)) {
+      status.last_http_status = 0;
+      failSource(source, failure, now_ms, tick);
+      continue;
+    }
+    const std::string key = sourceRequestKey(request);
+    const int64_t deadline = now_ms + static_cast<int64_t>(source.plan.source.timeout_ms) + 5000;
+    const auto existing = async_request_keys_.find(key);
+    if (existing != async_request_keys_.end()) {
+      AsyncBatch& batch = async_batches_.at(existing->second);
+      if (std::find(batch.source_ids.begin(), batch.source_ids.end(), source.plan.source.id) ==
+          batch.source_ids.end()) {
+        batch.source_ids.push_back(source.plan.source.id);
+      }
+      source.async_pending = true;
+      source.async_id = existing->second;
+      source.async_deadline_ms = deadline;
+      ++tick.deduplicated_requests;
+      continue;
+    }
+
+    const uint64_t id = nextAsyncId();
+    if (!transport_.executeAsync(id, request)) {
+      failSource(source, "asynchronous HTTP queue unavailable", now_ms, tick);
+      continue;
+    }
+    AsyncBatch batch;
+    batch.id = id;
+    batch.key = key;
+    batch.source_ids.push_back(source.plan.source.id);
+    async_batches_.emplace(id, std::move(batch));
+    async_request_keys_[key] = id;
+    source.async_pending = true;
+    source.async_id = id;
+    source.async_deadline_ms = deadline;
+    ++tick.http_requests;
+  }
+  for (const auto& source : sources_) servicePanels(*source.second, now_ms);
+  tick.dirty_panels = dirty_panels_.size();
+  return tick;
+}
+
+bool DataPipeline::asyncIdle() const {
+  return async_batches_.empty() && transport_.asyncIdle();
+}
+
 bool DataPipeline::refreshSource(const std::string& source_id) {
   const auto source = sources_.find(source_id);
   if (source == sources_.end() || !source->second->plan.source.enabled) return false;
+  detachAsync(*source->second);
   source->second->next_poll_ms = 0;
   return true;
 }
@@ -497,7 +753,9 @@ bool DataPipeline::refreshPanel(const std::string& panel_id) {
   if (panel == panels_.end()) return false;
   panel->second.pending = true;
   panel->second.next_refresh_ms = 0;
-  sources_[panel->second.binding.source_id]->next_poll_ms = 0;
+  SourceRuntime& source = *sources_[panel->second.binding.source_id];
+  detachAsync(source);
+  source.next_poll_ms = 0;
   return true;
 }
 
@@ -517,7 +775,9 @@ int64_t DataPipeline::nextWakeMs(int64_t now_ms) const {
   int64_t next = now_ms + 1000;
   for (const auto& item : sources_) {
     const SourceRuntime& source = *item.second;
-    if (source.plan.source.enabled) next = std::min(next, source.next_poll_ms);
+    if (source.plan.source.enabled && !source.async_pending)
+      next = std::min(next, source.next_poll_ms);
+    if (source.async_pending) next = std::min(next, source.async_deadline_ms);
     if (source.result && source.plan.stale_after_ms != 0) {
       next = std::min(next, source.status.last_success_ms + source.plan.stale_after_ms + 1);
     }

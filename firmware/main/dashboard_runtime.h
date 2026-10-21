@@ -41,6 +41,7 @@ class DashboardRuntime {
 
   void service(bool mains);
   void pollBattery();
+  bool networkIdle() const;
   void setMains(bool mains);
   void invalidateAll();
   bool needsRender() const;

@@ -54,7 +54,8 @@ class DataPipeline {
   ~DataPipeline();
 
   // plans may be empty: dashboard HTTP sources then use StandardJson defaults.
-  // The pipeline is single-owner; transport calls still execute through net_task.
+  // Pipeline state is single-owner; async transports pump requests and deliver
+  // results without blocking the caller, while HTTP still executes in net_task.
   bool configure(const Dashboard& dashboard, const std::vector<SourcePlan>& plans,
                  SdCache* cache, std::string& error);
   bool setVariables(const VariableValues& overrides, std::string& error);
@@ -63,6 +64,7 @@ class DataPipeline {
                                std::string& error);
 
   TickResult tick(int64_t now_ms);
+  bool asyncIdle() const;
   bool refreshSource(const std::string& source_id);
   bool refreshPanel(const std::string& panel_id);
 
@@ -86,6 +88,12 @@ class DataPipeline {
     bool pending = true;
   };
 
+  struct AsyncBatch {
+    uint64_t id = 0;
+    std::string key;
+    std::vector<std::string> source_ids;
+  };
+
   IHttpTransport& transport_;
   PipelineConfig config_;
   Dashboard dashboard_;
@@ -96,6 +104,8 @@ class DataPipeline {
   std::map<std::string, PanelState> panels_;
   std::vector<PanelUpdate> updates_;
   std::set<std::string> dirty_panels_;
+  std::map<uint64_t, AsyncBatch> async_batches_;
+  std::map<std::string, uint64_t> async_request_keys_;
 
   uint32_t panelInterval(const PanelState& panel) const;
   uint32_t sourceInterval(const SourceRuntime& source) const;
@@ -105,6 +115,16 @@ class DataPipeline {
   void servicePanels(const SourceRuntime& source, int64_t now_ms);
   PanelUpdate makeUpdate(const PanelState& panel, const SourceRuntime& source,
                          int64_t now_ms) const;
+  TickResult tickAsync(int64_t now_ms);
+  void drainAsync(int64_t now_ms, TickResult& tick);
+  void completeAsyncSource(SourceRuntime& source, const HttpResponse& response,
+                           int64_t now_ms, TickResult& tick);
+  void failSource(SourceRuntime& source, const std::string& failure, int64_t now_ms,
+                  TickResult& tick);
+  void succeedSource(SourceRuntime& source, std::shared_ptr<const SourceResult> current,
+                     bool not_modified, int64_t now_ms, TickResult& tick);
+  void detachAsync(SourceRuntime& source);
+  void detachAllAsync();
 };
 
 }  // namespace eego::dashboard::pipeline

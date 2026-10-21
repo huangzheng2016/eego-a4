@@ -42,6 +42,7 @@ constexpr uint32_t kNetBitSource = 1u << 1;
 // 电源/电池常量
 constexpr uint32_t kAwakeWindowMs = 90000;   // 电池模式交互窗口（输入可延长）
 constexpr uint32_t kPollWaitMs = 45000;      // 电池模式等 WiFi 上限
+constexpr uint32_t kDashboardPollWaitMs = 130000;  // 数据源 120s 超时 + 队列余量
 constexpr uint32_t kRenderThrottleMs = 250;  // 渲染最小间隔（e-ink 节奏）
 constexpr uint32_t kClockRenderMs = 30000;   // 状态栏时钟节奏
 constexpr uint32_t kConfirmWindowMs = 5000;  // 二次确认窗口
@@ -100,7 +101,7 @@ void PanelApp::begin(const Deps& deps) {
   dashboardDeps.canvas = deps_.canvas;
   dashboardDeps.net = &NetStack::instance();
   dashboardDeps.alerts = deps_.publisher;
-  if (dashboard_.begin(dashboardDeps)) page_ = Page::Dashboard;
+  page_ = dashboardStartupPage(page_, dashboard_.begin(dashboardDeps));
   dashboard_.setMains(mains_);
 
   ESP_LOGI(TAG, "panel begin: mains=%d lang=%s bat=%umV/%u%%", mains_ ? 1 : 0,
@@ -845,9 +846,11 @@ void PanelApp::onModeChange(bool mains) {
   NetStack::instance().wifi().setPowerSave(mains);  // 常供电 modem-sleep
   if (mains) {
     battPhase_ = BattPhase::Mains;
+    batteryPollStarted_ = false;
     NetStack::instance().reconnectNow();
   } else {
     battPhase_ = BattPhase::Polling;
+    batteryPollStarted_ = false;
     cycleStartMs_ = nowMs();
     pollDeadlineMs_ = cycleStartMs_ + kPollWaitMs;
     showBanner(tr(Str::Polling), 5000);
@@ -860,25 +863,37 @@ void PanelApp::batteryFsm(int64_t now) {
   switch (battPhase_) {
     case BattPhase::Mains:
       return;
-    case BattPhase::Polling:
-      // 等 WiFi 就绪或超时 → 全源轮询 → 静默 → 进入交互窗口
-      if (wifiState_.load() == 2 /*Connected*/ || now > pollDeadlineMs_) {
-        ESP_LOGI(TAG, "battery poll cycle: poll all sources");
-        NetStack::instance().pollNow("");
-        dashboard_.pollBattery();
-        // 显式处理静默等待超时：记录并重试一轮；仍超时只影响本轮数据新鲜度，
-        // 下周期重试（不在此断电任何硬件）
+    case BattPhase::Polling: {
+      if (!batteryPollStarted_) {
+        if (wifiState_.load() == 2 /*Connected*/ || now > pollDeadlineMs_) {
+          ESP_LOGI(TAG, "battery poll cycle: poll all sources");
+          NetStack::instance().pollNow("");
+          dashboard_.pollBattery();
+          batteryPollStarted_ = true;
+          pollDeadlineMs_ = now + kDashboardPollWaitMs;
+          markDirty(true);
+        }
+        return;
+      }
+
+      const bool dashboard_idle = dashboard_.networkIdle();
+      if (!dashboard_idle && now <= pollDeadlineMs_) return;
+      if (!dashboard_idle) {
+        ESP_LOGW(TAG, "battery poll: dashboard still busy, serving cached data");
+      } else {
+        // Dashboard 已静默；保留原有 net_task 静默检查与超时重试合同。
         if (!NetStack::instance().waitIdle(30000)) {
           ESP_LOGW(TAG, "battery poll: waitIdle timeout, retrying once");
           if (!NetStack::instance().waitIdle(10000)) {
             ESP_LOGW(TAG, "battery poll: net still not idle, serving with current data");
           }
         }
-        battPhase_ = BattPhase::Serving;
-        awakeDeadlineMs_ = now + kAwakeWindowMs;
-        markDirty(true);
       }
+      battPhase_ = BattPhase::Serving;
+      awakeDeadlineMs_ = now + kAwakeWindowMs;
+      markDirty(true);
       return;
+    }
     case BattPhase::Serving: {
       // 交互窗口：近期输入延长 90s，但累计交互不超过周期起点后 10 分钟
       const int64_t hardCapMs = cycleStartMs_ + 600000;
@@ -897,6 +912,14 @@ void PanelApp::enterSleep(int64_t now) {
   // 实际睡眠时长 = 轮询周期剩余（不是完整周期），先算好供休眠画面与唤醒定时共用
   int64_t sleepMs = cycleStartMs_ + static_cast<int64_t>(prefs_.batteryPollS()) * 1000 - now;
   if (sleepMs < 10000) sleepMs = 10000;  // 防高频醒睡循环
+
+  if (!dashboard_.networkIdle()) {
+    ESP_LOGW(TAG, "battery: dashboard work pending, sleep deferred");
+    battPhase_ = BattPhase::Serving;
+    awakeDeadlineMs_ = now + 30000;
+    markDirty();
+    return;
+  }
 
   // 1. 网络静默（显式处理超时：重试一轮；仍超时则中止本次休眠回 Serving，
   //    30s 后重试——绝不带在途 HTTP 传输断电 WiFi）

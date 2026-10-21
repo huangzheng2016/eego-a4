@@ -226,6 +226,7 @@ class PanelApp {
   BattPhase battPhase_ = BattPhase::Mains;
   int64_t cycleStartMs_ = 0;
   int64_t pollDeadlineMs_ = 0;
+  bool batteryPollStarted_ = false;
   int64_t awakeDeadlineMs_ = 0;
   int64_t lastInputMs_ = 0;
   bool fallbackArmed_ = false;

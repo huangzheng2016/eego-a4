@@ -23,6 +23,10 @@ enum class Page : uint8_t {
   Dashboard,
 };
 
+constexpr Page dashboardStartupPage(Page current, bool dashboard_loaded) {
+  return dashboard_loaded && current != Page::Provision ? Page::Dashboard : current;
+}
+
 // 二次确认状态（5s 窗口内再次激活才执行；任何其他输入取消）。
 enum class ConfirmKind : uint8_t {
   None = 0,
