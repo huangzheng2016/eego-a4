@@ -76,6 +76,14 @@ bool normalizedRatio(double value, double minimum, double maximum, double& ratio
       maximum <= minimum) {
     return false;
   }
+  if (value <= minimum) {
+    ratio = 0;
+    return true;
+  }
+  if (value >= maximum) {
+    ratio = 1;
+    return true;
+  }
   const double range = maximum - minimum;
   if (std::isfinite(range) && range > 0) {
     ratio = (value - minimum) / range;
@@ -450,11 +458,27 @@ void drawStatusGrid(PortraitCanvas& canvas, FontManager& font, const PanelSpec& 
     std::string name(label(sample, "name"));
     if (name.empty() && !sample.labels.empty()) name = sample.labels.front().value;
     if (name.empty()) name = sample.metric;
-    drawTextFit(canvas, font, cell.x + 3, cell.y + 3, cell.w - 6, name, 1, false, severityText(severity));
-    if (cell.h >= font.uiFontHeight() * 2 + 8) {
-      drawTextFit(canvas, font, cell.x + 3, cell.y + cell.h - font.uiFontHeight() - 3,
-                  cell.w - 6, formatValue(sample.value, sample.unit, panel.style.precision),
-                  1, true, severityText(severity));
+    const Rect text_bounds = inset(cell, 3);
+    if (text_bounds.empty()) continue;
+    const int16_t font_height = font.uiFontHeight();
+    Rect name_bounds = text_bounds;
+    const bool has_value = text_bounds.h >= font_height * 2 + 2;
+    if (has_value) name_bounds.h -= font_height + 2;
+    const int16_t name_scale = scaleForText(font, name, name_bounds, 1);
+    if (name_scale > 0) {
+      drawTextFit(canvas, font, name_bounds.x, name_bounds.y, name_bounds.w, name,
+                  name_scale, false, severityText(severity));
+    }
+    if (has_value) {
+      const Rect value_bounds{text_bounds.x,
+                              static_cast<int16_t>(text_bounds.bottom() - font_height),
+                              text_bounds.w, font_height};
+      const std::string value = formatValue(sample.value, sample.unit, panel.style.precision);
+      const int16_t value_scale = scaleForText(font, value, value_bounds, 1);
+      if (value_scale > 0) {
+        drawTextFit(canvas, font, value_bounds.x, value_bounds.y, value_bounds.w, value,
+                    value_scale, true, severityText(severity));
+      }
     }
   }
 }
@@ -622,25 +646,30 @@ void drawTablePanel(PortraitCanvas& canvas, FontManager& font, const Dashboard& 
   }
 }
 
+bool alertEventMatches(const Dashboard& dashboard, const PanelSpec& panel, const Event& event) {
+  if (!panel.source_id.empty() && event.source_id != panel.source_id) return false;
+  if (!panel.linked_panel_ids.empty() && event.linked_panel_id != panel.id) {
+    bool linked = false;
+    for (const std::string& id : panel.linked_panel_ids) linked = linked || id == event.linked_panel_id;
+    if (!linked) return false;
+  }
+  if (!panel.metric.empty()) {
+    bool metric_matches = false;
+    for (const AlertRule& rule : dashboard.alert_rules) {
+      if (rule.id == event.rule_id && rule.metric == panel.metric) metric_matches = true;
+    }
+    if (!metric_matches) return false;
+  }
+  return true;
+}
+
 void drawAlertPanel(PortraitCanvas& canvas, FontManager& font, const Dashboard& dashboard,
                     const PanelSpec& panel, const Rect& bounds,
                     const VariableValues& variables) {
   std::vector<const Event*> events;
   for (const Event& event : dashboard.events) {
     if (events.size() >= 256) break;
-    if (!panel.source_id.empty() && event.source_id != panel.source_id) continue;
-    if (!panel.linked_panel_ids.empty() && event.linked_panel_id != panel.id) {
-      bool linked = false;
-      for (const std::string& id : panel.linked_panel_ids) linked = linked || id == event.linked_panel_id;
-      if (!linked) continue;
-    }
-    if (!panel.metric.empty()) {
-      bool metric_matches = false;
-      for (const AlertRule& rule : dashboard.alert_rules) {
-        if (rule.id == event.rule_id && rule.metric == panel.metric) metric_matches = true;
-      }
-      if (!metric_matches) continue;
-    }
+    if (!alertEventMatches(dashboard, panel, event)) continue;
     events.push_back(&event);
   }
   std::stable_sort(events.begin(), events.end(), [](const Event* lhs, const Event* rhs) {
@@ -693,8 +722,12 @@ void drawButtonPanel(PortraitCanvas& canvas, FontManager& font, const PanelLayou
     std::string interpolated;
     std::string error;
     if (interpolateVariables(label_text, variables, interpolated, error)) label_text = interpolated;
-    centered(canvas, font, inset(bounds, 2), label_text, bounds.h >= 30 ? 2 : 1,
-             action.confirm, critical ? 15 : 0);
+    const Rect label_bounds = inset(bounds, 2);
+    const int16_t label_scale = scaleForText(font, label_text, label_bounds, 2);
+    if (label_scale > 0) {
+      centered(canvas, font, label_bounds, label_text, label_scale, action.confirm,
+                 critical ? 15 : 0);
+    }
   }
 }
 

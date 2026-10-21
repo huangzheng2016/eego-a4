@@ -34,6 +34,19 @@ class SdImageProvider final : public ImageProvider {
 
 bool inspectImage(const uint8_t* data, size_t size, uint32_t& width, uint32_t& height);
 
+struct ImageDependency {
+  const Asset* base_asset = nullptr;
+  const Asset* dynamic_asset = nullptr;
+  const Asset* asset = nullptr;
+  const MetricSample* field_sample = nullptr;
+  std::string field_value;
+  std::string uri;
+  bool valid = false;
+};
+
+ImageDependency resolveImageDependency(const Dashboard& dashboard, const PanelSpec& panel,
+                                       const VariableValues& variables);
+
 class ImagePipeline {
  public:
   ImagePipeline();

@@ -8,6 +8,8 @@
 
 namespace eego::dashboard::ui {
 
+bool alertEventMatches(const Dashboard& dashboard, const PanelSpec& panel, const Event& event);
+
 void drawCardPanel(PortraitCanvas& canvas, FontManager& font, const Dashboard& dashboard,
                    const PanelSpec& panel, const Rect& bounds,
                    const VariableValues& variables);

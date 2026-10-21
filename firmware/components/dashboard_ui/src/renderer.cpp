@@ -158,6 +158,7 @@ uint64_t fingerprint(const Dashboard& dashboard, const PanelSpec& panel,
   }
   if (panel.kind == PanelKind::Alert) {
     for (const Event& event : dashboard.events) {
+      if (!alertEventMatches(dashboard, panel, event)) continue;
       hash.string(event.id);
       hash.string(event.rule_id);
       hash.string(event.source_id);
@@ -167,23 +168,35 @@ uint64_t fingerprint(const Dashboard& dashboard, const PanelSpec& panel,
       hash.string(event.title);
       hash.string(event.message);
       hash.string(event.linked_panel_id);
-    }
-    for (const AlertRule& rule : dashboard.alert_rules) {
-      hash.string(rule.id);
-      hash.string(rule.metric);
+      if (!panel.metric.empty()) {
+        for (const AlertRule& rule : dashboard.alert_rules) {
+          if (rule.id == event.rule_id && rule.metric == panel.metric) {
+            hash.string(rule.id);
+            hash.string(rule.metric);
+          }
+        }
+      }
     }
   }
   if (panel.kind == PanelKind::Image) {
     hash.number(image_generation);
-    for (const Asset& asset : dashboard.assets) {
-      hash.string(asset.id);
-      hash.number(static_cast<uint8_t>(asset.kind));
-      hashInterpolated(hash, asset.uri, variables);
-      hash.string(asset.media_type);
-      hash.string(asset.sha256);
-      hash.number(asset.size_bytes);
-      hash.number(asset.cache_seconds);
+    const ImageDependency dependency = resolveImageDependency(dashboard, panel, variables);
+    const Asset* assets[] = {dependency.base_asset, dependency.dynamic_asset};
+    for (size_t i = 0; i < 2; ++i) {
+      const Asset* asset = assets[i];
+      if (asset == nullptr || (i == 1 && asset == dependency.base_asset)) continue;
+      hash.string(asset->id);
+      hash.number(static_cast<uint8_t>(asset->kind));
+      hashInterpolated(hash, asset->uri, variables);
+      hash.string(asset->media_type);
+      hash.string(asset->sha256);
+      hash.number(asset->size_bytes);
+      hash.number(asset->cache_seconds);
     }
+    if (dependency.field_sample != nullptr) hashSample(hash, *dependency.field_sample);
+    hash.string(dependency.field_value);
+    hash.string(dependency.uri);
+    hash.number(dependency.valid);
   }
   return hash.value();
 }

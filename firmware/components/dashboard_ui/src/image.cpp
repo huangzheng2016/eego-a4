@@ -89,46 +89,7 @@ const MetricSample* latestSample(const Dashboard& dashboard, const PanelSpec& pa
   return latest;
 }
 
-std::string fieldReference(const Dashboard& dashboard, const PanelSpec& panel) {
-  if (panel.value_path.empty()) return {};
-  const MetricSample* sample = latestSample(dashboard, panel);
-  if (sample == nullptr) return {};
-  std::string_view key(panel.value_path);
-  if (key.substr(0, 2) == "$.") key.remove_prefix(2);
-  if (key.substr(0, 7) == "labels.") key.remove_prefix(7);
-  for (const KeyValue& label : sample->labels) {
-    if (label.key == key) return label.value;
-  }
-  return {};
-}
-
-struct ResolvedImage {
-  const Asset* asset = nullptr;
-  std::string uri;
-};
-
-ResolvedImage resolveImage(const Dashboard& dashboard, const PanelSpec& panel,
-                           const VariableValues& variables) {
-  ResolvedImage resolved;
-  resolved.asset = findAsset(dashboard, panel.image.asset_id);
-  if (resolved.asset != nullptr) resolved.uri = interpolate(resolved.asset->uri, variables);
-  const std::string reference = fieldReference(dashboard, panel);
-  if (!reference.empty()) {
-    if (const Asset* referenced = findAsset(dashboard, reference)) {
-      resolved.asset = referenced;
-      resolved.uri = interpolate(referenced->uri, variables);
-    } else {
-      resolved.uri = interpolate(reference, variables);
-    }
-  }
-  if (resolved.asset == nullptr || !validUri(resolved.uri) ||
-      resolved.asset->size_bytes > kMaxEncodedImageBytes) {
-    return {};
-  }
-  return resolved;
-}
-
-std::string cacheKey(const ResolvedImage& image) {
+std::string cacheKey(const ImageDependency& image) {
   std::string key = image.asset->id;
   key.push_back('\n');
   key += image.uri;
@@ -154,6 +115,40 @@ void drawFailure(PortraitCanvas& canvas, const PanelSpec& panel, const Rect& bou
 }
 
 }  // namespace
+
+ImageDependency resolveImageDependency(const Dashboard& dashboard, const PanelSpec& panel,
+                                       const VariableValues& variables) {
+  ImageDependency resolved;
+  resolved.base_asset = findAsset(dashboard, panel.image.asset_id);
+  resolved.asset = resolved.base_asset;
+  if (resolved.base_asset != nullptr) resolved.uri = interpolate(resolved.base_asset->uri, variables);
+  if (!panel.value_path.empty()) {
+    resolved.field_sample = latestSample(dashboard, panel);
+    if (resolved.field_sample != nullptr) {
+      std::string_view key(panel.value_path);
+      if (key.substr(0, 2) == "$.") key.remove_prefix(2);
+      if (key.substr(0, 7) == "labels.") key.remove_prefix(7);
+      for (const KeyValue& label : resolved.field_sample->labels) {
+        if (label.key == key) {
+          resolved.field_value = label.value;
+          break;
+        }
+      }
+    }
+  }
+  if (!resolved.field_value.empty()) {
+    if (const Asset* referenced = findAsset(dashboard, resolved.field_value)) {
+      resolved.dynamic_asset = referenced;
+      resolved.asset = referenced;
+      resolved.uri = interpolate(referenced->uri, variables);
+    } else {
+      resolved.uri = interpolate(resolved.field_value, variables);
+    }
+  }
+  resolved.valid = resolved.asset != nullptr && validUri(resolved.uri) &&
+                   resolved.asset->size_bytes <= kMaxEncodedImageBytes;
+  return resolved;
+}
 
 struct ImagePipeline::Impl {
   struct Entry {
@@ -221,8 +216,8 @@ size_t ImagePipeline::cacheBytes() const {
 void ImagePipeline::draw(PortraitCanvas& canvas, const Dashboard& dashboard,
                          const PanelSpec& panel, const Rect& bounds,
                          const VariableValues& variables) {
-  const ResolvedImage resolved = resolveImage(dashboard, panel, variables);
-  if (impl_ == nullptr || resolved.asset == nullptr || bounds.empty()) {
+  const ImageDependency resolved = resolveImageDependency(dashboard, panel, variables);
+  if (impl_ == nullptr || !resolved.valid || bounds.empty()) {
     drawFailure(canvas, panel, bounds);
     return;
   }
