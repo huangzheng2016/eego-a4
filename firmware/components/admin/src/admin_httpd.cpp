@@ -32,6 +32,7 @@
 #include "admin_page.h"
 #include "dashboard_api.h"
 #include "dashboard_page.h"
+#include "dashboard_path.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
@@ -1390,17 +1391,19 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
   auto bearer = [&]() { return requireBearer(req, token); };
 
   // DP5：完整 dashboard 配置中心。沿用 Host/Origin + Bearer；GET、写操作、
-  // 出网测试分别限速，禁止 X-Ingest-Key 越权访问。
+  // 出网测试分别限速，禁止 X-Ingest-Key 越权访问。限速分类与 handler 必须
+  // 使用同一规范路径，防止重复/尾斜杠变体落入普通写操作桶。
   if (strcmp(path, "dashboard") == 0 || strncmp(path, "dashboard/", 10) == 0) {
     if (!bearer()) return ESP_OK;
+    const std::string canonical_path = internal::canonicalDashboardApiPath(path);
     if (m == HTTP_GET) {
       if (!rateLimit(req, "get:" + clientIp(req), 60, 60)) return ESP_OK;
-    } else if (m == HTTP_POST && strcmp(path, "dashboard/sources/test") == 0) {
+    } else if (m == HTTP_POST && strcmp(canonical_path.c_str(), "dashboard/sources/test") == 0) {
       if (!rateLimit(req, "dashboard-test:" + token.substr(0, 8), 60, 5)) return ESP_OK;
     } else if (!rateLimit(req, "dashboard-write:" + token.substr(0, 8), 60, 30)) {
       return ESP_OK;
     }
-    return internal::handleDashboardApi(req, path);
+    return internal::handleDashboardApi(req, canonical_path.c_str());
   }
 
   if (m == HTTP_GET) {
