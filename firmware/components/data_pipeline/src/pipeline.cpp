@@ -238,7 +238,8 @@ bool parseChanged(const SourcePlan& plan, const VariableValues& previous,
 }
 
 std::string sourceGenerationFingerprint(const SourcePlan& plan, const VariableValues& variables,
-                                        const TokenResolver& token_resolver) {
+                                        const TokenResolver& token_resolver,
+                                        const SourceResult* static_result) {
   std::string key;
   if (plan.source.kind == SourceKind::Http) {
     net::NetRequest request;
@@ -321,6 +322,14 @@ std::string sourceGenerationFingerprint(const SourcePlan& plan, const VariableVa
       appendPart(key, severity.second);
     }
     for (const std::string& state : mapping.clear_states) appendPart(key, state);
+  }
+  if (static_result != nullptr) {
+    appendPart(key, "synthesized-static");
+    for (const MetricSample& sample : static_result->metrics) appendPart(key, sampleSignature(sample));
+    for (const Event& event : static_result->events) {
+      appendPart(key, event.source_id);
+      appendPart(key, eventSignature(event));
+    }
   }
   uint64_t hash = 1469598103934665603ULL;
   for (const unsigned char c : key) {
@@ -415,7 +424,8 @@ bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<Sourc
 
   for (auto& item : sources_) {
     SourceRuntime& runtime = *item.second;
-    runtime.generation = sourceGenerationFingerprint(runtime.plan, variables_, config_.token_resolver);
+    runtime.generation = sourceGenerationFingerprint(runtime.plan, variables_, config_.token_resolver,
+                                                     runtime.static_result.get());
     if (cache_ != nullptr) {
       std::string cache_error;
       if (!cache_->generationMatches(item.first, runtime.generation)) {
@@ -501,8 +511,8 @@ bool DataPipeline::setVariables(const VariableValues& overrides, std::string& er
   config_.variable_overrides = overrides;
   variables_ = std::move(values);
   for (auto& source : sources_) {
-    source.second->generation =
-        sourceGenerationFingerprint(source.second->plan, variables_, config_.token_resolver);
+    source.second->generation = sourceGenerationFingerprint(
+        source.second->plan, variables_, config_.token_resolver, source.second->static_result.get());
   }
   if (changed_sources != nullptr) *changed_sources = changed;
   return true;
@@ -606,7 +616,7 @@ void DataPipeline::markStatusPanels(const SourceRuntime& source, int64_t now_ms)
 }
 
 void DataPipeline::servicePanels(const SourceRuntime& source, int64_t now_ms) {
-  if (source.async_pending) return;
+  if (source.async_pending || (source.initial_fanout && !source.result)) return;
   for (auto& item : panels_) {
     PanelState& panel = item.second;
     if (panel.binding.source_id != source.plan.source.id || now_ms < panel.next_refresh_ms)
