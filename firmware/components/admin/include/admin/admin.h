@@ -55,6 +55,7 @@ void setAlertActionSink(AlertActionSink sink);
 void setAdminEventCallback(AdminEventCallback cb, void* ctx);
 
 // 默认命令处理器：ApplyConfig（原子持久化 + sources/overrides/admin 域热生效）、
+// ApplyDashboard/DeleteDashboard（完整 bundle 校验、revision 检查与原子持久化）、
 // ApplyWifi（NVS + config wifi_list + 重连）、FactoryReset（清 NVS + 删 SD
 // 配置目录 + 重启）、Reboot。在 app_task 上下文执行。
 void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx);

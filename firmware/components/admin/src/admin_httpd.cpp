@@ -30,6 +30,9 @@
 
 #include "admin_internal.h"
 #include "admin_page.h"
+#include "dashboard_api.h"
+#include "dashboard_page.h"
+#include "dashboard_path.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
@@ -1346,6 +1349,12 @@ esp_err_t h_admin_js(httpd_req_t* req) {
 esp_err_t h_admin_css(httpd_req_t* req) {
   return sendBody(req, 200, "text/css; charset=utf-8", pages::kAdminCss, false);
 }
+esp_err_t h_dashboard_js(httpd_req_t* req) {
+  return sendBody(req, 200, "application/javascript; charset=utf-8", pages::kDashboardJs, false);
+}
+esp_err_t h_dashboard_css(httpd_req_t* req) {
+  return sendBody(req, 200, "text/css; charset=utf-8", pages::kDashboardCss, false);
+}
 
 }  // namespace
 
@@ -1380,6 +1389,22 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
   // ---- 以下全部 Bearer ----
   std::string token;
   auto bearer = [&]() { return requireBearer(req, token); };
+
+  // DP5：完整 dashboard 配置中心。沿用 Host/Origin + Bearer；GET、写操作、
+  // 出网测试分别限速，禁止 X-Ingest-Key 越权访问。限速分类与 handler 必须
+  // 使用同一规范路径，防止重复/尾斜杠变体落入普通写操作桶。
+  if (strcmp(path, "dashboard") == 0 || strncmp(path, "dashboard/", 10) == 0) {
+    if (!bearer()) return ESP_OK;
+    const std::string canonical_path = internal::canonicalDashboardApiPath(path);
+    if (m == HTTP_GET) {
+      if (!rateLimit(req, "get:" + clientIp(req), 60, 60)) return ESP_OK;
+    } else if (m == HTTP_POST && strcmp(canonical_path.c_str(), "dashboard/sources/test") == 0) {
+      if (!rateLimit(req, "dashboard-test:" + token.substr(0, 8), 60, 5)) return ESP_OK;
+    } else if (!rateLimit(req, "dashboard-write:" + token.substr(0, 8), 60, 30)) {
+      return ESP_OK;
+    }
+    return internal::handleDashboardApi(req, canonical_path.c_str());
+  }
 
   if (m == HTTP_GET) {
     if (!rateLimit(req, "get:" + clientIp(req), 60, 60)) return ESP_OK;  // GET 60/min/IP
@@ -1512,9 +1537,14 @@ esp_err_t wildcardHandler(httpd_req_t* req) {
     if (strcmp(uri, "/") == 0) return h_root_page(req);
     if (strcmp(uri, "/admin.js") == 0) return h_admin_js(req);
     if (strcmp(uri, "/admin.css") == 0) return h_admin_css(req);
+    if (strcmp(uri, "/dashboard.js") == 0) return h_dashboard_js(req);
+    if (strcmp(uri, "/dashboard.css") == 0) return h_dashboard_css(req);
   }
   if (strncmp(uri, "/api/v1/", 8) == 0) {
-    return apiDispatch(req, uri + 8);
+    std::string path(uri + 8);
+    const size_t query = path.find('?');
+    if (query != std::string::npos) path.resize(query);
+    return apiDispatch(req, path.c_str());
   }
   // 含 /api/v1/firmware/* 在内的一切未知路径 → 404 JSON（M13 T7：首版无远程 OTA）
   return sendError(req, 404, errc::kNotFound, "resource not found");
@@ -1536,6 +1566,13 @@ esp_err_t startAdminApi(const AdminConfig& cfg) {
   esp_err_t err = AuthManager::instance().init();
   if (err != ESP_OK) return err;
   err = ConfigStore::instance().init(cfg.config_path);
+  if (err != ESP_OK) return err;
+  std::string dashboard_path = "dashboard.json";
+  const size_t config_slash = cfg.config_path.find_last_of('/');
+  if (config_slash != std::string::npos) {
+    dashboard_path = cfg.config_path.substr(0, config_slash + 1) + "dashboard.json";
+  }
+  err = DashboardStore::instance().init(dashboard_path);
   if (err != ESP_OK) return err;
   internal::setRegistry(cfg.registry);
 

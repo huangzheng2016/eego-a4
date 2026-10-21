@@ -17,6 +17,7 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>EEGO A4 Admin</title>
 <link rel="stylesheet" href="/admin.css">
+<link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
 <div id="loginbox">
@@ -32,6 +33,7 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
       <a href="#" data-tab="alerts" class="tab on" id="tab_alerts">告警</a>
       <a href="#" data-tab="status" class="tab" id="tab_status">状态</a>
       <a href="#" data-tab="sources" class="tab" id="tab_sources">来源</a>
+      <a href="#" data-tab="dashboard" class="tab" id="tab_dashboard">数据面板</a>
       <a href="#" data-tab="config" class="tab" id="tab_config">配置</a>
       <a href="#" data-tab="system" class="tab" id="tab_system">系统</a>
     </nav>
@@ -63,6 +65,7 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
       <button id="btn_preset_fill">填入配置草稿</button>
     </div>
   </section>
+  <section id="pane_dashboard" style="display:none"></section>
   <section id="pane_config" style="display:none">
     <textarea id="cfg_text" spellcheck="false"></textarea>
     <div>
@@ -83,6 +86,7 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
   </section>
 </div>
 <script src="/admin.js"></script>
+<script src="/dashboard.js"></script>
 </body>
 </html>)HTML";
 
@@ -186,7 +190,7 @@ function api(path,opts){
   if(r.status===401){showLogin();throw new Error('401');}
   if(r.status===204)return null;
   return r.json().catch(function(){return {};}).then(function(j){
-   if(!r.ok){var e=(j&&j.error&&j.error.message)||('HTTP '+r.status);throw new Error(e);}
+   if(!r.ok){var text=(j&&j.error&&j.error.message)||('HTTP '+r.status);var e=new Error(text);e.status=r.status;e.body=j;throw e;}
    return j;
   });
  });
@@ -360,7 +364,7 @@ function doRotateKey(){
 // ---------- tabs ----------
 var cfgDraftPending=false;
 function switchTab(name){
- ['alerts','status','sources','config','system'].forEach(function(n){
+ ['alerts','status','sources','dashboard','config','system'].forEach(function(n){
   $('pane_'+n).style.display=(n===name)?'block':'none';
  });
  var links=document.querySelectorAll('nav a.tab');
@@ -368,14 +372,15 @@ function switchTab(name){
  if(name==='alerts')loadAlerts();
  if(name==='status')loadStatus();
  if(name==='sources'){loadSources();loadPresets();}
+ if(name==='dashboard'&&window.DashboardEditor)DashboardEditor.enter();
  if(name==='config'){if(cfgDraftPending){cfgDraftPending=false;}else{loadConfig();}}
 }
 // ---------- init ----------
 document.querySelectorAll('nav a.tab').forEach(function(a){
- a.onclick=function(e){e.preventDefault();switchTab(a.getAttribute('data-tab'));};
+ a.onclick=function(e){e.preventDefault();var name=a.getAttribute('data-tab');if(window.DashboardEditor&&!DashboardEditor.canLeave(name))return;switchTab(name);};
 });
-$('btn_logout').onclick=function(e){e.preventDefault();doLogout();};
-$('lang_toggle').onclick=function(e){e.preventDefault();LANG=LANG==='zh'?'en':'zh';applyI18n();switchTab('alerts');};
+$('btn_logout').onclick=function(e){e.preventDefault();if(window.DashboardEditor&&!DashboardEditor.canLeave('logout'))return;doLogout();};
+$('lang_toggle').onclick=function(e){e.preventDefault();LANG=LANG==='zh'?'en':'zh';applyI18n();if(window.DashboardEditor)DashboardEditor.language();};
 $('pw').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin();});
 // 静态按钮统一在此绑定（CSP default-src 'self' 禁止内联 on* 属性；
 // 同源外部脚本的 .onclick 属性赋值不受限）
