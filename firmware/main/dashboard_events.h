@@ -14,10 +14,12 @@
 
 namespace panel {
 
+inline constexpr char kDashboardAlertCorePrefix[] = "alert_core:";
+
 inline eego::dashboard::Event dashboardEventFromAlert(const alert_core::AlertRecord& record,
                                                       const std::string& linked_panel_id) {
   eego::dashboard::Event event;
-  event.id = record.id;
+  event.id = std::string(kDashboardAlertCorePrefix) + record.id;
   event.rule_id = record.type;
   event.source_id = record.source.id;
   event.timestamp_ms = static_cast<int64_t>(record.last_seen) * 1000;
@@ -33,6 +35,20 @@ inline eego::dashboard::Event dashboardEventFromAlert(const alert_core::AlertRec
                     ? eego::dashboard::EventState::Active
                     : eego::dashboard::EventState::Cleared;
   return event;
+}
+
+inline std::string dashboardCoreRecordId(const eego::dashboard::Event& event) {
+  const std::string prefix(kDashboardAlertCorePrefix);
+  return event.id.rfind(prefix, 0) == 0 ? event.id.substr(prefix.size()) : std::string();
+}
+
+inline std::string dashboardEventIdentity(const std::string& source_id,
+                                          const std::string& event_id) {
+  return source_id + "\n" + event_id;
+}
+
+inline std::string dashboardEventIdentity(const eego::dashboard::Event& event) {
+  return dashboardEventIdentity(event.source_id, event.id);
 }
 
 inline bool dashboardSourceEventsEqual(const eego::dashboard::pipeline::SourceResult* left,
@@ -149,7 +165,7 @@ inline bool dashboardShouldDisplay(bool renderer_refresh_needed, bool status_dir
 class DashboardEventTracker {
  public:
   uint64_t observe(const eego::dashboard::Event& event) {
-    Generation& current = generations_[event.id];
+    Generation& current = generations_[dashboardEventIdentity(event)];
     if (current.generation == 0) {
       current.generation = 1;
       current.last_state = event.state;
@@ -171,19 +187,35 @@ class DashboardEventTracker {
     return current.generation;
   }
 
-  uint64_t generation(const std::string& id) const {
-    const auto found = generations_.find(id);
+  uint64_t generation(const std::string& identity) const {
+    const auto found = generations_.find(identity);
     return found == generations_.end() ? 0 : found->second.generation;
   }
 
-  void acknowledge(const std::string& id, uint64_t generation) {
-    if (generation != 0) acknowledged_[id] = generation;
+  uint64_t generation(const eego::dashboard::Event& event) const {
+    return generation(dashboardEventIdentity(event));
   }
 
-  void eraseAcknowledgement(const std::string& id) { acknowledged_.erase(id); }
+  void acknowledge(const std::string& identity, uint64_t generation) {
+    if (generation != 0) acknowledged_[identity] = generation;
+  }
+
+  void acknowledge(const eego::dashboard::Event& event, uint64_t generation) {
+    acknowledge(dashboardEventIdentity(event), generation);
+  }
+
+  void eraseAcknowledgement(const std::string& identity) { acknowledged_.erase(identity); }
+
+  void eraseAcknowledgement(const eego::dashboard::Event& event) {
+    eraseAcknowledgement(dashboardEventIdentity(event));
+  }
+
+  void eraseAcknowledgement(const std::string& source_id, const std::string& event_id) {
+    eraseAcknowledgement(dashboardEventIdentity(source_id, event_id));
+  }
 
   bool suppressed(const eego::dashboard::Event& event, uint64_t generation) const {
-    const auto found = acknowledged_.find(idFor(event));
+    const auto found = acknowledged_.find(dashboardEventIdentity(event));
     return event.state == eego::dashboard::EventState::Active && found != acknowledged_.end() &&
            found->second == generation;
   }
@@ -201,10 +233,48 @@ class DashboardEventTracker {
     int64_t last_timestamp_ms = -1;
   };
 
-  static const std::string& idFor(const eego::dashboard::Event& event) { return event.id; }
-
   std::map<std::string, Generation> generations_;
   std::map<std::string, uint64_t> acknowledged_;
 };
+
+inline const eego::dashboard::AlertRule* dashboardRuleForEvent(
+    const std::vector<eego::dashboard::AlertRule>& rules, const eego::dashboard::Event& event) {
+  for (const eego::dashboard::AlertRule& rule : rules) {
+    if (rule.id == event.rule_id) return &rule;
+  }
+  return nullptr;
+}
+
+inline const eego::dashboard::Event* dashboardBannerEvent(
+    const std::vector<eego::dashboard::Event>& events,
+    const std::vector<eego::dashboard::AlertRule>& rules,
+    const DashboardEventTracker& tracker) {
+  const eego::dashboard::Event* selected = nullptr;
+  for (const eego::dashboard::Event& event : events) {
+    if (event.state != eego::dashboard::EventState::Active ||
+        tracker.suppressed(event, tracker.generation(event))) {
+      continue;
+    }
+    const eego::dashboard::AlertRule* rule = dashboardRuleForEvent(rules, event);
+    if (rule == nullptr || (rule->style.surfaces & eego::dashboard::kAlertSurfaceBanner) == 0)
+      continue;
+    if (selected == nullptr || event.timestamp_ms > selected->timestamp_ms ||
+        (event.timestamp_ms == selected->timestamp_ms &&
+         static_cast<uint8_t>(event.severity) > static_cast<uint8_t>(selected->severity))) {
+      selected = &event;
+    }
+  }
+  return selected;
+}
+
+inline std::string dashboardBannerSignature(
+    const std::vector<eego::dashboard::Event>& events,
+    const std::vector<eego::dashboard::AlertRule>& rules,
+    const DashboardEventTracker& tracker) {
+  const eego::dashboard::Event* event = dashboardBannerEvent(events, rules, tracker);
+  if (event == nullptr) return {};
+  return dashboardEventIdentity(*event) + "\n" + eego::dashboard::severityName(event->severity) +
+         "\n" + event->title;
+}
 
 }  // namespace panel

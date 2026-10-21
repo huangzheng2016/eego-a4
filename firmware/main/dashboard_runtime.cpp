@@ -26,6 +26,7 @@
 #include "data_pipeline/data_pipeline.h"
 #include "dashboard_diag.h"
 #include "dashboard_events.h"
+#include "dashboard_power.h"
 #include "dashboard_publication.h"
 #include "eego_hal.h"
 #include "eego_ui.h"
@@ -221,7 +222,7 @@ std::string sampleKey(const dash::MetricSample& sample) {
 }
 
 std::string eventKey(const dash::Event& event) {
-  return event.id + "\n" + std::to_string(event.timestamp_ms) + "\n" +
+  return dashboardEventIdentity(event) + "\n" + std::to_string(event.timestamp_ms) + "\n" +
          std::to_string(static_cast<unsigned>(event.state));
 }
 
@@ -527,7 +528,15 @@ struct DashboardRuntime::Impl {
       candidate->setPanelRefreshOverride(item.first, item.second, ignored);
     }
 
+    const bool suspend = dashboardReloadShouldSuspend(
+        battery_cycle_cancelled, mains, battery_cycle_active, monotonicMs(),
+        battery_cycle_deadline_ms);
+    if (suspend) {
+      battery_cycle_cancelled = true;
+      if (pipeline != nullptr) pipeline->cancelAsync();
+    }
     pipeline = std::move(candidate);
+    if (suspend) pipeline->cancelAsync();
     config = std::move(next_config);
     plans = std::move(next_plans);
     overrides = std::move(next_overrides);
@@ -541,6 +550,7 @@ struct DashboardRuntime::Impl {
     published_panels.clear();
     raw_samples.clear();
     rule_samples.clear();
+    banner_signature.clear();
     rule_states.clear();
     event_tracker.reset();
     navigation.clear();
@@ -975,6 +985,7 @@ struct DashboardRuntime::Impl {
       appendEvent(event, seen_events);
     }
     rebuildLayout();
+    updateBannerDirty();
   }
 
   bool eventMatches(const dash::PanelSpec& panel, const dash::Event& event) const {
@@ -1011,7 +1022,7 @@ struct DashboardRuntime::Impl {
     if (id.empty()) return nullptr;
     const dash::Event* latest = nullptr;
     for (const dash::Event& event : view.events) {
-      if (event.id == id &&
+      if (dashboardEventIdentity(event) == id &&
           (latest == nullptr || event.timestamp_ms >= latest->timestamp_ms)) {
         latest = &event;
       }
@@ -1043,14 +1054,14 @@ struct DashboardRuntime::Impl {
         if (!state.active && monotonic - state.true_since_ms >= rule.for_ms) {
           state.active = true;
           state.event_id = "rule_" + rule.id;
-          event_tracker.eraseAcknowledgement(state.event_id);
+          event_tracker.eraseAcknowledgement(rule.source_id, state.event_id);
           changed = true;
         }
       } else {
         state.true_since_ms = -1;
         if (state.active) {
           state.active = false;
-          event_tracker.eraseAcknowledgement(state.event_id);
+          event_tracker.eraseAcknowledgement(rule.source_id, state.event_id);
           changed = true;
         }
       }
@@ -1270,18 +1281,19 @@ struct DashboardRuntime::Impl {
       showMessage("No active alert to acknowledge");
       return false;
     }
-    const std::string id = event->id;
-    if (deps.alerts != nullptr && deps.net != nullptr) {
+    const std::string identity = dashboardEventIdentity(*event);
+    const std::string core_id = dashboardCoreRecordId(*event);
+    if (!core_id.empty() && deps.alerts != nullptr && deps.net != nullptr) {
       const auto snapshot = deps.alerts->acquire();
       if (snapshot != nullptr) {
         for (const alert_core::AlertRecord& record : snapshot->records) {
-          if (record.id != id) continue;
+          if (record.id != core_id) continue;
           if (record.state != alert_core::AlertState::Active) {
             showMessage("Alert is not active");
             return false;
           }
           const auto result = deps.net->alertAction(
-              {eego::net::AlertActionType::Ack, id, "dashboard"});
+              {eego::net::AlertActionType::Ack, core_id, "dashboard"});
           if (result.code != eego::net::AlertActionResult::Code::Ok) {
             showMessage("Alert acknowledge failed");
             return false;
@@ -1290,9 +1302,9 @@ struct DashboardRuntime::Impl {
         }
       }
     }
-    event_tracker.acknowledge(id, event_tracker.generation(id));
+    event_tracker.acknowledge(*event, event_tracker.generation(*event));
     rebuildData();
-    if (const dash::Event* changed = findEvent(id)) {
+    if (const dash::Event* changed = findEvent(identity)) {
       for (const dash::Page& current : view.pages) {
         for (const dash::PanelSpec& panel : current.panels) {
           if (panel.kind == dash::PanelKind::Alert && eventMatches(panel, *changed))
@@ -1372,7 +1384,7 @@ struct DashboardRuntime::Impl {
       if (event != nullptr) {
         const std::string linked = linkedForEvent(*event);
         if (!linked.empty()) {
-          const std::string event_id = event->id;
+          const std::string event_id = dashboardEventIdentity(*event);
           if (focusPanel(linked)) focused_event_id = event_id;
           return;
         }
@@ -1420,7 +1432,7 @@ struct DashboardRuntime::Impl {
         if (body.h > 0 && y >= body.y) {
           const size_t row = static_cast<size_t>((y - body.y) / row_height);
           if (row < events.size()) {
-            const std::string event_id = events[row]->id;
+            const std::string event_id = dashboardEventIdentity(*events[row]);
             focused_event_id = event_id;
             const std::string linked = linkedForEvent(*events[row]);
             if (!linked.empty()) {
@@ -1603,18 +1615,15 @@ struct DashboardRuntime::Impl {
   }
 
   const dash::Event* bannerEvent() const {
-    const dash::Event* selected = nullptr;
-    for (const dash::Event& event : view.events) {
-      if (event.state != dash::EventState::Active || event_tracker.suppressed(event, event_tracker.generation(event.id))) continue;
-      const dash::AlertRule* rule = ruleForEvent(event);
-      if (rule == nullptr || (rule->style.surfaces & dash::kAlertSurfaceBanner) == 0) continue;
-      if (selected == nullptr || event.timestamp_ms > selected->timestamp_ms ||
-          (event.timestamp_ms == selected->timestamp_ms &&
-           static_cast<uint8_t>(event.severity) > static_cast<uint8_t>(selected->severity))) {
-        selected = &event;
-      }
-    }
-    return selected;
+    return dashboardBannerEvent(view.events, config.alert_rules, event_tracker);
+  }
+
+  void updateBannerDirty() {
+    const std::string signature = dashboardBannerSignature(view.events, config.alert_rules, event_tracker);
+    if (signature == banner_signature) return;
+    banner_signature = signature;
+    status_dirty = true;
+    dirty = true;
   }
 
   void drawAlertMarkers() {
@@ -1625,7 +1634,7 @@ struct DashboardRuntime::Impl {
       }
       const dash::Event* newest = nullptr;
       for (const dash::Event& event : view.events) {
-        if (event.state != dash::EventState::Active || event_tracker.suppressed(event, event_tracker.generation(event.id)) ||
+        if (event.state != dash::EventState::Active || event_tracker.suppressed(event, event_tracker.generation(event)) ||
             linkedForEvent(event) != item.panel->id) {
           continue;
         }
@@ -1670,6 +1679,7 @@ struct DashboardRuntime::Impl {
   }
 
   std::string banner_event_id;
+  std::string banner_signature;
 
   void drawStatus() {
     banner_event_id.clear();
@@ -1678,7 +1688,7 @@ struct DashboardRuntime::Impl {
     if (!message.empty()) {
       text = message;
     } else if (const dash::Event* event = bannerEvent()) {
-      banner_event_id = event->id;
+      banner_event_id = dashboardEventIdentity(*event);
       text = std::string(dash::severityName(event->severity)) + " " + event->title;
       if (!linkedForEvent(*event).empty()) text += "  [TREND]";
     } else {
@@ -2045,7 +2055,7 @@ void DashboardRuntime::touch(int16_t x, int16_t y) {
     if (const dash::Event* event = impl_->findEvent(impl_->banner_event_id)) {
       const std::string linked = impl_->linkedForEvent(*event);
       if (!linked.empty()) {
-        const std::string event_id = event->id;
+        const std::string event_id = dashboardEventIdentity(*event);
         if (impl_->focusPanel(linked)) impl_->focused_event_id = event_id;
         return;
       }

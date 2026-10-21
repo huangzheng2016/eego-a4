@@ -15,17 +15,24 @@ inline bool dashboardSensitiveVariableName(std::string name) {
     const std::string tail(suffix);
     return name.size() >= tail.size() && name.compare(name.size() - tail.size(), tail.size(), tail) == 0;
   };
-  if (ends("_ref")) return false;
+  std::string compact;
+  compact.reserve(name.size());
+  for (const unsigned char c : name) {
+    if (std::isalnum(c)) compact.push_back(static_cast<char>(c));
+  }
+  auto endsCompact = [&](const char* suffix) {
+    const std::string tail(suffix);
+    return compact.size() >= tail.size() &&
+           compact.compare(compact.size() - tail.size(), tail.size(), tail) == 0;
+  };
+  if (ends("_ref") || compact == "dedupkey") return false;
   for (const char* marker : {"password", "passwd", "passphrase", "secret", "token", "auth",
                              "credential", "psk"}) {
-    if (name.find(marker) != std::string::npos) return true;
+    if (compact.find(marker) != std::string::npos) return true;
   }
-  if (name == "key" || name == "apikey" || name == "api-key" || name == "ingestkey" ||
-      name == "accesskey" || name == "wifikey" || name == "pwd") {
-    return true;
-  }
-  if (ends("_key") && name != "dedup_key") return true;
-  return ends("_pwd") || ends("_pass");
+  if (compact == "key" || compact == "pass" || compact == "pwd") return true;
+  if (endsCompact("key")) return true;
+  return endsCompact("pass") || endsCompact("passwd") || endsCompact("pwd");
 }
 
 }  // namespace panel
