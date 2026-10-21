@@ -237,7 +237,8 @@ extern "C" void app_main(void) {
 
   // 6b. 静音规则恢复（M21）：config.mute_rules → net_task（重估已恢复记录的
   //     muted 标志 + 快照发布）。FW5 的 NVS UI 指纹表在此一次性迁移为 store
-  //     级指纹规则（迁移后清空 NVS 键）。
+  //     级指纹规则：合并表先落盘 config.json（与面板 persistMuteRules 同路径），
+  //     成功后才清 NVS 键——commit 失败时 NVS 是唯一副本，保留待下次启动重试。
   {
     std::vector<alert_core::MuteRule> mute_rules = config.muteRules();
     panel::DevicePrefs& legacy_prefs = panel::DevicePrefs::instance();
@@ -260,12 +261,22 @@ extern "C" void app_main(void) {
         migrated++;
       }
     }
-    if (!legacy_prefs.mutes().empty()) {
+    bool persist_ok = true;
+    if (migrated > 0) {
+      alert_core::JsonValue dom = config.rawDom();
+      std::string cerr;
+      persist_ok = config.setMuteRulesInDom(dom, mute_rules) && config.commit(dom, cerr);
+      if (persist_ok) {
+        ESP_LOGI(TAG, "legacy UI mutes migrated to store rules: %u (persisted to config.json)",
+                 static_cast<unsigned>(migrated));
+      } else {
+        ESP_LOGE(TAG, "legacy mute migration persist failed, NVS copy kept (%s)",
+                 cerr.c_str());
+      }
+    }
+    if (!legacy_prefs.mutes().empty() && persist_ok) {
       legacy_prefs.clearMutes();
       legacy_prefs.save();
-    }
-    if (migrated > 0) {
-      ESP_LOGI(TAG, "legacy UI mutes migrated to store rules: %u", static_cast<unsigned>(migrated));
     }
     std::string mute_err;
     if (!eego::net::NetStack::instance().setMuteRules(mute_rules, mute_err)) {

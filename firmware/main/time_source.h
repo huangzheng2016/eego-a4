@@ -4,8 +4,9 @@
 // 统一时间源（M21）—— 面板/net_task/告警库共用的唯一墙钟。
 //
 // 优先级（M11「RTC+NTP（WiFi 上来后 sntp 同步）」）：
-//   1. 系统时间可信（≥ kPlausibleFloor，SNTP 已同步或启动时已从 RTC 设置）
-//      → time(nullptr)：SNTP 每小时自同步保持准确，TLS 证书校验同源；
+//   1. 系统时间可信（≥ eego::net::kPlausibleUnixFloor，SNTP 已同步或启动时
+//      已从 RTC 设置）→ time(nullptr)：SNTP 每小时自同步保持准确，TLS 证书
+//      校验同源；
 //   2. RTC（PCF8563）读数有效（VL 未置位）→ RTC epoch：电池唤醒/离线兜底；
 //   3. 都不可用 → now() 返回退化值（0 附近）且 valid()=false。
 //
@@ -35,11 +36,6 @@ class TimeSource {
   // RTC 回写（M21：SNTP 同步成功后由 net_task 经 NetStackConfig.rtc_write_fn
   // 调用；unix → PCF8563）。无 RTC/写失败返回 false（如实，不重试风暴）。
   static bool writeRtc(uint64_t unix_now);
-
- private:
-  // 可信度下限：2024-01-01T00:00:00Z。系统时间低于它说明从未被 SNTP/RTC
-  // 设置过（ESP 上电系统时间从 0 走），高于它必然来自真实授时。
-  static constexpr uint64_t kPlausibleFloor = 1704067200ULL;
 };
 
 }  // namespace panel

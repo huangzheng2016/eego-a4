@@ -21,6 +21,11 @@
 
 namespace eego::net {
 
+// 统一时间可信度下限（M21）：unix 秒低于此值说明系统时间从未被 SNTP/RTC
+// 设置过（ESP 上电从 0 走）。net_task 回退判定、admin /status 降级判定与
+// main 统一时间源（panel::TimeSource）共用同一常量，防静默漂移。
+constexpr uint64_t kPlausibleUnixFloor = 1704067200ULL;  // 2024-01-01T00:00:00Z
+
 struct TimeSyncStatus {
   bool sntp_synced = false;   // 至少成功同步过一次（本次运行）
   uint64_t last_sync_at = 0;  // 最近一次 SNTP 同步 unix 秒（0 = 从未）
@@ -31,9 +36,13 @@ class TimeSync {
   // RTC 回写钩子：入参 unix 秒，返回是否写成功（组合根注入 PCF8563 写）。
   using RtcWriteFn = std::function<bool(uint64_t unix_now)>;
 
+  // 接线（NetStack::start 调用；仅 SNTP 未初始化时生效，重复调用忽略并
+  // 告警——不支持运行期重配：esp_sntp_setservername 让 lwIP 直接持有服务器
+  // 字符串的 c_str 指针而不拷贝，运行期替换 servers_ 会使已注册指针悬垂。
+  // 首次配置进程内终身有效，NetStack stop→start 复用同一份）。
   // servers 为空用默认（cn.pool.ntp.org / pool.ntp.org，按
   // CONFIG_LWIP_SNTP_MAX_SERVERS 截断——本工程为 1，实配首个）。rtc_write
-  // 可空（无 RTC 时纯 SNTP；同步状态仍可查询）。幂等可重配。
+  // 可空（无 RTC 时纯 SNTP；同步状态仍可查询）。
   void configure(std::vector<std::string> servers, RtcWriteFn rtc_write);
 
   // WiFi 刚连上（net_task 上下文）：首次初始化 esp_sntp，此后 stop+init 强制

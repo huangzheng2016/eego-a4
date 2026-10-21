@@ -28,6 +28,12 @@ void onSntpSync(struct timeval* tv) {
 }  // namespace
 
 void TimeSync::configure(std::vector<std::string> servers, RtcWriteFn rtc_write) {
+  if (sntp_initialized_) {
+    // 运行期重配守卫：lwIP 持有 servers_ 字符串的 c_str 指针（不拷贝），
+    // 重配会使已注册指针悬垂——忽略并告警（见头文件合同）
+    ESP_LOGW(TAG, "time sync reconfigure ignored (sntp already initialized)");
+    return;
+  }
   servers_ = std::move(servers);
   rtc_write_ = std::move(rtc_write);
   g_instance = this;

@@ -5,6 +5,7 @@
 #include <ctime>
 #include <sys/time.h>
 
+#include "net_stack/time_sync.h"  // eego::net::kPlausibleUnixFloor（共享下限）
 #include "pcf8563_rtc.h"
 
 namespace panel {
@@ -21,19 +22,19 @@ eego::Pcf8563Rtc& timeRtc() {
 
 uint64_t TimeSource::now() {
   const uint64_t sys = static_cast<uint64_t>(time(nullptr));
-  if (sys >= kPlausibleFloor) return sys;
+  if (sys >= eego::net::kPlausibleUnixFloor) return sys;
   const eego::RtcTime t = timeRtc().readTime();
   if (t.valid) return static_cast<uint64_t>(timeRtc().toEpoch(t));
   return sys;  // 退化值（0 附近）；调用方以 valid() 判定，不得当作有效时间
 }
 
 bool TimeSource::valid() {
-  if (static_cast<uint64_t>(time(nullptr)) >= kPlausibleFloor) return true;
+  if (static_cast<uint64_t>(time(nullptr)) >= eego::net::kPlausibleUnixFloor) return true;
   return timeRtc().readTime().valid;
 }
 
 bool TimeSource::syncSystemFromRtc() {
-  if (static_cast<uint64_t>(time(nullptr)) >= kPlausibleFloor) return false;
+  if (static_cast<uint64_t>(time(nullptr)) >= eego::net::kPlausibleUnixFloor) return false;
   const eego::RtcTime t = timeRtc().readTime();
   if (!t.valid) return false;
   const time_t epoch = timeRtc().toEpoch(t);

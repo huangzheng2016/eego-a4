@@ -114,10 +114,11 @@ struct NetStack::Impl {
   uint64_t nowUnix() const {
     return self->time_fn_ ? self->time_fn_() : (uint64_t)time(nullptr);
   }
-  // 统一时间源可信判定（M21）：组合根 time_valid_fn 优先，退化 time_fn()>0
+  // 统一时间源可信判定（M21）：组合根 time_valid_fn 优先；未注入的回退
+  // 用共享可信度下限（kPlausibleUnixFloor，防与展示层判定漂移）
   bool timeValid() const {
     if (self->cfg_.time_valid_fn) return self->cfg_.time_valid_fn();
-    return nowUnix() > 0;
+    return nowUnix() >= kPlausibleUnixFloor;
   }
 
   // 任何 store 变更点（摄入/告警动作/适配器 runCycle/过期/静音规则）之后调用：

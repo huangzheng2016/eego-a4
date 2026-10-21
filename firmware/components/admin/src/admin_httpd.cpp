@@ -726,7 +726,7 @@ esp_err_t h_status(httpd_req_t* req) {
                          JsonValue::makeInt(static_cast<int64_t>(ns.time.last_sync_at)));
   } else {
     const int64_t sys = static_cast<int64_t>(time(nullptr));
-    timeobj.emplace_back("valid", JsonValue::makeBool(sys >= 1704067200LL));
+    timeobj.emplace_back("valid", JsonValue::makeBool(sys >= net::kPlausibleUnixFloor));
     timeobj.emplace_back("now", JsonValue::makeInt(sys));
     timeobj.emplace_back("sntp_synced", JsonValue::makeBool(false));
     timeobj.emplace_back("last_sync_at", JsonValue::makeInt(0));
