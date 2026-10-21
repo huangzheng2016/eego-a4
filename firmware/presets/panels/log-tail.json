@@ -1,0 +1,98 @@
+{
+  "schema": "eego.dashboard-preset/1",
+  "schema_version": 1,
+  "id": "log-tail",
+  "kind": "panel",
+  "title": "Log tail",
+  "description": "Remote multiline log tail, bounded to eight lines and 4096 code points.",
+  "dashboard": {
+    "sources": [
+      {
+        "id": "text",
+        "kind": "http",
+        "enabled": true,
+        "url": "http://${mock_host}/text?scenario=log",
+        "refresh_ms": 60000,
+        "timeout_ms": 10000,
+        "max_response_bytes": 65536,
+        "tls_verify": true,
+        "auth_token_ref": "",
+        "headers": {}
+      }
+    ],
+    "variables": [
+      {
+        "name": "mock_host",
+        "label": "Mock host:port",
+        "kind": "text",
+        "default_value": "127.0.0.1:8978",
+        "options": [],
+        "source_id": "",
+        "value_path": "",
+        "multi": false,
+        "include_all": false
+      }
+    ],
+    "pages": [
+      {
+        "id": "main",
+        "title": "Overview",
+        "visible": true,
+        "grid_columns": 24,
+        "row_height": 16,
+        "panels": [
+          {
+            "id": "logs",
+            "kind": "text",
+            "grid": {
+              "x": 0,
+              "y": 0,
+              "w": 24,
+              "h": 8
+            },
+            "title": "Log tail",
+            "visible": true,
+            "refresh_ms": 60000,
+            "text": {
+              "content": "Loading logs…",
+              "multiline": true,
+              "max_lines": 8
+            },
+            "style": {
+              "variant": "log_tail"
+            },
+            "source_id": "text",
+            "metric": "text"
+          }
+        ]
+      }
+    ],
+    "alert_rules": [],
+    "assets": [],
+    "samples": [],
+    "events": []
+  },
+  "source_plans": [
+    {
+      "id": "text",
+      "kind": "http",
+      "enabled": true,
+      "url": "http://${mock_host}/text?scenario=log",
+      "refresh_ms": 60000,
+      "timeout_ms": 10000,
+      "max_response_bytes": 65536,
+      "tls_verify": true,
+      "auth_token_ref": "",
+      "headers": {},
+      "response": "text",
+      "method": "GET",
+      "body": "",
+      "static_body": "",
+      "text_path": "",
+      "reset_at_path": "$.reset_at",
+      "stale_after_ms": 300000,
+      "conditional_get": true,
+      "max_json_depth": 16
+    }
+  ]
+}

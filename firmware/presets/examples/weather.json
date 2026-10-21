@@ -1,0 +1,252 @@
+{
+  "schema": "eego.dashboard-bundle/1",
+  "schema_version": 1,
+  "revision": 0,
+  "dashboard": {
+    "schema": "eego.dashboard/2",
+    "schema_version": 2,
+    "id": "weather",
+    "title": "Weather",
+    "default_page_id": "main",
+    "refresh_ms": 60000,
+    "sources": [
+      {
+        "id": "weather",
+        "kind": "http",
+        "enabled": true,
+        "url": "http://${mock_host}/weather",
+        "refresh_ms": 60000,
+        "timeout_ms": 10000,
+        "max_response_bytes": 65536,
+        "tls_verify": true,
+        "auth_token_ref": "",
+        "headers": {}
+      },
+      {
+        "id": "weather_image",
+        "kind": "http",
+        "enabled": true,
+        "url": "http://${mock_host}/assets/weather.png",
+        "refresh_ms": 60000,
+        "timeout_ms": 10000,
+        "max_response_bytes": 65536,
+        "tls_verify": true,
+        "auth_token_ref": "",
+        "headers": {}
+      }
+    ],
+    "variables": [
+      {
+        "name": "mock_host",
+        "label": "Mock host:port",
+        "kind": "text",
+        "default_value": "127.0.0.1:8978",
+        "options": [],
+        "source_id": "",
+        "value_path": "",
+        "multi": false,
+        "include_all": false
+      },
+      {
+        "name": "city",
+        "label": "City",
+        "kind": "constant",
+        "default_value": "Shanghai",
+        "options": [
+          {
+            "label": "Shanghai",
+            "value": "Shanghai"
+          },
+          {
+            "label": "Shenzhen",
+            "value": "Shenzhen"
+          }
+        ],
+        "source_id": "",
+        "value_path": "",
+        "multi": false,
+        "include_all": false
+      }
+    ],
+    "pages": [
+      {
+        "id": "main",
+        "title": "Overview",
+        "visible": true,
+        "grid_columns": 24,
+        "row_height": 16,
+        "panels": [
+          {
+            "id": "temperature",
+            "kind": "card",
+            "grid": {
+              "x": 0,
+              "y": 0,
+              "w": 8,
+              "h": 4
+            },
+            "title": "Temperature / ${city}",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "weather",
+            "metric": "weather.temperature",
+            "style": {
+              "variant": "default",
+              "precision": 1,
+              "unit": "C"
+            }
+          },
+          {
+            "id": "humidity",
+            "kind": "card",
+            "grid": {
+              "x": 8,
+              "y": 0,
+              "w": 8,
+              "h": 4
+            },
+            "title": "Humidity",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "weather",
+            "metric": "weather.humidity",
+            "style": {
+              "variant": "default",
+              "precision": 0,
+              "unit": "%"
+            }
+          },
+          {
+            "id": "wind",
+            "kind": "card",
+            "grid": {
+              "x": 16,
+              "y": 0,
+              "w": 8,
+              "h": 4
+            },
+            "title": "Wind",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "weather",
+            "metric": "weather.wind_speed",
+            "style": {
+              "variant": "default",
+              "precision": 1,
+              "unit": "km/h"
+            }
+          },
+          {
+            "id": "weather_chart",
+            "kind": "chart",
+            "grid": {
+              "x": 0,
+              "y": 4,
+              "w": 16,
+              "h": 4
+            },
+            "title": "Temperature window",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "weather",
+            "metric": "weather.temperature",
+            "chart": {
+              "kind": "line",
+              "show_points": true,
+              "fill": true,
+              "y_min": null,
+              "y_max": null
+            },
+            "style": {
+              "unit": "C",
+              "precision": 1,
+              "line_width": 2
+            },
+            "time_window": {
+              "from": "-5h",
+              "to": "now"
+            }
+          },
+          {
+            "id": "weather_image_panel",
+            "kind": "image",
+            "grid": {
+              "x": 16,
+              "y": 4,
+              "w": 8,
+              "h": 4
+            },
+            "title": "Conditions",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "weather_image",
+            "metric": "image",
+            "image": {
+              "asset_id": "weather_image",
+              "alt_text": "Weather image unavailable",
+              "fit": "contain"
+            }
+          }
+        ]
+      }
+    ],
+    "alert_rules": [],
+    "assets": [
+      {
+        "id": "weather_image",
+        "kind": "image",
+        "uri": "http://${mock_host}/assets/weather.png",
+        "media_type": "image/png",
+        "sha256": "",
+        "size_bytes": 0,
+        "cache_seconds": 900
+      }
+    ],
+    "samples": [],
+    "events": []
+  },
+  "source_plans": [
+    {
+      "id": "weather",
+      "kind": "http",
+      "enabled": true,
+      "url": "http://${mock_host}/weather",
+      "refresh_ms": 60000,
+      "timeout_ms": 10000,
+      "max_response_bytes": 65536,
+      "tls_verify": true,
+      "auth_token_ref": "",
+      "headers": {},
+      "response": "standard_json",
+      "method": "GET",
+      "body": "",
+      "static_body": "",
+      "text_path": "",
+      "reset_at_path": "$.reset_at",
+      "stale_after_ms": 300000,
+      "conditional_get": true,
+      "max_json_depth": 16
+    },
+    {
+      "id": "weather_image",
+      "kind": "http",
+      "enabled": true,
+      "url": "http://${mock_host}/assets/weather.png",
+      "refresh_ms": 60000,
+      "timeout_ms": 10000,
+      "max_response_bytes": 65536,
+      "tls_verify": true,
+      "auth_token_ref": "",
+      "headers": {},
+      "response": "image",
+      "method": "GET",
+      "body": "",
+      "static_body": "",
+      "text_path": "",
+      "reset_at_path": "$.reset_at",
+      "stale_after_ms": 300000,
+      "conditional_get": true,
+      "max_json_depth": 16
+    }
+  ]
+}

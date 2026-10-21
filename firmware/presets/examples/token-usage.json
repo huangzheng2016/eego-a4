@@ -1,0 +1,304 @@
+{
+  "schema": "eego.dashboard-bundle/1",
+  "schema_version": 1,
+  "revision": 0,
+  "dashboard": {
+    "schema": "eego.dashboard/2",
+    "schema_version": 2,
+    "id": "token-usage",
+    "title": "TOKEN usage",
+    "default_page_id": "main",
+    "refresh_ms": 60000,
+    "sources": [
+      {
+        "id": "token",
+        "kind": "http",
+        "enabled": true,
+        "url": "http://${mock_host}/token",
+        "refresh_ms": 60000,
+        "timeout_ms": 10000,
+        "max_response_bytes": 65536,
+        "tls_verify": true,
+        "auth_token_ref": "",
+        "headers": {}
+      }
+    ],
+    "variables": [
+      {
+        "name": "mock_host",
+        "label": "Mock host:port",
+        "kind": "text",
+        "default_value": "127.0.0.1:8978",
+        "options": [],
+        "source_id": "",
+        "value_path": "",
+        "multi": false,
+        "include_all": false
+      },
+      {
+        "name": "account",
+        "label": "Account",
+        "kind": "text",
+        "default_value": "demo-account",
+        "options": [],
+        "source_id": "",
+        "value_path": "",
+        "multi": false,
+        "include_all": false
+      }
+    ],
+    "pages": [
+      {
+        "id": "main",
+        "title": "Overview",
+        "visible": true,
+        "grid_columns": 24,
+        "row_height": 16,
+        "panels": [
+          {
+            "id": "token_used",
+            "kind": "card",
+            "grid": {
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 4
+            },
+            "title": "TOKEN used / ${account}",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "token",
+            "metric": "token.used",
+            "style": {
+              "variant": "default",
+              "precision": 0,
+              "unit": "tokens"
+            },
+            "thresholds": [
+              {
+                "value": 80000,
+                "severity": "warning",
+                "label": "High"
+              },
+              {
+                "value": 95000,
+                "severity": "critical",
+                "label": "Near quota"
+              }
+            ]
+          },
+          {
+            "id": "token_remaining",
+            "kind": "card",
+            "grid": {
+              "x": 12,
+              "y": 0,
+              "w": 12,
+              "h": 4
+            },
+            "title": "TOKEN remaining",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "token",
+            "metric": "token.remaining",
+            "style": {
+              "variant": "progress",
+              "precision": 0,
+              "unit": "%",
+              "invert": true
+            },
+            "thresholds": [
+              {
+                "value": 20,
+                "severity": "warning",
+                "label": "Low"
+              },
+              {
+                "value": 10,
+                "severity": "critical",
+                "label": "Exhausted"
+              }
+            ]
+          },
+          {
+            "id": "token_trend",
+            "kind": "chart",
+            "grid": {
+              "x": 0,
+              "y": 4,
+              "w": 16,
+              "h": 4
+            },
+            "title": "TOKEN window",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "token",
+            "metric": "token.used",
+            "chart": {
+              "kind": "line",
+              "show_points": false,
+              "fill": true,
+              "y_min": 0,
+              "y_max": null
+            },
+            "style": {
+              "unit": "tokens",
+              "precision": 0,
+              "line_width": 2
+            },
+            "time_window": {
+              "from": "-5h",
+              "to": "now"
+            }
+          },
+          {
+            "id": "token_actions",
+            "kind": "button",
+            "grid": {
+              "x": 16,
+              "y": 4,
+              "w": 8,
+              "h": 4
+            },
+            "title": "Actions",
+            "visible": true,
+            "refresh_ms": 60000,
+            "actions": [
+              {
+                "id": "refresh",
+                "kind": "refresh",
+                "label": "Refresh",
+                "target": "token",
+                "value": "",
+                "confirm": false
+              },
+              {
+                "id": "details",
+                "kind": "goto_page",
+                "label": "Details",
+                "target": "details",
+                "value": "",
+                "confirm": false
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "details",
+        "title": "TOKEN details",
+        "visible": true,
+        "grid_columns": 24,
+        "row_height": 16,
+        "panels": [
+          {
+            "id": "token_table",
+            "kind": "table",
+            "grid": {
+              "x": 0,
+              "y": 0,
+              "w": 24,
+              "h": 6
+            },
+            "title": "TOKEN metrics",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "token",
+            "metric": "token.used",
+            "columns": [
+              {
+                "key": "value",
+                "title": "Used",
+                "unit": "tokens",
+                "width": 6
+              },
+              {
+                "key": "account",
+                "title": "Account",
+                "width": 10
+              },
+              {
+                "key": "timestamp_ms",
+                "title": "Timestamp",
+                "width": 10
+              }
+            ],
+            "style": {
+              "precision": 0
+            }
+          },
+          {
+            "id": "back",
+            "kind": "button",
+            "grid": {
+              "x": 0,
+              "y": 6,
+              "w": 24,
+              "h": 2
+            },
+            "title": "Back",
+            "visible": true,
+            "refresh_ms": 60000,
+            "actions": [
+              {
+                "id": "back",
+                "kind": "back",
+                "label": "Back",
+                "target": "",
+                "value": "",
+                "confirm": false
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "alert_rules": [
+      {
+        "id": "token_quota",
+        "title": "TOKEN quota",
+        "enabled": true,
+        "source_id": "token",
+        "metric": "token.used",
+        "expression": "value > 80000",
+        "for_ms": 0,
+        "message": "TOKEN usage exceeds the configured example threshold",
+        "style": {
+          "surfaces": [
+            "banner",
+            "card",
+            "table_row"
+          ],
+          "severity": "warning",
+          "linked_panel_id": "token_used"
+        }
+      }
+    ],
+    "assets": [],
+    "samples": [],
+    "events": []
+  },
+  "source_plans": [
+    {
+      "id": "token",
+      "kind": "http",
+      "enabled": true,
+      "url": "http://${mock_host}/token",
+      "refresh_ms": 60000,
+      "timeout_ms": 10000,
+      "max_response_bytes": 65536,
+      "tls_verify": true,
+      "auth_token_ref": "",
+      "headers": {},
+      "response": "standard_json",
+      "method": "GET",
+      "body": "",
+      "static_body": "",
+      "text_path": "",
+      "reset_at_path": "$.reset_at",
+      "stale_after_ms": 300000,
+      "conditional_get": true,
+      "max_json_depth": 16
+    }
+  ]
+}

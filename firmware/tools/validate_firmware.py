@@ -21,8 +21,10 @@
   7. admin_schema    GET /config/schema 的 JSON 与 C++ 常量静态一致
                      （schema_version/默认值/上限 ↔ kSchemaVersion/AdminDomainConfig/
                      kMaxSources/kMaxTtlSeconds）
+  8. dashboard_presets 30 个预设与 4 个完整示例：v2 schema、目录/来源/变量/
+                     面板/动作/资源引用、source plan、布局及 128/192/32KiB 预算
 
-本工具只做静态文本/结构检查，不编译、不刷写。
+本工具只做静态文本/结构检查，不编译、不刷写；不替代设备端导入校验。
 """
 
 from __future__ import annotations
@@ -32,6 +34,8 @@ import json
 import re
 import sys
 from pathlib import Path
+
+from dashboard_validation import check_library
 
 # ---------------------------------------------------------------------------
 # 审计策略（修改树结构时同步更新本表）
@@ -570,11 +574,23 @@ def check_admin_schema(root: Path, rep: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 检查 8：dashboard 预设库、完整示例、source plan 与资源预算
+# ---------------------------------------------------------------------------
+
+def check_dashboard_library(root: Path, rep: Report) -> None:
+    errors, stats = check_library(root)
+    rep.check(not errors, "dashboard_presets",
+              f"{stats['presets']} 个预设 + {stats['examples']} 个完整示例；"
+              f"最大 bundle={stats['max_bundle_bytes']}B dashboard={stats['max_dashboard_bytes']}B",
+              f"{len(errors)} 个错误: " + " | ".join(errors[:8]))
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="firmware/ 树静态审计（依赖方向/必需文件/禁止残留/许可头/schema 一致性）")
+    ap = argparse.ArgumentParser(description="firmware/ 树静态审计（依赖/许可/dashboard/schema/预算）")
     ap.add_argument("--root", default=None,
                     help="firmware/ 目录（默认取本脚本所在目录的上一级）")
     ap.add_argument("--json", action="store_true", help="JSON 输出")
@@ -594,6 +610,7 @@ def main() -> int:
     check_partitions(root, rep)
     check_sdkconfig(root, rep)
     check_admin_schema(root, rep)
+    check_dashboard_library(root, rep)
     rep.print(args.json)
     return 1 if rep.fail_n else 0
 

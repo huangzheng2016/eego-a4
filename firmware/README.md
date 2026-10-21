@@ -149,6 +149,138 @@ zh/en 语言环境渲染预设名称与说明。预设只是 `SourceConfig` 起�
 不硬吃）。响应 2xx 原始 body 落 SD `cache/<source>.json`；连续 miss 达标自动
 清除在册活动记录。
 
+## 数据面板与预设库
+
+完整数据面板使用 `eego.dashboard/2`；HTTP 持久化格式是
+`eego.dashboard-bundle/1`（`dashboard + source_plans + revision`）。它沿用上述告警
+系统，同时提供 card/chart/table/text/image/button/alert 七类现有 panel。
+**30 个可选 panel/layout 的起点、四个完整场景和 mock 契约见
+[presets/README.md](presets/README.md)。** 预设不是按 TOKEN/天气场景硬编码的固件分支；
+四类示例只是通用指标、事件、文本和图片映射的实例。
+
+### 从选择预设到设备生效
+
+1. 启动演示源（真机联调需显式监听 LAN）：
+
+   ```sh
+   python3 firmware/tools/mock_dashboard_server.py --host 0.0.0.0 --port 8978
+   ```
+
+2. 选择并展开一个预设。将地址改为运行 mock 的电脑 LAN IP；不要保留真机不可用的
+   `127.0.0.1`：
+
+   ```sh
+   python3 firmware/tools/preset_tool.py list
+   python3 firmware/tools/preset_tool.py export chart-kpi \
+     --mock-host 192.168.1.20:8978 --output .tmp/chart-kpi.json
+   python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
+   ```
+
+   `eego.dashboard-preset/1` 和 `presets/index.json` 是主机侧目录/模板格式，
+   **不能原样 POST 给设备**。export 后才是设备原生 bundle。四个
+   `presets/examples/*.json` 无需展开，可直接导入；它们需要 mock 或替换为真实源，
+   不承诺离线显示演示数据。
+
+3. 浏览器登录 `http://<device-ip>/`，进入「数据面板」：导入 JSON → 校验 → 应用。
+   导入只替换草稿，应用后才原子生效。编辑器可维护 dashboard、页面、panel、source、
+   变量、告警规则和布局；高级 JSON 区可编辑 assets/samples/events。修改 source 时，
+   编辑器同步对应 plan 的连接字段；手工编辑时必须自行保持 `id/kind/enabled/url/
+   refresh_ms/timeout_ms/max_response_bytes/tls_verify/auth_token_ref/headers` 一致。
+4. 在 source 表单先做「测试」。结果只含归一化指标/事件/文本/图片元数据，不回显原始
+   响应。应用前运行主机全量检查：
+
+   ```sh
+   python3 firmware/tools/validate_firmware.py
+   python3 firmware/tools/preset_tool.py validate-library
+   ```
+
+也可全走 HTTP API（均需 Bearer，写操作要求 JSON 和同源策略）：
+
+| 端点 | 用途 |
+|---|---|
+| `GET /api/v1/dashboard/schema` / `sample` | schema 信息 / 内置样板 |
+| `GET /api/v1/dashboard` / `export` | 读取当前 bundle / 导出；`format=canonical` 仅 dashboard |
+| `POST /api/v1/dashboard/validate` | 只校验候选 bundle，不修改设备 |
+| `POST /api/v1/dashboard` | 仅在未配置时创建；已配置返回 409 |
+| `PUT /api/v1/dashboard`（或 `POST /import`） | 校验并原子替换整个 bundle |
+| `DELETE /api/v1/dashboard` | 删除 dashboard，不影响其他管理配置 |
+| `POST /api/v1/dashboard/sources/test` | 测试草稿 plan，返回安全归一化预览 |
+| `/api/v1/dashboard/pages...`、`/sources...`、`/variables...`、`/alerts...` | 对应资源的 GET/增删改 |
+
+写操作带 `If-Match: <revision>`；首次/强制流程可按 API 支持使用 `If-Match: *`，但多客户端
+编辑应读取最新 revision，过期写返回 409，不能靠覆盖避免冲突。典型替换：
+
+```sh
+curl -H "Authorization: Bearer $EEGO_TOKEN" \
+  -H 'Content-Type: application/json' --data-binary @.tmp/chart-kpi.json \
+  http://192.168.1.30/api/v1/dashboard/validate
+curl -X PUT -H "Authorization: Bearer $EEGO_TOKEN" -H 'If-Match: *' \
+  -H 'Content-Type: application/json' --data-binary @.tmp/chart-kpi.json \
+  http://192.168.1.30/api/v1/dashboard
+```
+
+不要把管理 token 写进 preset、mock、命令历史或日志。数据源的长期凭据使用现有 NVS
+credential 流程，bundle 只保存 `auth_token_ref: "nvs:<key>"`；`Authorization` 请求头由
+运行层解析引用后临时生成，不能作为普通 headers 持久化。
+
+### 数据映射与服务器脚本边界
+
+- `standard_json` 直接读取 `metrics[]`、`events[]`、可选 `text`；`metrics_json` 和
+  `events_json` 只取对应集合。`generic_json` 用声明式 JSONPath 映射异构 JSON；
+  `prometheus` 读取现有 scalar/vector/matrix 响应；`text` 和 `image` 处理原始 body。
+- metric 的标准字段为 `metric/value/unit/timestamp_ms/labels`，时间戳可为秒、毫秒或
+  ISO-8601；事件字段为 `id/rule_id/timestamp_ms/severity/state/title/message/
+  linked_panel_id`。面板用 `source_id + metric` 绑定序列；chart/table 必须绑定，双/三
+  指标 card 还需同页 linked cards 和不同序列。
+- `time_window` 使用 `now`、`now-15m`、`-1h` 或带 `ms/s/m/h/d/w` 的时长。窗口历史
+  可聚合 sum/avg/min/max/delta/rate；`value_expression` 和告警 expression 只允许现有
+  白名单表达式（算术、比较、条件和 convert/min/max/clamp 等），不是通用脚本。
+- 复杂 OAuth 流程、分页、嵌套 API 聚合、日志格式化、键值提取、业务告警计数和图片
+  生成应放在**用户服务器脚本**。设备不嵌入 Python/JavaScript 运行时，不执行预设或
+  响应中的代码。变量 `${name}` 仅做单次插值，`$${name}` 输出字面值，变量内容不会
+  再被扫描成表达式。
+- `alert-count` 读取源提供的 `alerts.active`；`key-value`/`log-tail` 读取源预格式化
+  文本；面积图只是 `line + fill`；状态格/热力图/时间线读取 metric samples。不要假设
+  设备会把日志解析成指标、把事件自动聚合成计数或支持 Grafana 全部 transform。
+- 图片使用现有 PNG/JPEG 灰度解码；GIF/SVG 不在支持范围。网络图片 plan 的
+  `response=image` 与 dashboard asset URI 对应，SD 图片用 `sd:` 或无 `..` 的绝对路径。
+
+### 设备交互与刷新语义
+
+- 触控按钮直接命中对应 action；点选 alert 行可聚焦事件并跳到 linked panel；底部左右
+  区域切换页面。Up/Down 短按移动焦点，Power 短按激活，Power 长按返回；Up/Down 长按
+  在多动作按钮间切换、轮换 chart/变量或调整数据刷新周期。
+- action 仅支持 `goto_page/goto_panel/set_variable/refresh/back/ack_alert`。`confirm=true`
+  或 ack 需要在 5 秒窗口内再次确认；目标在最新快照上重新校验。`refresh` 的 `all/current/
+  <source>` 只安排**数据轮询**，不等于强制墨水屏全刷。
+- panel 数据/文本/图片或状态变化按 fingerprint 标脏，未变化可跳过绘制；结构、翻页和
+  布局变化会触发更大的重绘。面板周期可覆盖为配置默认或 1/5/15/30 分钟，运行层实际
+  panel 调度最小 1 分钟。电子纸不适合秒级动画，建议普通源 1–5 分钟、天气 5–15 分钟、
+  图片 15 分钟以上，并按信息价值减少全屏变化。
+- 电池模式只在唤醒/交互窗口联网轮询，不能宣传实时推送；常电模式按快照和 dirty panel
+  更新。离线与 stale 状态不等同于清空最后缓存，source 健康需在真机核对。
+
+### 配置、内存与渲染预算
+
+以下是**硬上限/配置上限，不是实测剩余 RAM 或性能保证**；主机校验只能拒绝超限配置。
+
+| 项目 | 上限/行为 |
+|---|---|
+| dashboard / HTTP bundle / 单个 source plan | 128 KiB / 192 KiB / 32 KiB；bundle JSON 深度 18，dashboard/plan 深度 16 |
+| 集合 | 12 sources、24 variables、12 pages、24 panels/page、72 panels 总数、48 alert rules、24 assets |
+| panel | 8 actions、16 thresholds、16 links、24 columns；文本 4096 code points、1–64 行（还受像素高度限制） |
+| 配置快照与映射结果 | 2048 samples、256 events；每 plan 64 metric mappings、16 event mappings；映射记录最多 2048 |
+| 单个 source 响应 | 默认 64 KiB，可配 1–256 KiB；超限失败，不静默截断 |
+| 图表与状态 | 每 chart 最多 128 绘制点；status grid 32、heatmap 64、timeline 16、alert panel 256 条 |
+| 历史 | 64 series、256 display points/series、8192 总 display points、1441 raw points/series、保留 8 天 |
+| SD cache | history 16 MiB、单 source snapshot 512 KiB；写入采用临时文件 + rename |
+| 网络图片 | 响应最大 256 KiB；UI 编码图片输入最大 512 KiB；PNG/JPEG，单边最大 4096 且总像素最大 1,048,576 |
+| 图片缓存 | 最多 2 项、合计 512 KiB；PNG 还需整图 RGBA/灰度工作区，不能把编码大小当作峰值内存 |
+
+屏幕布局映射为 4 个逻辑列、每屏 8 行；24 格 grid 只是声明便利，超出 8 行会分页。
+预设均按单屏无重叠校验。多个大 PNG、多数据源长历史和高频全屏变化仍可能造成内存或
+刷新压力，需用 `idf.py size`、串口 dashboard 诊断、内部 RAM 水位和真机刷新耗时验收。
+
 ## 供电模式
 
 设置页/串口 `status` 可见当前模式；`PowerMode` 三档（NVS 持久）：
@@ -186,25 +318,38 @@ zh/en 语言环境渲染预设名称与说明。预设只是 `SourceConfig` 起�
 ## SD 卡布局
 
 ```
-/sdcard/alertpanel/config.json      # 配置（schema_version=1；secrets 只有 *_ref）
+/sdcard/alertpanel/config.json      # 管理配置（schema_version=1；secrets 只有 *_ref）
+/sdcard/alertpanel/dashboard.json   # dashboard bundle + revision（原子持久化）
 /sdcard/alertpanel/alerts.db        # 告警库（JSONL，原子持久化）
-/sdcard/alertpanel/cache/<src>.json # 各轮询源 2xx 原始响应缓存
+/sdcard/alertpanel/cache/<src>.json # 告警轮询源 2xx 原始响应缓存
+/sdcard/alertpanel/dashboard_cache/ # dashboard 历史、归一化快照和图片缓存
 /sdcard/fonts/...                   # 可选 UI 字体（.eefont/.bin，配置 admin.display.font）
 ```
 
-SD 未挂载时：告警库降级为内存运行（重启丢失），状态页如实显示。
+SD 未挂载时：告警库降级为内存运行（重启丢失），状态页如实显示；dashboard 持久缓存
+不可用不能被报告为已保存。缓存和导出仍不得包含凭据明文。
 
 ## 主机工具（firmware/tools/）
 
 ```sh
-# 1) 静态自检：依赖方向/必需文件/禁止残留/许可头/partitions/sdkconfig/schema 一致性
+# 1) 静态自检：依赖/许可/partitions/sdkconfig/admin + dashboard schema、引用和预算
 python3 firmware/tools/validate_firmware.py            # 任一 FAIL 退出码 1
 
-# 2) mock 告警源：8 场景（normal/batch/dup/clear/ttl/oversize/badlen/slow）
+# 2) 预设目录、单个 bundle 校验、整库校验与主机侧展开
+python3 firmware/tools/preset_tool.py list
+python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
+python3 firmware/tools/preset_tool.py validate-library
+python3 firmware/tools/preset_tool.py export metric-single --output .tmp/metric-single.json
+
+# 3) 通用 dashboard mock：metrics/events/text/assets/window + 四场景
+python3 firmware/tools/mock_dashboard_server.py --host 0.0.0.0 --port 8978
+python3 firmware/tools/mock_dashboard_server.py --self-test
+
+# 4) mock 告警源：8 场景（normal/batch/dup/clear/ttl/oversize/badlen/slow）
 python3 firmware/tools/mock_alert_server.py --host 0.0.0.0 --port 8977
 #   设备 sources[] 指向 http://<主机IP>:8977/<场景>；索引页 / 给出建议 SourceConfig
 
-# 3) 真机串口 smoke（绝不刷写设备；需 pyserial）
+# 5) 真机串口 smoke（绝不刷写设备；需 pyserial）
 python3 firmware/tools/smoke_serial_test.py --port /dev/cu.usbmodem* \
     --admin-password '<管理密码>' --mock-url http://<主机IP>:8977/normal
 ```
@@ -233,7 +378,14 @@ python3 firmware/tools/smoke_serial_test.py --port /dev/cu.usbmodem* \
 - [ ] API 登录：`smoke_serial_test.py` 的 api 项（登录/负例 401/status/logout）
 - [ ] 供电模式：电池档下轮询-休眠-唤醒循环；常电档下 http_push 即时到达
 - [ ] 告警持久化：重启后 `alerts.db` 恢复在册告警
+- [ ] DP 四场景：TOKEN、天气、服务器、网络安全示例经 HTTP 校验/应用，窗口数据、
+      事件、文本与 PNG 均正确；source test 不泄露原始响应或凭据
+- [ ] DP 交互/预算：双/三指标 linked cards、按钮组、变量切换、二次确认 ack、局部/
+      全量刷新、离线缓存、大图内存水位和电池唤醒窗口逐项核对
 - [ ] 连续运行（soak）：≥72h 无异常重启、内部 RAM 水位稳定（P3 项）
 
-未真机验证项会在发布记录中如实标注（构建产物未刷入设备时，结论严格绑定
-实体机镜像哈希，见仓库 `docs/VALIDATION.md`）。
+仅运行 `validate_firmware.py`、mock `--self-test` 或主机 C++ parser 时，30 个预设的
+实际排版/字体/灰阶、触控与按键、图片解码峰值、网络重试、SD 持久化和墨水屏刷新耗时
+**均为真机未验证项**；不得把这些主机结果写成整产品真机验收。未真机验证项会在发布
+记录中如实标注（构建产物未刷入设备时，结论严格绑定实体机镜像哈希，见仓库
+`docs/VALIDATION.md`）。
