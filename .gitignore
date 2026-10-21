@@ -1,0 +1,17 @@
+.pio/
+.cache/
+.tmp/
+.idea/
+.vscode/
+captures/
+dist/
+release/
+sdkconfig.*
+__pycache__/
+*.pyc
+.DS_Store
+*.elf
+*.map
+compile_commands.json
+.venv/
+venv/
