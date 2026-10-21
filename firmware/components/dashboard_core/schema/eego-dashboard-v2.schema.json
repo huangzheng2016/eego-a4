@@ -1,0 +1,420 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eego.local/schemas/eego-dashboard-v2.schema.json",
+  "title": "EEGO Dashboard v2",
+  "description": "Canonical eego.dashboard/2 configuration. Cross-reference validity, the 128 KiB input byte budget, JSON depth 16, and total panel count 72 are enforced by dashboard_core. ParseOptions may only tighten canonical byte, depth, and collection budgets. String maxLength values count Unicode code points, matching Draft 2020-12.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "id", "pages"],
+  "properties": {
+    "schema": {"const": "eego.dashboard/2"},
+    "schema_version": {"const": 2},
+    "id": {"$ref": "#/$defs/id"},
+    "title": {"type": "string", "maxLength": 160, "default": "", "description": "Missing and explicitly empty titles are preserved as empty; no ID substitution occurs."},
+    "default_page_id": {"$ref": "#/$defs/referenceId", "default": ""},
+    "refresh_ms": {"type": "integer", "minimum": 1000, "maximum": 86400000, "default": 60000},
+    "sources": {"type": "array", "maxItems": 12, "default": [], "items": {"$ref": "#/$defs/source"}},
+    "variables": {"type": "array", "maxItems": 24, "default": [], "items": {"$ref": "#/$defs/variable"}},
+    "pages": {"type": "array", "minItems": 1, "maxItems": 12, "items": {"$ref": "#/$defs/page"}},
+    "alert_rules": {"type": "array", "maxItems": 48, "default": [], "items": {"$ref": "#/$defs/alertRule"}},
+    "assets": {"type": "array", "maxItems": 24, "default": [], "items": {"$ref": "#/$defs/asset"}},
+    "samples": {"type": "array", "maxItems": 2048, "default": [], "items": {"$ref": "#/$defs/metricSample"}},
+    "events": {"type": "array", "maxItems": 256, "default": [], "items": {"$ref": "#/$defs/event"}}
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "referenceId": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^([A-Za-z0-9_-]+)?$"
+    },
+    "variableName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "severity": {"enum": ["info", "warning", "critical"]},
+    "labels": {
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": {"type": "string", "minLength": 1, "maxLength": 64},
+      "additionalProperties": {"type": "string", "maxLength": 512},
+      "default": {}
+    },
+    "headers": {
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 512,
+        "pattern": "^[^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*$"
+      },
+      "default": {},
+      "description": "Authorization, Host, and Content-Length are reserved and rejected by semantic validation."
+    },
+    "grid": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "x": {"type": "integer", "minimum": 0, "maximum": 100000, "default": 0},
+        "y": {"type": "integer", "minimum": 0, "maximum": 100000, "default": 0},
+        "w": {"type": "integer", "minimum": 1, "maximum": 256, "default": 6},
+        "h": {"type": "integer", "minimum": 1, "maximum": 100000, "default": 4}
+      },
+      "default": {}
+    },
+    "timeWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "from": {"type": "string", "maxLength": 32, "default": "-1h"},
+        "to": {"type": "string", "maxLength": 32, "default": "now"}
+      },
+      "default": {},
+      "description": "Values are now, now-duration, -duration, or a duration using ms/s/m/h/d/w."
+    },
+    "style": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "unit": {"type": "string", "maxLength": 32, "default": ""},
+        "precision": {"type": "integer", "minimum": 0, "maximum": 8, "default": 2},
+        "line_width": {"type": "integer", "minimum": 1, "maximum": 8, "default": 1},
+        "show_legend": {"type": "boolean", "default": true},
+        "invert": {"type": "boolean", "default": false}
+      },
+      "default": {}
+    },
+    "threshold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value"],
+      "properties": {
+        "value": {"type": "number"},
+        "severity": {"$ref": "#/$defs/severity", "default": "info"},
+        "label": {"type": "string", "maxLength": 160, "default": ""}
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["goto_page", "goto_panel", "set_variable", "refresh", "back", "ack_alert"]},
+        "label": {"type": "string", "maxLength": 160, "default": ""},
+        "target": {"type": "string", "maxLength": 64, "default": ""},
+        "value": {"type": "string", "maxLength": 512, "default": ""},
+        "confirm": {"type": "boolean"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "back"}}},
+          "then": {"properties": {"target": {"maxLength": 0}, "value": {"maxLength": 0}}}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "ack_alert"}}},
+          "then": {
+            "required": ["target"],
+            "properties": {
+              "target": {"enum": ["current", "focused"]},
+              "value": {"maxLength": 0},
+              "confirm": {"default": true}
+            }
+          },
+          "else": {"properties": {"confirm": {"default": false}}}
+        },
+        {
+          "if": {"properties": {"kind": {"enum": ["goto_page", "goto_panel", "set_variable", "refresh"]}}},
+          "then": {"required": ["target"], "properties": {"target": {"$ref": "#/$defs/id"}}}
+        },
+        {
+          "if": {"properties": {"kind": {"not": {"const": "set_variable"}}}},
+          "then": {"properties": {"value": {"maxLength": 0}}}
+        }
+      ],
+      "description": "refresh targets all, current, or a registered source ID and means data poll, not e-paper redisplay. ack_alert defaults to confirm=true on import and revalidates current/focused against the active snapshot; risk policy may force confirmation."
+    },
+    "textSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content": {"type": "string", "maxLength": 4096, "default": ""},
+        "multiline": {"type": "boolean", "default": false},
+        "max_lines": {"type": "integer", "minimum": 1, "maximum": 64}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["multiline"], "properties": {"multiline": {"const": true}}},
+          "then": {"properties": {"max_lines": {"default": 8}}},
+          "else": {"properties": {"max_lines": {"default": 1, "maximum": 1}}}
+        }
+      ],
+      "default": {}
+    },
+    "imageSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_id"],
+      "properties": {
+        "asset_id": {"$ref": "#/$defs/id"},
+        "alt_text": {"type": "string", "maxLength": 160, "default": ""},
+        "fit": {"enum": ["contain", "cover", "stretch"], "default": "contain"}
+      },
+      "description": "asset_id must reference an asset whose kind is image."
+    },
+    "chartSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["line", "bar", "sparkline"], "default": "line"},
+        "show_points": {"type": "boolean", "default": false},
+        "fill": {"type": "boolean", "default": false},
+        "y_min": {"type": ["number", "null"], "default": null},
+        "y_max": {"type": ["number", "null"], "default": null}
+      },
+      "default": {}
+    },
+    "tableColumn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key"],
+      "properties": {
+        "key": {"type": "string", "minLength": 1, "maxLength": 64},
+        "title": {"type": "string", "maxLength": 160, "default": ""},
+        "unit": {"type": "string", "maxLength": 32, "default": ""},
+        "width": {"type": "integer", "minimum": 1, "maximum": 64, "default": 4}
+      }
+    },
+    "panel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["text", "image", "card", "table", "button", "alert", "chart"]},
+        "grid": {"$ref": "#/$defs/grid"},
+        "title": {"type": "string", "maxLength": 160, "default": ""},
+        "visible": {"type": "boolean", "default": true},
+        "source_id": {"$ref": "#/$defs/referenceId", "default": ""},
+        "metric": {"type": "string", "maxLength": 128, "default": ""},
+        "value_path": {"type": "string", "maxLength": 256, "default": ""},
+        "value_expression": {"type": "string", "maxLength": 512, "default": ""},
+        "time_window": {"$ref": "#/$defs/timeWindow"},
+        "refresh_ms": {"type": "integer", "minimum": 0, "maximum": 86400000, "default": 60000},
+        "thresholds": {"type": "array", "maxItems": 16, "default": [], "items": {"$ref": "#/$defs/threshold"}},
+        "style": {"$ref": "#/$defs/style"},
+        "linked_panel_ids": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "default": [],
+          "items": {"$ref": "#/$defs/id"}
+        },
+        "actions": {"type": "array", "maxItems": 8, "default": [], "items": {"$ref": "#/$defs/action"}},
+        "text": {"$ref": "#/$defs/textSpec"},
+        "image": {"$ref": "#/$defs/imageSpec"},
+        "chart": {"$ref": "#/$defs/chartSpec"},
+        "columns": {"type": "array", "maxItems": 24, "items": {"$ref": "#/$defs/tableColumn"}}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "image"}}},
+          "then": {"required": ["image"]},
+          "else": {"not": {"required": ["image"]}}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "chart"}}},
+          "then": {"required": ["source_id", "metric"], "properties": {"source_id": {"$ref": "#/$defs/id"}, "metric": {"minLength": 1}}},
+          "else": {"not": {"required": ["chart"]}}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "table"}}},
+          "then": {
+            "required": ["source_id", "metric", "columns"],
+            "properties": {
+              "source_id": {"$ref": "#/$defs/id"},
+              "metric": {"minLength": 1},
+              "columns": {"minItems": 1}
+            }
+          },
+          "else": {"not": {"required": ["columns"]}}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "button"}}},
+          "then": {"required": ["actions"], "properties": {"actions": {"minItems": 1}}}
+        },
+        {
+          "if": {"properties": {"kind": {"enum": ["text", "card", "alert"]}}},
+          "else": {"not": {"required": ["text"]}}
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["http", "static"], "default": "http"},
+        "enabled": {"type": "boolean", "default": true},
+        "url": {"type": "string", "maxLength": 1024, "default": ""},
+        "refresh_ms": {"type": "integer", "minimum": 1000, "maximum": 86400000, "default": 60000},
+        "timeout_ms": {"type": "integer", "minimum": 100, "maximum": 120000, "default": 10000},
+        "max_response_bytes": {"type": "integer", "minimum": 1024, "maximum": 262144, "default": 65536},
+        "tls_verify": {"type": "boolean", "default": true},
+        "auth_token_ref": {"type": "string", "maxLength": 128, "default": ""},
+        "headers": {"$ref": "#/$defs/headers"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "http"}}},
+          "then": {"required": ["url"], "properties": {"url": {"minLength": 1, "pattern": "^https?://"}}},
+          "else": {"properties": {"url": {"maxLength": 0}}}
+        }
+      ]
+    },
+    "variableOption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value"],
+      "properties": {
+        "label": {"type": "string", "maxLength": 160, "default": ""},
+        "value": {"type": "string", "maxLength": 512}
+      }
+    },
+    "variable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {"$ref": "#/$defs/variableName"},
+        "label": {"type": "string", "maxLength": 160, "default": ""},
+        "kind": {"enum": ["text", "constant", "query", "time_range", "locale"], "default": "text"},
+        "default_value": {"type": "string", "maxLength": 512, "default": ""},
+        "options": {"type": "array", "maxItems": 64, "default": [], "items": {"$ref": "#/$defs/variableOption"}},
+        "source_id": {"$ref": "#/$defs/referenceId", "default": ""},
+        "value_path": {"type": "string", "maxLength": 256, "default": ""},
+        "multi": {"type": "boolean", "default": false},
+        "include_all": {"type": "boolean", "default": false}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["kind"], "properties": {"kind": {"const": "query"}}},
+          "then": {
+            "required": ["source_id", "value_path"],
+            "properties": {"source_id": {"$ref": "#/$defs/id"}, "value_path": {"minLength": 1}}
+          },
+          "else": {"properties": {"source_id": {"maxLength": 0}}}
+        }
+      ]
+    },
+    "alertStyle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "surfaces": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {"enum": ["banner", "card", "table_row", "sparkline"]},
+          "default": ["card"]
+        },
+        "severity": {"$ref": "#/$defs/severity", "default": "info"},
+        "linked_panel_id": {"$ref": "#/$defs/referenceId", "default": ""}
+      },
+      "default": {}
+    },
+    "alertRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source_id", "metric", "expression"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "title": {"type": "string", "maxLength": 160, "default": ""},
+        "enabled": {"type": "boolean", "default": true},
+        "source_id": {"$ref": "#/$defs/id"},
+        "metric": {"type": "string", "minLength": 1, "maxLength": 128},
+        "expression": {"type": "string", "minLength": 1, "maxLength": 512},
+        "for_ms": {"type": "integer", "minimum": 0, "maximum": 604800000, "default": 0},
+        "message": {"type": "string", "maxLength": 4096, "default": ""},
+        "style": {"$ref": "#/$defs/alertStyle"}
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "uri"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["image", "font", "binary"], "default": "image"},
+        "uri": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^(https?://|sd:|/)"},
+        "media_type": {"type": "string", "maxLength": 128, "default": ""},
+        "sha256": {"type": "string", "pattern": "^([0-9A-Fa-f]{64})?$", "default": ""},
+        "size_bytes": {"type": "integer", "minimum": 0, "maximum": 67108864, "default": 0},
+        "cache_seconds": {"type": "integer", "minimum": 0, "maximum": 31536000, "default": 3600}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"uri": {"pattern": "^(sd:|/)"}}},
+          "then": {"properties": {"uri": {"not": {"pattern": "(^|[/:\\u005C])\\.\\.([/\\u005C]|$)"}}}}
+        }
+      ]
+    },
+    "metricSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metric", "value"],
+      "properties": {
+        "source_id": {"$ref": "#/$defs/referenceId", "default": ""},
+        "metric": {"type": "string", "minLength": 1, "maxLength": 128},
+        "timestamp_ms": {"type": "integer", "minimum": 0, "default": 0},
+        "value": {"type": "number"},
+        "unit": {"type": "string", "maxLength": 32, "default": ""},
+        "labels": {"$ref": "#/$defs/labels"}
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "rule_id": {"$ref": "#/$defs/referenceId", "default": ""},
+        "source_id": {"$ref": "#/$defs/referenceId", "default": ""},
+        "timestamp_ms": {"type": "integer", "minimum": 0, "default": 0},
+        "severity": {"$ref": "#/$defs/severity", "default": "info"},
+        "state": {"enum": ["active", "cleared"], "default": "active"},
+        "title": {"type": "string", "maxLength": 160, "default": ""},
+        "message": {"type": "string", "maxLength": 4096, "default": ""},
+        "linked_panel_id": {"$ref": "#/$defs/referenceId", "default": ""}
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "title": {"type": "string", "maxLength": 160, "default": ""},
+        "visible": {"type": "boolean", "default": true},
+        "grid_columns": {"type": "integer", "minimum": 1, "maximum": 64, "default": 24},
+        "row_height": {"type": "integer", "minimum": 1, "maximum": 256, "default": 16},
+        "panels": {"type": "array", "maxItems": 24, "default": [], "items": {"$ref": "#/$defs/panel"}}
+      }
+    }
+  }
+}
