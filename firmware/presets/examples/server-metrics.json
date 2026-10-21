@@ -14,7 +14,7 @@
         "id": "server",
         "kind": "http",
         "enabled": true,
-        "url": "http://${mock_host}/server",
+        "url": "http://${mock_host}/server?host=${server_name}",
         "refresh_ms": 60000,
         "timeout_ms": 10000,
         "max_response_bytes": 65536,
@@ -38,9 +38,18 @@
       {
         "name": "server_name",
         "label": "Server",
-        "kind": "text",
+        "kind": "constant",
         "default_value": "srv-demo",
-        "options": [],
+        "options": [
+          {
+            "label": "Demo server",
+            "value": "srv-demo"
+          },
+          {
+            "label": "Backup server",
+            "value": "srv-backup"
+          }
+        ],
         "source_id": "",
         "value_path": "",
         "multi": false,
@@ -360,7 +369,7 @@
       "id": "server",
       "kind": "http",
       "enabled": true,
-      "url": "http://${mock_host}/server",
+      "url": "http://${mock_host}/server?host=${server_name}",
       "refresh_ms": 60000,
       "timeout_ms": 10000,
       "max_response_bytes": 65536,

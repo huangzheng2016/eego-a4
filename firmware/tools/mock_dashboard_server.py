@@ -18,7 +18,6 @@ import urllib.request
 import zlib
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 _lock = threading.Lock()
 _poll_count = defaultdict(int)
@@ -74,43 +73,52 @@ def metrics_payload():
     return {"metrics": records, "events": [], "text": "Generic metrics updated"}
 
 
-def token_payload():
+def query_value(query, key, default):
+    value = query.get(key, [default])[0].strip() if query else default
+    return value[:64] if value else default
+
+
+def token_payload(query=None):
+    account = query_value(query, "account", "demo-account")
     used = [52000 + index * 1350 for index in range(24)]
-    records = series("token.used", used, "tokens", {"account": "demo-account"}, step_ms=900000)
+    records = series("token.used", used, "tokens", {"account": account}, step_ms=900000)
     remaining = max(0, 100 - used[-1] / 1000)
-    records += series("token.remaining", [remaining + 2, remaining], "percent",
-                      {"account": "demo-account"})
-    records += series("token.input", [31000, 32450], "tokens", {"account": "demo-account"})
-    records += series("token.output", [19000, 20300], "tokens", {"account": "demo-account"})
+    records += series("token.remaining", [remaining + 2, remaining], "percent", {"account": account})
+    records += series("token.input", [31000, 32450], "tokens", {"account": account})
+    records += series("token.output", [19000, 20300], "tokens", {"account": account})
     return {"metrics": records, "events": [], "text": "TOKEN mock data is not a provider bill"}
 
 
-def weather_payload():
-    temperature = [round(21 + 4 * math.sin(index / 3.2) + index * 0.08, 1) for index in range(24)]
-    records = series("weather.temperature", temperature, "C", {"city": "Shanghai"}, step_ms=900000)
-    records += series("weather.humidity", [66, 64], "percent", {"city": "Shanghai"})
-    records += series("weather.wind_speed", [12.4, 11.8], "km/h", {"city": "Shanghai"})
-    records += series("weather.pressure", [1014, 1013], "hPa", {"city": "Shanghai"})
-    records += series("weather.aqi", [42, 39], "AQI", {"city": "Shanghai"})
+def weather_payload(query=None):
+    city = query_value(query, "city", "Shanghai")
+    offset = 2 if city == "Shenzhen" else 0
+    temperature = [round(21 + offset + 4 * math.sin(index / 3.2) + index * 0.08, 1)
+                   for index in range(24)]
+    records = series("weather.temperature", temperature, "C", {"city": city}, step_ms=900000)
+    records += series("weather.humidity", [66, 64], "percent", {"city": city})
+    records += series("weather.wind_speed", [12.4, 11.8], "km/h", {"city": city})
+    records += series("weather.pressure", [1014, 1013], "hPa", {"city": city})
+    records += series("weather.aqi", [42, 39], "AQI", {"city": city})
     events = [event("weather-advisory", "info", "Weather advisory", "Mock breeze from the east", now_ms())]
-    return {"metrics": records, "events": events, "text": "Shanghai: mild with a light breeze"}
+    return {"metrics": records, "events": events, "text": f"{city}: mild with a light breeze"}
 
 
-def server_payload():
+def server_payload(query=None):
+    host = query_value(query, "host", "srv-demo")
     cpu = [38, 42, 47, 44, 51, 58, 54, 63, 68, 61, 72, 77,
            69, 74, 82, 79, 85, 88, 81, 76, 83, 89, 84, 86]
     memory = [55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
               67, 66, 68, 69, 70, 71, 72, 73, 72, 74, 73, 72]
-    records = series("server.cpu", cpu, "percent", {"server": "srv-demo", "name": "srv-demo"})
-    records += series("server.memory", memory, "percent", {"server": "srv-demo", "name": "srv-demo"})
-    records += series("server.disk", [61, 62], "percent", {"server": "srv-demo", "name": "srv-demo"})
+    records = series("server.cpu", cpu, "percent", {"server": host, "name": host})
+    records += series("server.memory", memory, "percent", {"server": host, "name": host})
+    records += series("server.disk", [61, 62], "percent", {"server": host, "name": host})
     records += [metric("server.health", value, "state", now_ms(), name=name, status=status)
-                for name, value, status in (("srv-demo", 1, "degraded"), ("srv-backup", 0, "ok"),
+                for name, value, status in ((host, 1, "degraded"), ("srv-backup", 0, "ok"),
                                             ("srv-edge", 0, "ok"), ("srv-db", 2, "down"))]
-    events = [event("server-cpu-warning", "warning", "High CPU", "srv-demo CPU is above 80%", now_ms()),
+    events = [event("server-cpu-warning", "warning", "High CPU", f"{host} CPU is above 80%", now_ms()),
               event("server-backup-clear", "info", "Backup completed", "Nightly backup completed",
                     now_ms() - 600000, "cleared")]
-    return {"metrics": records, "events": events, "text": "srv-demo: CPU high, memory stable"}
+    return {"metrics": records, "events": events, "text": f"{host}: CPU high, memory stable"}
 
 
 def security_payload():
@@ -260,7 +268,8 @@ class Handler(BaseHTTPRequestHandler):
         payloads = {"metrics": metrics_payload, "token": token_payload, "weather": weather_payload,
                     "server": server_payload, "security": security_payload, "events": events_payload}
         if path in payloads:
-            return self.send_json(payloads[path]())
+            return self.send_json(payloads[path](query) if path in ("token", "weather", "server")
+                                  else payloads[path]())
         if path == "window":
             return self.send_json(window_payload(query))
         if path == "text":
@@ -287,6 +296,15 @@ def self_test():
                 assert response.status == 200
                 assert any(item["metric"] == expected for item in payload["metrics"]), scenario
                 checks.append(f"{scenario}: {len(payload['metrics'])} metrics/{len(payload['events'])} events")
+        variable_requests = (("token?account=secondary-account", "token.used", "account", "secondary-account"),
+                             ("weather?city=Shenzhen", "weather.temperature", "city", "Shenzhen"),
+                             ("server?host=srv-backup", "server.cpu", "server", "srv-backup"))
+        for path, metric_name, label, expected in variable_requests:
+            with urllib.request.urlopen(base + "/" + path, timeout=5) as response:
+                payload = json.load(response)
+            record = next(item for item in payload["metrics"] if item["metric"] == metric_name)
+            assert record["labels"][label] == expected
+        checks.append("variables: account/city/host query values reach mapped metric labels")
         with urllib.request.urlopen(base + "/window?points=32&hours=5", timeout=5) as response:
             payload = json.load(response)
         timestamps = [item["timestamp_ms"] for item in payload["metrics"]]
@@ -307,7 +325,9 @@ def self_test():
         checks.append("assets: two decodable 64x64 PNG responses below 256 KiB")
         with urllib.request.urlopen(base + "/_log", timeout=5) as response:
             log = json.load(response)
-        assert log["poll_count"]["token"] == 1 and all("?" not in item["path"] for item in log["requests"])
+        assert log["poll_count"]["token"] == 2 and log["poll_count"]["weather"] == 2
+        assert log["poll_count"]["server"] == 2
+        assert all("?" not in item["path"] for item in log["requests"])
         checks.append("request log: counts available, query strings and headers excluded")
     finally:
         server.shutdown()

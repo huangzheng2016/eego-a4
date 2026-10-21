@@ -14,7 +14,7 @@
         "id": "token",
         "kind": "http",
         "enabled": true,
-        "url": "http://${mock_host}/token",
+        "url": "http://${mock_host}/token?account=${account}",
         "refresh_ms": 60000,
         "timeout_ms": 10000,
         "max_response_bytes": 65536,
@@ -38,9 +38,18 @@
       {
         "name": "account",
         "label": "Account",
-        "kind": "text",
+        "kind": "constant",
         "default_value": "demo-account",
-        "options": [],
+        "options": [
+          {
+            "label": "Demo account",
+            "value": "demo-account"
+          },
+          {
+            "label": "Secondary account",
+            "value": "secondary-account"
+          }
+        ],
         "source_id": "",
         "value_path": "",
         "multi": false,
@@ -283,7 +292,7 @@
       "id": "token",
       "kind": "http",
       "enabled": true,
-      "url": "http://${mock_host}/token",
+      "url": "http://${mock_host}/token?account=${account}",
       "refresh_ms": 60000,
       "timeout_ms": 10000,
       "max_response_bytes": 65536,

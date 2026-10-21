@@ -271,7 +271,12 @@ def bundle_from_preset(preset, mock_host=None):
 
 def _duplicates(values):
     seen = set()
-    return sorted({value for value in values if value in seen or seen.add(value)})
+    duplicates = set()
+    for value in values:
+        if value in seen:
+            duplicates.add(value)
+        seen.add(value)
+    return sorted(duplicates)
 
 
 def _time_ms(text):
@@ -290,15 +295,17 @@ def _time_ms(text):
 def _validate_placeholders(text, variables, path, errors):
     position = 0
     while position < len(text):
-        if text[position] != "$" or position + 1 >= len(text) or text[position + 1] != "{":
+        escaped = text.startswith("$${", position)
+        if not escaped and not text.startswith("${", position):
             position += 1
             continue
-        end = text.find("}", position + 2)
+        start = position + (3 if escaped else 2)
+        end = text.find("}", start)
         if end < 0:
             errors.append(f"{path}: unterminated variable placeholder")
             return
-        name = text[position + 2:end]
-        if not VARIABLE_RE.fullmatch(name) or name not in variables:
+        name = text[start:end]
+        if not VARIABLE_RE.fullmatch(name) or (not escaped and name not in variables):
             errors.append(f"{path}: invalid or undefined variable {name!r}")
         position = end + 1
 
@@ -308,31 +315,84 @@ def _valid_path(path, required=False):
         return not required
     if len(path) > 1024:
         return False
-    if path[0] == "$":
-        path = path[1:]
-    elif path[0] in ".[":
+    position = 1 if path.startswith("$") else 0
+    if position == 0 and path[0] in ".[":
         return False
-    depth = 0
-    quote = None
-    segments = 0
-    for index, char in enumerate(path):
-        if quote:
-            if char == quote and (index == 0 or path[index - 1] != "\\"):
-                quote = None
+    tokens = 0
+    while position < len(path):
+        if tokens >= 64:
+            return False
+        if path[position] == ".":
+            position += 1
+            if position >= len(path) or path[position] in ".[":
+                return False
+            if path[position] == "*":
+                position += 1
+                if position < len(path) and path[position] not in ".[":
+                    return False
+                tokens += 1
+                continue
+            start = position
+            while position < len(path) and path[position] not in ".[":
+                position += 1
+            if position == start:
+                return False
+            tokens += 1
             continue
-        if char in "'\"" and depth:
-            quote = char
-        elif char == "[":
-            depth += 1
-        elif char == "]":
-            depth -= 1
-            if depth < 0:
+        if path[position] == "[":
+            position += 1
+            if position >= len(path):
                 return False
-        elif char == "." and depth == 0:
-            if index + 1 == len(path) or (index > 0 and path[index - 1] in ".["):
+            if path[position] == "*":
+                position += 1
+                if position >= len(path) or path[position] != "]":
+                    return False
+                position += 1
+                tokens += 1
+                continue
+            if path[position] in "'\"":
+                quote = path[position]
+                position += 1
+                key = ""
+                closed = False
+                while position < len(path):
+                    char = path[position]
+                    position += 1
+                    if char == quote:
+                        closed = True
+                        break
+                    if char == "\\":
+                        if position >= len(path) or path[position] not in (quote, "\\"):
+                            return False
+                        char = path[position]
+                        position += 1
+                    elif ord(char) < 0x20:
+                        return False
+                    key += char
+                    if len(key) > 256:
+                        return False
+                if not closed or not key or position >= len(path) or path[position] != "]":
+                    return False
+                position += 1
+                tokens += 1
+                continue
+            start = position
+            while position < len(path) and path[position].isdigit():
+                position += 1
+            if position == start or position - start > 9 or position >= len(path) or path[position] != "]":
                 return False
-            segments += 1
-    return depth == 0 and quote is None and segments <= 64
+            position += 1
+            tokens += 1
+            continue
+        if tokens or position != 0:
+            return False
+        start = position
+        while position < len(path) and path[position] not in ".[":
+            position += 1
+        if position == start:
+            return False
+        tokens += 1
+    return True
 
 
 def _validate_expression(expression, path, errors):
@@ -347,7 +407,7 @@ def _validate_expression(expression, path, errors):
     for function in functions:
         if function not in allowed:
             errors.append(f"{path}: unsupported expression function {function}")
-    if re.search(r"[;=]{2,}|[\[\]{}]", expression):
+    if ";" in expression or re.search(r"(?<![=!<>])=(?!=)", expression):
         errors.append(f"{path}: unsupported expression syntax")
 
 
@@ -405,6 +465,9 @@ def validate_bundle(bundle, schema, raw_bytes=None, strict_layout=True):
         errors.append(f"$.{key}: unknown bundle field")
     if bundle.get("schema") != BUNDLE_SCHEMA or bundle.get("schema_version") != 1:
         errors.append("$: expected eego.dashboard-bundle/1")
+    revision = bundle.get("revision", 0)
+    if type(revision) is not int or not 0 <= revision <= 9223372036854775807:
+        errors.append("$.revision: expected a non-negative int64 revision")
     dashboard = bundle.get("dashboard")
     if not isinstance(dashboard, dict):
         return errors + ["$.dashboard: required object"]
