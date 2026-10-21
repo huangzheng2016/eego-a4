@@ -1,6 +1,7 @@
 .pio/
 .cache/
 .tmp/
+.tower/
 .idea/
 .vscode/
 captures/
