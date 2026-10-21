@@ -847,11 +847,11 @@ struct DashboardRuntime::Impl {
       if (!ui::copySourceImage(*result, output.data, output.capacity, output.size)) return false;
       dp::SourceStatus status;
       if (pipeline->sourceStatus(source_id, status) && (status.offline || status.stale)) {
-        pipeline->refreshSource(source_id);
+        pipeline->scheduleSourceRefresh(source_id);
       }
       return true;
     }
-    pipeline->refreshSource(source_id);
+    pipeline->scheduleSourceRefresh(source_id);
     return false;
   }
 
@@ -1273,13 +1273,38 @@ struct DashboardRuntime::Impl {
     if (!found) next.emplace_back(name, value);
     dash::VariableValues resolved;
     std::string error;
+    std::map<std::string, std::shared_ptr<const dp::SourceResult>> previous_results;
+    for (const dash::Source& source : config.sources) {
+      previous_results[source.id] = currentResult(source.id);
+    }
+    std::set<std::string> changed_sources;
     if (!dash::defaultVariableValues(config.variables, next, resolved, error) ||
-        !pipeline->setVariables(next, error)) {
+        !pipeline->setVariables(next, error, &changed_sources)) {
       showMessage("Invalid variable");
       return false;
     }
+    std::set<std::string> invalidated_links;
+    auto invalidate_links = [&](const std::shared_ptr<const dp::SourceResult>& result) {
+      if (result == nullptr) return;
+      for (const dash::Event& event : result->events) {
+        const std::string linked = linkedForEvent(event);
+        if (!linked.empty()) invalidated_links.insert(linked);
+      }
+    };
+    for (const std::string& source_id : changed_sources) {
+      const auto previous = previous_results[source_id];
+      clearInjectedSource(source_id);
+      invalidateImageSource(source_id, previous, nullptr);
+      invalidate_links(previous);
+    }
     overrides = std::move(next);
     variables = std::move(resolved);
+    for (const std::string& source_id : changed_sources) {
+      const std::shared_ptr<const dp::SourceResult> current = currentResult(source_id);
+      invalidateImageSource(source_id, previous_results[source_id], current);
+      invalidate_links(current);
+    }
+    for (const std::string& linked : invalidated_links) renderer.invalidatePanel(linked);
     published_panels.clear();
     rebuildData();
     force_tick = true;
@@ -1360,7 +1385,7 @@ struct DashboardRuntime::Impl {
       published_panels.erase(id);
       renderer.invalidatePanel(id);
     }
-    pipeline->refreshPanel(candidates[index]->id);
+    pipeline->schedulePanel(candidates[index]->id);
     rebuildData();
     rebuildLayout();
     last_carousel_ms = monotonicMs();

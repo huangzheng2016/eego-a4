@@ -77,7 +77,8 @@ class DataPipeline {
   // results without blocking the caller, while HTTP still executes in net_task.
   bool configure(const Dashboard& dashboard, const std::vector<SourcePlan>& plans,
                  SdCache* cache, std::string& error);
-  bool setVariables(const VariableValues& overrides, std::string& error);
+  bool setVariables(const VariableValues& overrides, std::string& error,
+                    std::set<std::string>* changed_sources = nullptr);
   bool setPanelBinding(const PanelBinding& binding, std::string& error);
   bool setPanelRefreshOverride(const std::string& panel_id, uint32_t refresh_ms,
                                std::string& error);
@@ -86,6 +87,8 @@ class DataPipeline {
   bool asyncIdle() const;
   void cancelAsync();
   void resumeAsync();
+  bool scheduleSourceRefresh(const std::string& source_id);
+  bool schedulePanel(const std::string& panel_id);
   bool refreshSource(const std::string& source_id);
   bool refreshPanel(const std::string& panel_id);
 

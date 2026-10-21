@@ -153,6 +153,90 @@ bool requestChanged(const SourcePlan& plan, const VariableValues& previous,
   return !old_ok || !new_ok || old_body != new_body;
 }
 
+bool identifierStart(char c) {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+}
+
+bool identifierPart(char c) {
+  return identifierStart(c) || (c >= '0' && c <= '9') || c == '.';
+}
+
+bool expressionUsesVariable(const MetricMapping& mapping, std::string_view name) {
+  if (name == "value" || name == "timestamp" || name == "reset_at" || name == "true" ||
+      name == "false" || name == "null") {
+    return false;
+  }
+  for (const FieldMapping& field : mapping.fields) {
+    if (field.name == name) return false;
+  }
+  const std::string_view expression(mapping.expression);
+  size_t position = 0;
+  while (position < expression.size()) {
+    const char c = expression[position];
+    if (c == '"' || c == '\'') {
+      const char quote = c;
+      ++position;
+      while (position < expression.size()) {
+        if (expression[position] == '\\' && position + 1 < expression.size()) {
+          position += 2;
+        } else if (expression[position++] == quote) {
+          break;
+        }
+      }
+      continue;
+    }
+    if (!identifierStart(c)) {
+      ++position;
+      continue;
+    }
+    const size_t start = position++;
+    while (position < expression.size() && identifierPart(expression[position])) ++position;
+    const std::string_view token = expression.substr(start, position - start);
+    size_t next = position;
+    while (next < expression.size() &&
+           (expression[next] == ' ' || expression[next] == '\t' || expression[next] == '\r' ||
+            expression[next] == '\n')) {
+      ++next;
+    }
+    if (next < expression.size() && expression[next] == '(') continue;
+    if (token == name) return true;
+  }
+  return false;
+}
+
+bool expressionChanged(const MetricMapping& mapping, const VariableValues& previous,
+                       const VariableValues& current) {
+  for (const auto& variable : previous) {
+    const std::string* updated = findVariableValue(current, variable.first);
+    if (updated != nullptr && *updated == variable.second) continue;
+    if (expressionUsesVariable(mapping, variable.first)) return true;
+  }
+  for (const auto& variable : current) {
+    if (findVariableValue(previous, variable.first) == nullptr &&
+        expressionUsesVariable(mapping, variable.first)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool parseChanged(const SourcePlan& plan, const VariableValues& previous,
+                  const VariableValues& current) {
+  for (const MetricMapping& mapping : plan.metrics) {
+    for (const LabelMapping& label : mapping.labels) {
+      if (!label.path.empty()) continue;
+      std::string old_value;
+      std::string new_value;
+      std::string error;
+      const bool old_ok = interpolateVariables(label.value, previous, old_value, error, 512 * 4);
+      const bool new_ok = interpolateVariables(label.value, current, new_value, error, 512 * 4);
+      if (!old_ok || !new_ok || old_value != new_value) return true;
+    }
+    if (!mapping.expression.empty() && expressionChanged(mapping, previous, current)) return true;
+  }
+  return false;
+}
+
 bool validRefreshOverride(uint32_t refresh_ms) {
   return refresh_ms == 0 || refresh_ms == 60000 || refresh_ms == 300000 ||
          refresh_ms == 900000 || refresh_ms == 1800000;
@@ -275,13 +359,16 @@ bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<Sourc
   return true;
 }
 
-bool DataPipeline::setVariables(const VariableValues& overrides, std::string& error) {
+bool DataPipeline::setVariables(const VariableValues& overrides, std::string& error,
+                                std::set<std::string>* changed_sources) {
   VariableValues values;
   if (!defaultVariableValues(dashboard_.variables, overrides, values, error)) return false;
   std::set<std::string> changed;
   for (const auto& item : sources_) {
-    if (requestChanged(item.second->plan, variables_, values, config_.token_resolver))
+    if (requestChanged(item.second->plan, variables_, values, config_.token_resolver) ||
+        parseChanged(item.second->plan, variables_, values)) {
       changed.insert(item.first);
+    }
   }
   for (const std::string& source_id : changed) detachAsync(*sources_.at(source_id));
   for (const std::string& source_id : changed) {
@@ -310,6 +397,7 @@ bool DataPipeline::setVariables(const VariableValues& overrides, std::string& er
                  updates_.end());
   config_.variable_overrides = overrides;
   variables_ = std::move(values);
+  if (changed_sources != nullptr) *changed_sources = changed;
   return true;
 }
 
@@ -832,6 +920,22 @@ void DataPipeline::resumeAsync() { async_suspended_ = false; }
 
 bool DataPipeline::asyncIdle() const {
   return async_batches_.empty() && transport_.asyncIdle();
+}
+
+bool DataPipeline::scheduleSourceRefresh(const std::string& source_id) {
+  const auto source = sources_.find(source_id);
+  if (source == sources_.end() || !source->second->plan.source.enabled) return false;
+  if (source->second->async_pending) return true;
+  source->second->next_poll_ms = 0;
+  return true;
+}
+
+bool DataPipeline::schedulePanel(const std::string& panel_id) {
+  const auto panel = panels_.find(panel_id);
+  if (panel == panels_.end()) return false;
+  panel->second.pending = true;
+  panel->second.next_refresh_ms = 0;
+  return true;
 }
 
 bool DataPipeline::refreshSource(const std::string& source_id) {
