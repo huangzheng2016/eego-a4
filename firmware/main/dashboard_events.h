@@ -154,15 +154,20 @@ class DashboardEventTracker {
       current.generation = 1;
       current.last_state = event.state;
       current.last_timestamp_ms = event.timestamp_ms;
+      current.last_severity = event.severity;
       return current.generation;
     }
     if (event.timestamp_ms < current.last_timestamp_ms) return current.generation;
-    const bool newer = event.timestamp_ms > current.last_timestamp_ms;
-    if (newer || event.state != current.last_state) {
-      if (event.state == eego::dashboard::EventState::Active) ++current.generation;
-      current.last_state = event.state;
-      current.last_timestamp_ms = event.timestamp_ms;
-    }
+    const bool reactivation = event.state == eego::dashboard::EventState::Active &&
+                              current.last_state != eego::dashboard::EventState::Active;
+    const bool escalation = event.state == eego::dashboard::EventState::Active &&
+                            current.last_state == eego::dashboard::EventState::Active &&
+                            static_cast<uint8_t>(event.severity) >
+                                static_cast<uint8_t>(current.last_severity);
+    if (reactivation || escalation) ++current.generation;
+    current.last_state = event.state;
+    current.last_timestamp_ms = event.timestamp_ms;
+    current.last_severity = event.severity;
     return current.generation;
   }
 
@@ -192,6 +197,7 @@ class DashboardEventTracker {
   struct Generation {
     uint64_t generation = 0;
     eego::dashboard::EventState last_state = eego::dashboard::EventState::Cleared;
+    eego::dashboard::Severity last_severity = eego::dashboard::Severity::Info;
     int64_t last_timestamp_ms = -1;
   };
 

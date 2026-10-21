@@ -65,6 +65,8 @@ class DataPipeline {
 
   TickResult tick(int64_t now_ms);
   bool asyncIdle() const;
+  void cancelAsync();
+  void resumeAsync();
   bool refreshSource(const std::string& source_id);
   bool refreshPanel(const std::string& panel_id);
 
@@ -106,6 +108,7 @@ class DataPipeline {
   std::set<std::string> dirty_panels_;
   std::map<uint64_t, AsyncBatch> async_batches_;
   std::map<std::string, uint64_t> async_request_keys_;
+  bool async_suspended_ = false;
 
   uint32_t panelInterval(const PanelState& panel) const;
   uint32_t sourceInterval(const SourceRuntime& source) const;

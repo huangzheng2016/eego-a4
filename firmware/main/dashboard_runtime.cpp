@@ -24,6 +24,7 @@
 #include "dashboard_ui/renderer.h"
 #include "dashboard_ui/text.h"
 #include "data_pipeline/data_pipeline.h"
+#include "dashboard_diag.h"
 #include "dashboard_events.h"
 #include "dashboard_publication.h"
 #include "eego_hal.h"
@@ -50,6 +51,7 @@ constexpr int64_t kRenderThrottleMs = 250;
 constexpr int64_t kStatusPeriodMs = 30000;
 constexpr int64_t kCarouselPeriodMs = 15000;
 constexpr int64_t kConfirmMs = 5000;
+constexpr int64_t kBatteryCycleMs = 130000;
 
 int64_t monotonicMs() { return esp_timer_get_time() / 1000; }
 int64_t pipelineMs() { return static_cast<int64_t>(TimeSource::now()) * 1000; }
@@ -286,6 +288,9 @@ struct DashboardRuntime::Impl {
   bool status_dirty = true;
   bool force_tick = true;
   bool mains = true;
+  bool battery_cycle_active = false;
+  bool battery_cycle_cancelled = false;
+  int64_t battery_cycle_deadline_ms = 0;
   int64_t last_tick_ms = 0;
   int64_t next_tick_ms = 0;
   int64_t last_render_ms = -10000;
@@ -1200,6 +1205,10 @@ struct DashboardRuntime::Impl {
   }
 
   bool refresh(const std::string& target) {
+    if (!mains && battery_cycle_cancelled) {
+      showMessage("Poll window ended");
+      return false;
+    }
     bool ok = false;
     if (target == "all") {
       for (const dash::Source& source : config.sources) ok = pipeline->refreshSource(source.id) || ok;
@@ -1537,6 +1546,11 @@ struct DashboardRuntime::Impl {
       }
     }
 
+    if (!mains && battery_cycle_active && !battery_cycle_cancelled &&
+        now >= battery_cycle_deadline_ms) {
+      pipeline->cancelAsync();
+      battery_cycle_cancelled = true;
+    }
     const bool pump = mains ? (force_tick || now >= next_tick_ms) : !pipeline->asyncIdle();
     if (pump) tick();
     if (now - last_rule_eval_ms >= 1000) {
@@ -1557,7 +1571,12 @@ struct DashboardRuntime::Impl {
   }
 
   void pollBattery() {
-    if (ready) tick();
+    if (!ready) return;
+    battery_cycle_active = true;
+    battery_cycle_cancelled = false;
+    battery_cycle_deadline_ms = monotonicMs() + kBatteryCycleMs;
+    pipeline->resumeAsync();
+    tick();
   }
 
   bool networkIdle() const {
@@ -1566,7 +1585,12 @@ struct DashboardRuntime::Impl {
 
   void setMains(bool value) {
     mains = value;
-    if (mains) force_tick = true;
+    battery_cycle_active = false;
+    battery_cycle_cancelled = false;
+    if (mains) {
+      pipeline->resumeAsync();
+      force_tick = true;
+    }
     status_dirty = true;
     dirty = true;
   }
@@ -1785,14 +1809,7 @@ struct DashboardRuntime::Impl {
   }
 
   static bool sensitiveName(std::string name) {
-    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) {
-      return static_cast<char>(std::tolower(c));
-    });
-    for (const char* marker : {"token", "password", "passwd", "secret", "api_key", "apikey",
-                               "authorization", "credential"}) {
-      if (name.find(marker) != std::string::npos) return true;
-    }
-    return false;
+    return dashboardSensitiveVariableName(std::move(name));
   }
 
   void diagStatus() {

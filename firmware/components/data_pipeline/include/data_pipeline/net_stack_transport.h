@@ -19,6 +19,7 @@ class NetStackTransport final : public IHttpTransport {
   bool executeAsync(uint64_t id, const net::NetRequest& request) override;
   bool pollAsync(AsyncHttpResult& result) override;
   bool asyncIdle() const override;
+  void cancelAsync() override;
 
  private:
   struct AsyncState;

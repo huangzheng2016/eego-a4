@@ -159,6 +159,7 @@ bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<Sourc
   dirty_panels_.clear();
   async_batches_.clear();
   async_request_keys_.clear();
+  async_suspended_ = false;
 
   for (const SourcePlan& plan : plans) {
     if (!validateSourcePlan(plan, error)) return false;
@@ -654,6 +655,11 @@ void DataPipeline::drainAsync(int64_t now_ms, TickResult& tick) {
 TickResult DataPipeline::tickAsync(int64_t now_ms) {
   TickResult tick;
   drainAsync(now_ms, tick);
+  if (async_suspended_) {
+    for (const auto& source : sources_) servicePanels(*source.second, now_ms);
+    tick.dirty_panels = dirty_panels_.size();
+    return tick;
+  }
   for (auto& item : sources_) {
     SourceRuntime& source = *item.second;
     SourceStatus& status = source.status;
@@ -743,6 +749,16 @@ TickResult DataPipeline::tickAsync(int64_t now_ms) {
   tick.dirty_panels = dirty_panels_.size();
   return tick;
 }
+
+void DataPipeline::cancelAsync() {
+  detachAllAsync();
+  async_batches_.clear();
+  async_request_keys_.clear();
+  transport_.cancelAsync();
+  async_suspended_ = true;
+}
+
+void DataPipeline::resumeAsync() { async_suspended_ = false; }
 
 bool DataPipeline::asyncIdle() const {
   return async_batches_.empty() && transport_.asyncIdle();

@@ -169,6 +169,24 @@ bool NetStackTransport::pollAsync(AsyncHttpResult& result) {
   return true;
 }
 
+void NetStackTransport::cancelAsync() {
+  if (async_ == nullptr) return;
+  AsyncExchange* exchange = nullptr;
+  if (async_->requests != nullptr) {
+    while (xQueueReceive(async_->requests, &exchange, 0) == pdTRUE) {
+      if (exchange != nullptr) --async_->pending;
+      delete exchange;
+    }
+  }
+  exchange = nullptr;
+  if (async_->results != nullptr) {
+    while (xQueueReceive(async_->results, &exchange, 0) == pdTRUE) {
+      if (exchange != nullptr) --async_->pending;
+      delete exchange;
+    }
+  }
+}
+
 bool NetStackTransport::asyncIdle() const {
   return async_ == nullptr || async_->pending == 0;
 }

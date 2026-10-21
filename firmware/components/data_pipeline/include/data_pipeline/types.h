@@ -162,6 +162,7 @@ class IHttpTransport {
     return false;
   }
   virtual bool asyncIdle() const { return true; }
+  virtual void cancelAsync() {}
 };
 
 using TokenResolver = std::function<std::string(const std::string& ref)>;
