@@ -17,12 +17,12 @@ const char kPortalHtml[] = R"HTML(<!DOCTYPE html>
 <h2 id="t_title">EEGO A4 配网</h2>
 <div id="step1">
   <p id="t_step1">第一步：选择 WiFi 网络并输入密码</p>
-  <button id="btn_scan" onclick="scan()">刷新</button>
+  <button id="btn_scan">刷新</button>
   <div id="list" class="dim" style="margin-top:12px"></div>
   <div id="passbox" style="display:none">
     <div><span id="t_network">网络</span>：<b id="ssidv"></b></div>
     <input id="pass" type="password" autocomplete="off">
-    <button id="btn_next" onclick="toStep2()">下一步</button>
+    <button id="btn_next">下一步</button>
   </div>
 </div>
 <div id="step2" style="display:none">
@@ -30,8 +30,8 @@ const char kPortalHtml[] = R"HTML(<!DOCTYPE html>
   <input id="admin_pass" type="password" autocomplete="new-password">
   <input id="admin_pass2" type="password" autocomplete="new-password">
   <div class="dim" id="t_passhint">两次输入需一致</div>
-  <button id="btn_conn" onclick="conn()">连接并保存</button>
-  <button id="btn_back" class="sec" onclick="back()">返回</button>
+  <button id="btn_conn">连接并保存</button>
+  <button id="btn_back" class="sec">返回</button>
 </div>
 <div id="st"></div>
 <script src="/portal.js"></script>
@@ -73,6 +73,7 @@ var i18n={
  mismatch:T('两次管理密码不一致','Admin passwords do not match'),
  shortpw:T('管理密码至少 8 位','Admin password must be at least 8 chars'),
  connecting:T('连接中，请稍候…','Connecting…'),
+ connectfail:T('连接请求失败，请重试','Connection request failed; please retry'),
  ok:T('连接成功！设备将重启。IP: ','Connected! The device will reboot. IP: '),
  failprefix:T('连接失败：','Connection failed: ')
 };
@@ -128,11 +129,22 @@ function conn(){
  if(ap!==ap2){show('fail',i18n.mismatch);return;}
  if(ap.length<8){show('fail',i18n.shortpw);return;}
  var body=JSON.stringify({ssid:sel.ssid,pass:$('pass').value,admin_pass:ap});
- fetch('/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:body});
  $('step2').style.display='none';
  show('connecting');
- if(timer)clearInterval(timer);
- timer=setInterval(poll,2000);
+ fetch('/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:body})
+ .then(function(r){return r.json();})
+ .then(function(s){
+  if(s.state==='connecting'){
+   if(timer)clearInterval(timer);
+   timer=setInterval(poll,2000);
+  }else{
+   // 服务端校验拒绝（如管理密码策略）：停 spinner 并回到密码步
+   show('fail',i18n.failprefix+(s.reason||''));
+   $('step1').style.display='none';
+   $('step2').style.display='block';
+  }
+ })
+ .catch(function(){show('fail',i18n.connectfail);back();});
 }
 function poll(){
  fetch('/status').then(function(r){return r.json();}).then(function(s){
@@ -141,6 +153,12 @@ function poll(){
   else{show('connecting');}
  }).catch(function(){});
 }
+// 静态按钮统一在此绑定（CSP default-src 'self' 禁止内联 on* 属性；
+// 同源外部脚本的 .onclick 属性赋值不受限）
+$('btn_scan').onclick=scan;
+$('btn_next').onclick=toStep2;
+$('btn_conn').onclick=conn;
+$('btn_back').onclick=back;
 applyI18n();
 scan();
 )JS";

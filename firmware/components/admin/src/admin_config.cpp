@@ -77,10 +77,18 @@ bool keyEndsWith(const std::string& s, const char* suffix) {
 
 bool isSensitiveKey(const std::string& key_lower) {
   if (keyEndsWith(key_lower, "_ref")) return false;  // *_ref 引用可显示
-  return key_lower.find("password") != std::string::npos ||
-         key_lower.find("secret") != std::string::npos ||
-         key_lower.find("token") != std::string::npos ||
-         key_lower == "key";
+  if (key_lower.find("password") != std::string::npos ||
+      key_lower.find("passwd") != std::string::npos ||
+      key_lower.find("passphrase") != std::string::npos ||
+      key_lower.find("secret") != std::string::npos ||
+      key_lower.find("token") != std::string::npos) {
+    return true;
+  }
+  if (key_lower == "key" || key_lower == "apikey" || key_lower == "api-key") return true;
+  // *_key 后缀覆盖 api_key/access_key 等未来 schema 字段；
+  // dedup_key 是去重字段名列表（非机密），显式豁免防过度掩码（review P2-5）
+  if (keyEndsWith(key_lower, "_key") && key_lower != "dedup_key") return true;
+  return false;
 }
 
 bool isSensitiveHeaderName(const std::string& name_lower) {

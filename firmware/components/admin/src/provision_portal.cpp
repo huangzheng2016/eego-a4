@@ -245,28 +245,48 @@ esp_err_t p_connect(httpd_req_t* req) {
   ProvisionPortal& p = ProvisionPortal::instance();
   p.notePortalActivity();
 
-  char cl_buf[16];
-  if (httpd_req_get_hdr_value_str(req, "Content-Length", cl_buf, sizeof(cl_buf)) != ESP_OK ||
-      strtol(cl_buf, nullptr, 10) > 1024) {
-    httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_set_status(req, "413 Payload Too Large");
-    httpd_resp_send(req, "{\"state\":\"fail\",\"reason\":\"请求过大\"}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+  // 有界循环读取请求体（≤1KB 预算；TCP 分片与 readBodyBudget 同模式，
+  // review P2-2：单次 recv 可能只拿到分片）
+  std::string body;
+  {
+    char cl_buf[16];
+    long cl = -1;
+    if (httpd_req_get_hdr_value_str(req, "Content-Length", cl_buf, sizeof(cl_buf)) ==
+        ESP_OK) {
+      cl = strtol(cl_buf, nullptr, 10);
+    }
+    if (cl > 1024) {
+      httpd_resp_set_type(req, "application/json; charset=utf-8");
+      httpd_resp_set_status(req, "413 Payload Too Large");
+      httpd_resp_send(req, "{\"state\":\"fail\",\"reason\":\"请求过大\"}",
+                      HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
+    char rbuf[256];
+    int r;
+    while ((r = httpd_req_recv(req, rbuf, sizeof(rbuf))) > 0) {
+      body.append(rbuf, static_cast<size_t>(r));
+      if (body.size() > 1024) {
+        httpd_resp_set_type(req, "application/json; charset=utf-8");
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        httpd_resp_send(req, "{\"state\":\"fail\",\"reason\":\"请求过大\"}",
+                        HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+      }
+      if (cl >= 0 && body.size() >= static_cast<size_t>(cl)) break;
+    }
+    if (r < 0 || body.empty()) {
+      httpd_resp_set_type(req, "application/json; charset=utf-8");
+      httpd_resp_send(req, "{\"state\":\"fail\",\"reason\":\"未收到数据\"}",
+                      HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
   }
-  char buf[1024] = {};
-  const int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
-  if (len <= 0) {
-    httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_send(req, "{\"state\":\"fail\",\"reason\":\"未收到数据\"}",
-                    HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  buf[len] = '\0';
 
   alert_core::JsonValue root;
   alert_core::JsonParseError perr;
   std::string ssid, pass, admin_pass;
-  if (!alert_core::jsonParse(buf, root, perr) ||
+  if (!alert_core::jsonParse(body, root, perr) ||
       root.type() != alert_core::JsonValue::Type::Object) {
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"state\":\"fail\",\"reason\":\"请求格式错误\"}",

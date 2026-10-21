@@ -22,7 +22,7 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
 <div id="loginbox">
   <h2 id="t_login_title">EEGO A4 管理登录</h2>
   <input id="pw" type="password" autocomplete="current-password">
-  <button id="btn_login" onclick="doLogin()">登录</button>
+  <button id="btn_login">登录</button>
   <div id="login_err" class="err"></div>
 </div>
 <div id="app" style="display:none">
@@ -44,11 +44,11 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
       <th id="th_sev">级别</th><th id="th_title">标题</th><th id="th_type">类型</th>
       <th id="th_state">状态</th><th id="th_seen">最近</th><th id="th_ops">操作</th>
     </tr></thead><tbody id="alert_rows"></tbody></table>
-    <button id="btn_refresh_alerts" onclick="loadAlerts()">刷新</button>
+    <button id="btn_refresh_alerts">刷新</button>
   </section>
   <section id="pane_status" style="display:none">
     <pre id="status_pre"></pre>
-    <button id="btn_refresh_status" onclick="loadStatus()">刷新</button>
+    <button id="btn_refresh_status">刷新</button>
   </section>
   <section id="pane_sources" style="display:none">
     <table id="src_table"><thead><tr>
@@ -59,18 +59,18 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
   <section id="pane_config" style="display:none">
     <textarea id="cfg_text" spellcheck="false"></textarea>
     <div>
-      <button id="btn_cfg_save" onclick="saveConfig()">保存配置</button>
-      <button id="btn_cfg_reload" onclick="loadConfig()">重新加载</button>
-      <button id="btn_cfg_schema" onclick="showSchema()">查看 Schema</button>
+      <button id="btn_cfg_save">保存配置</button>
+      <button id="btn_cfg_reload">重新加载</button>
+      <button id="btn_cfg_schema">查看 Schema</button>
     </div>
     <pre id="schema_pre" style="display:none"></pre>
   </section>
   <section id="pane_system" style="display:none">
     <h3 id="t_danger">危险操作</h3>
     <div class="danger">
-      <button id="btn_reboot" class="warn" onclick="doReboot()">重启设备</button>
-      <button id="btn_reset" class="danger" onclick="doFactoryReset()">恢复出厂设置</button>
-      <button id="btn_rotate" onclick="doRotateKey()">轮换告警摄入密钥</button>
+      <button id="btn_reboot" class="warn">重启设备</button>
+      <button id="btn_reset" class="danger">恢复出厂设置</button>
+      <button id="btn_rotate">轮换告警摄入密钥</button>
     </div>
     <pre id="rotate_result"></pre>
   </section>
@@ -315,6 +315,17 @@ document.querySelectorAll('nav a.tab').forEach(function(a){
 $('btn_logout').onclick=function(e){e.preventDefault();doLogout();};
 $('lang_toggle').onclick=function(e){e.preventDefault();LANG=LANG==='zh'?'en':'zh';applyI18n();switchTab('alerts');};
 $('pw').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin();});
+// 静态按钮统一在此绑定（CSP default-src 'self' 禁止内联 on* 属性；
+// 同源外部脚本的 .onclick 属性赋值不受限）
+$('btn_login').onclick=doLogin;
+$('btn_refresh_alerts').onclick=loadAlerts;
+$('btn_refresh_status').onclick=loadStatus;
+$('btn_cfg_save').onclick=saveConfig;
+$('btn_cfg_reload').onclick=loadConfig;
+$('btn_cfg_schema').onclick=showSchema;
+$('btn_reboot').onclick=doReboot;
+$('btn_reset').onclick=doFactoryReset;
+$('btn_rotate').onclick=doRotateKey;
 applyI18n();
 if(token()){showApp();loadAlerts();loadStatus();}else{showLogin();}
 )JS";

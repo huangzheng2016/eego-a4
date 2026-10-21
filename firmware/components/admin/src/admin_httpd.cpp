@@ -240,10 +240,12 @@ int readBodyBudget(httpd_req_t* req, size_t budget, std::string& out) {
 }
 
 // POST/PUT/DELETE 强制 JSON Content-Type（M13：触发 preflight 即拒 → 415）。
+// 前缀必须是 "application/json" 且后随结束/分号/空白——拒绝 "application/jsonx"。
 bool contentTypeJsonOk(httpd_req_t* req) {
   std::string ct;
   if (!headerValue(req, "Content-Type", ct)) return false;
-  return ct.compare(0, 16, "application/json") == 0;
+  if (ct.compare(0, 16, "application/json") != 0) return false;
+  return ct.size() == 16 || ct[16] == ';' || ct[16] == ' ' || ct[16] == '\t';
 }
 
 // 解析 JSON body；失败回 400 invalid_request。
@@ -440,9 +442,20 @@ esp_err_t h_change_password(httpd_req_t* req) {
     return sendError(req, 400, errc::kInvalidRequest,
                      "old_password and new_password (string) required");
   }
+  // 旧密码验证与登录同桶限速（防持令牌者在线爆破管理密码，review P2-1）
+  {
+    const std::string ip = clientIp(req);
+    uint32_t retry = 0;
+    if (!AuthManager::instance().loginAllow(ip, retry)) {
+      return sendError(req, 429, errc::kTooManyRequests, "too many attempts", nullptr,
+                       retry);
+    }
+  }
   if (!AuthManager::instance().verifyPassword(old_pw)) {
+    AuthManager::instance().noteLoginFailure(clientIp(req));
     return sendError(req, 401, errc::kUnauthorized, "authentication required");
   }
+  AuthManager::instance().noteLoginSuccess(clientIp(req));
   if (!AuthManager::passwordPolicyOk(new_pw)) {
     FieldErrors errs =
         fieldErr("new_password", "must be 8..128 chars, not all whitespace");
@@ -1198,10 +1211,21 @@ esp_err_t h_factory_reset(httpd_req_t* req) {
     FieldErrors errs = fieldErr("confirm", "must be \"RESET\"");
     return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
   }
-  // 双确认：会话之外再验一次管理密码（防会话劫持后被远程 wipe，M13 F8）
+  // 双确认：会话之外再验一次管理密码（防会话劫持后被远程 wipe，M13 F8）；
+  // 与登录同桶限速（review P2-1）
+  {
+    const std::string ip = clientIp(req);
+    uint32_t retry = 0;
+    if (!AuthManager::instance().loginAllow(ip, retry)) {
+      return sendError(req, 429, errc::kTooManyRequests, "too many attempts", nullptr,
+                       retry);
+    }
+  }
   if (!AuthManager::instance().verifyPassword(password)) {
+    AuthManager::instance().noteLoginFailure(clientIp(req));
     return sendError(req, 401, errc::kUnauthorized, "authentication required");
   }
+  AuthManager::instance().noteLoginSuccess(clientIp(req));
   AdminCommand cmd;
   cmd.type = AdminCommandType::FactoryReset;
   cmd.delay_ms = 2000;
