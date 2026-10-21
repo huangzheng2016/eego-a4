@@ -583,16 +583,25 @@ void drawLinkedCards(PortraitCanvas& canvas, FontManager& font, const Dashboard&
     cell.x = static_cast<int16_t>(bounds.x + (i % columns) * (cell_w + gap));
     cell.y = static_cast<int16_t>(bounds.y + (i / columns) * (cell_h + gap));
     canvas.drawRect(cell.x, cell.y, cell.w, cell.h, 0);
-    const int16_t label_height = font.uiFontHeight() + 4;
+    Rect label_bounds = inset(cell, 3);
+    label_bounds.h = std::min(font.uiFontHeight(), label_bounds.h);
     std::string label = card.title.empty() ? card.metric : card.title;
     std::string interpolated;
     std::string error;
     if (!card.title.empty() && interpolateVariables(card.title, variables, interpolated, error))
       label = interpolated;
-    drawTextFit(canvas, font, cell.x + 3, cell.y + 2, cell.w - 6, label, 1, false, 6);
+    const int16_t label_scale = scaleForText(font, label, label_bounds, 1);
+    if (label_scale > 0) {
+      drawTextFit(canvas, font, label_bounds.x, label_bounds.y, label_bounds.w, label,
+                  label_scale, false, 6);
+    }
     Rect value = inset(cell, 3);
-    value.y += label_height;
-    value.h -= label_height;
+    if (label_scale > 0) {
+      const int16_t reserved = std::min<int16_t>(label_bounds.h + 4, value.h);
+      value.y += reserved;
+      value.h -= reserved;
+    }
+    if (value.h < font.uiFontHeight()) continue;
     const std::vector<const MetricSample*> samples = series(dashboard, card);
     if (samples.empty()) {
       emptyState(canvas, font, value);

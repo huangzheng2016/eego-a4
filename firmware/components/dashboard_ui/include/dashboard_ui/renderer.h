@@ -52,6 +52,7 @@ class DashboardRenderer {
   Impl* impl_;
   ImagePipeline images_;
   uint64_t image_generation_ = 0;
+  std::vector<std::pair<std::string, uint64_t>> asset_generations_;
 };
 
 }  // namespace eego::dashboard::ui

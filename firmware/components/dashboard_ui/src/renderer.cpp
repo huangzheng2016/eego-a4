@@ -129,15 +129,10 @@ uint64_t fingerprint(const Dashboard& dashboard, const PanelSpec& panel,
     for (const Action& action : panel.actions) hashInterpolated(hash, action.label, variables);
   }
   if (panel.kind == PanelKind::Card || panel.kind == PanelKind::Chart ||
-      panel.kind == PanelKind::Table || (panel.kind == PanelKind::Image && !panel.value_path.empty())) {
+      panel.kind == PanelKind::Table) {
     for (const MetricSample& sample : dashboard.samples) {
-      const bool source_matches = panel.kind == PanelKind::Image && panel.source_id.empty()
-                                      ? true
-                                      : sample.source_id == panel.source_id;
-      const bool metric_matches = panel.kind == PanelKind::Image && panel.metric.empty()
-                                      ? true
-                                      : sample.metric == panel.metric;
-      if (source_matches && metric_matches) hashSample(hash, sample);
+      if (sample.source_id == panel.source_id && sample.metric == panel.metric)
+        hashSample(hash, sample);
     }
   }
   if (panel.kind == PanelKind::Card &&
@@ -193,7 +188,11 @@ uint64_t fingerprint(const Dashboard& dashboard, const PanelSpec& panel,
       hash.number(asset->size_bytes);
       hash.number(asset->cache_seconds);
     }
-    if (dependency.field_sample != nullptr) hashSample(hash, *dependency.field_sample);
+    if (dependency.field_sample != nullptr) {
+      hash.string(dependency.field_sample->source_id);
+      hash.string(dependency.field_sample->metric);
+      hash.number(dependency.field_sample->timestamp_ms);
+    }
     hash.string(dependency.field_value);
     hash.string(dependency.uri);
     hash.number(dependency.valid);
@@ -294,12 +293,27 @@ void DashboardRenderer::invalidatePanel(std::string_view panel_id) {
 
 void DashboardRenderer::invalidateImage(std::string_view asset_id) {
   images_.invalidate(asset_id);
-  ++image_generation_;
+  if (asset_id.empty()) {
+    ++image_generation_;
+    return;
+  }
+  for (auto& entry : asset_generations_) {
+    if (entry.first == asset_id) {
+      ++entry.second;
+      return;
+    }
+  }
+  if (asset_generations_.size() < 24) {
+    asset_generations_.emplace_back(std::string(asset_id), 1);
+  } else {
+    ++image_generation_;
+  }
 }
 
 void DashboardRenderer::reset() {
   if (impl_ != nullptr) *impl_ = Impl{};
   images_.clear();
+  asset_generations_.clear();
   ++image_generation_;
 }
 
@@ -328,8 +342,18 @@ RenderResult DashboardRenderer::render(PortraitCanvas& canvas, const Dashboard& 
   std::vector<uint64_t> fingerprints;
   fingerprints.reserve(result.layout.panels.size());
   for (const PanelLayout& panel : result.layout.panels) {
-    fingerprints.push_back(
-        fingerprint(dashboard, *panel.panel, options.variables, image_generation_));
+    uint64_t generation = image_generation_;
+    if (panel.panel->kind == PanelKind::Image) {
+      const ImageDependency dependency =
+          resolveImageDependency(dashboard, *panel.panel, options.variables);
+      for (const auto& entry : asset_generations_) {
+        if ((dependency.base_asset != nullptr && dependency.base_asset->id == entry.first) ||
+            (dependency.dynamic_asset != nullptr && dependency.dynamic_asset->id == entry.first)) {
+          generation += entry.second;
+        }
+      }
+    }
+    fingerprints.push_back(fingerprint(dashboard, *panel.panel, options.variables, generation));
   }
   UpdatePlan update = planUpdate(result.layout, fingerprints,
                                  same_view ? &impl_->panels : nullptr,
