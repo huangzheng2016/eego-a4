@@ -1,12 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// EEGO A4 告警/数据面板 — app_main 骨架（FW1 硬件基础，不含告警业务）
+// EEGO A4 告警/数据面板 —— FW5 组合根（M18）。
 //
-// 启动流程：
-//   1. board::beginStandardHardware() 按启动合同初始化全部硬件
-//      （GPIO4 锁存 → 触控/按键 → 前光探测 → 充电极性 → RTC → SD → 显示）
-//   2. 加载 SD 卡字体（缺席时回退内置 5x7 ASCII 字体），在安全区内绘制
-//      Alert Panel 启动页（含四级灰阶元素，验证灰阶链路）
-//   3. 进入主循环：8ms 触控轮询 + 按键队列 + 串口诊断命令处理
+// 启动流程（顺序即接线合同，M12 架构）：
+//   1. board::beginStandardHardware() 板级启动合同（GPIO4 锁存 → 触控/按键 →
+//      前光探测 → 充电极性 → RTC → SD → 显示）
+//   2. NVS（CredentialStore::ensureNvs）+ AuthManager + ConfigStore(config.json)
+//      + 类型覆盖应用到注册表 + AdminLog（级别取 admin.log_level）
+//   3. 字体：admin.font 指定路径 > SD 卡首个 .eefont/.bin > 内置 5x7 回退
+//   4. 告警库：SdAlertFileIo + AlertDb(/sdcard/alertpanel/alerts.db) →
+//      AlertStore.loadFrom 恢复 → attachDb（此后 store 写只在 net_task）
+//   5. NetStack::start（注入 SnapshotPublisher；expire 巡检与首帧快照发布
+//      由 net_task 承担）→ 按 config.sources 逐个 addSource
+//   6. admin 注入：快照源/动作 sink（薄适配）/命令处理器/事件回调
+//   7. 模式判定：无管理密码 → 配网门户 + UI 配网页；否则 startAdminApi
+//   8. diag::start（串口命令钩子全部在 app_task 上下文执行）+ PanelApp.begin
+//
+// app_task 主循环（唯一 UI 属主）：
+//   触控 8ms 轮询 → 按键队列 → diag::service → admin::serviceCommands(0) →
+//   app.service()（事件归并/电源 FSM/按需渲染）→ vTaskDelay(8ms)
 //
 // 串口诊断入口：UART0 115200，输入 help 查看命令。
 
@@ -14,250 +25,305 @@
 #include "eego_hal.h"
 #include "eego_ui.h"
 
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "freertos/task.h"
-
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <strings.h>  // strcasecmp
+
+#include "admin/admin.h"
+#include "alert_core/persistence.h"
+#include "alert_core/store.h"
+#include "alert_core/type_registry.h"
+#include "diag/diag.h"
+#include "esp_log.h"
+#include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "net_stack/net_stack.h"
+#include "net_stack/sd_alert_file_io.h"
+#include "panel_app.h"
+
+namespace admin = eego::admin;
+namespace diag = eego::diag;
 
 namespace {
 
-const char* TAG = "alert_panel";
+const char* TAG = "app";
 
-constexpr uint32_t kTouchPollMs = 8;      // GSLX680 轮询周期（触控合同）
-constexpr uint32_t kDiagQueueLen = 8;
-constexpr uint32_t kDiagCmdMaxLen = 64;
-constexpr uint32_t kDiagTaskStack = 4096;
+constexpr uint32_t kTouchPollMs = 8;  // GSLX680 轮询周期（触控合同）
+
+// ── 组合根持有的长生命周期对象（store/registry/publisher 必须 outlive NetStack）──
 
 eego::Uc8279cDisplay display;
 eego::Gslx680Touch touch;
 eego::PortraitCanvas canvas(display);
 eego::board::BootStatus bootStatus;
 
-QueueHandle_t diagQueue = nullptr;
+alert_core::SnapshotPublisher publisher;
+alert_core::TypeRegistry registry;
+
+// ULID 熵源：ESP32-S3 硬件 RNG（M13：id 不可预测）
+void entropyHook(uint8_t* out, size_t n) {
+  size_t i = 0;
+  while (i < n) {
+    const uint32_t r = esp_random();
+    const size_t chunk = (n - i < sizeof(r)) ? (n - i) : sizeof(r);
+    memcpy(out + i, &r, chunk);
+    i += chunk;
+  }
+}
+
+alert_core::AlertStore store(registry, entropyHook);
+
+// 持久化：SD/FatFS 版 IAlertFileIo + JSONL alerts.db（先 load 后 start）
+eego::net::SdAlertFileIo alertFileIo;
+alert_core::AlertDb alertDb(alertFileIo, "/sdcard/alertpanel/alerts.db");
+
+panel::PanelApp app;
 
 // ── 字体 ─────────────────────────────────────────────────────────────────────
 
-// 在 SD 卡根目录寻找首个 .eefont / .bin 字体并加载为 UI 字体。
-// 找不到时保持未加载状态，渲染自动回退内置 5x7 字体。
-void tryLoadUiFontFromSd() {
-    if (!eego::SdCard::instance().ready()) return;
-    eego::SdCard::DirEntry entries[16];
-    const int n = eego::SdCard::instance().listDir("/", entries, 16);
-    for (int i = 0; i < n; i++) {
-        if (entries[i].isDir) continue;
-        const char* dot = strrchr(entries[i].name, '.');
-        if (!dot) continue;
-        if (strcasecmp(dot, ".eefont") != 0 && strcasecmp(dot, ".bin") != 0) continue;
-        char path[258];  // '/' + name(255) + NUL
-        snprintf(path, sizeof(path), "/%s", entries[i].name);
-        if (eego::FontManager::instance().loadUiFont(path)) {
-            ESP_LOGI(TAG, "UI font loaded: %s", path);
-            return;
-        }
+// admin.font 指定的 SD 绝对路径优先；否则扫 SD 根目录首个 .eefont/.bin；
+// 都失败保持内置 5x7 回退（面板始终可显示文字）。
+void tryLoadUiFont() {
+  const std::string configured = admin::ConfigStore::instance().admin().font;
+  if (!configured.empty()) {
+    if (eego::FontManager::instance().loadUiFont(configured.c_str())) {
+      ESP_LOGI(TAG, "UI font loaded (config): %s", configured.c_str());
+      return;
     }
-    ESP_LOGI(TAG, "no SD font found, using built-in 5x7 fallback");
-}
-
-// ── 启动页（全部内容在 UI 矩形区内，即 R48 安全区内）─────────────────────────
-
-void drawSplash() {
-    canvas.clear();               // 全屏白底（背景允许覆盖整个物理面板）
-    canvas.useUiContentRect();    // 普通 UI 裁剪到 (28,28,496×712)
-
-    // 标题栏：深灰圆角矩形（验证四级灰阶链路），白色标题文字
-    canvas.fillRoundRectGray(eego::UI_CONTENT_X, eego::UI_CONTENT_Y,
-                             eego::UI_CONTENT_WIDTH, 64, 10, 4);
-    eego::FontManager::instance().drawTextGray(canvas, eego::UI_CONTENT_X + 20,
-                                               eego::UI_CONTENT_Y + 16,
-                                               "ALERT PANEL", 3, 15);
-
-    // 分隔线
-    canvas.drawLine(eego::UI_CONTENT_X, eego::UI_CONTENT_Y + 80,
-                    eego::UI_CONTENT_RIGHT, eego::UI_CONTENT_Y + 80, 0);
-
-    // 硬件状态行
-    const eego::BatteryInfo bat = eego::PowerManager::instance().readBattery();
-    int16_t y = eego::UI_CONTENT_Y + 100;
-    auto row = [&y](const char* text) {
-        eego::FontManager::instance().drawText(canvas, eego::UI_CONTENT_X + 12, y,
-                                               text, 2, false);
-        y += 26;
-    };
-    row(bootStatus.touchReady ? "TOUCH OK" : "TOUCH FAIL");
-    row(bootStatus.buttonsReady ? "BUTTONS OK" : "BUTTONS FAIL");
-    row(bootStatus.frontlightPresent ? "FRONTLIGHT YES" : "FRONTLIGHT NO");
-    row(bootStatus.rtcReady ? "RTC OK" : "RTC FAIL");
-    row(bootStatus.sdReady ? "SD OK" : "SD FAIL");
-    row(bootStatus.displayReady ? "DISPLAY OK" : "DISPLAY FAIL");
-    char line[48];
-    snprintf(line, sizeof(line), "BAT %u%% %umV", bat.percent, bat.millivolts);
-    row(line);
-
-    // 灰阶条：0/4/8/12 四段（黑/深灰/浅灰/白）
-    const int16_t gy = eego::UI_CONTENT_BOTTOM - 60;
-    for (int i = 0; i < 4; i++) {
-        canvas.fillRoundRectGray(eego::UI_CONTENT_X + i * 60, gy, 52, 24, 4,
-                                 static_cast<uint8_t>(i * 4));
+    ESP_LOGW(TAG, "configured font failed, fallback to scan: %s", configured.c_str());
+  }
+  if (!eego::SdCard::instance().ready()) return;
+  eego::SdCard::DirEntry entries[16];
+  const int n = eego::SdCard::instance().listDir("/", entries, 16);
+  for (int i = 0; i < n; i++) {
+    if (entries[i].isDir) continue;
+    const char* dot = strrchr(entries[i].name, '.');
+    if (!dot) continue;
+    if (strcasecmp(dot, ".eefont") != 0 && strcasecmp(dot, ".bin") != 0) continue;
+    char path[258];  // '/' + name(255) + NUL
+    snprintf(path, sizeof(path), "/%s", entries[i].name);
+    if (eego::FontManager::instance().loadUiFont(path)) {
+      ESP_LOGI(TAG, "UI font loaded: %s", path);
+      return;
     }
-
-    // 底部提示（浅灰文字）
-    eego::FontManager::instance().drawTextGray(canvas, eego::UI_CONTENT_X + 12,
-                                               eego::UI_CONTENT_BOTTOM - 20,
-                                               "UART0 115200 DIAG: HELP", 1, 8);
-
-    canvas.display(eego::RefreshMode::Full);
-    canvas.waitRefreshComplete();
+  }
+  ESP_LOGI(TAG, "no SD font found, using built-in 5x7 fallback");
 }
 
-// ── 串口诊断 ─────────────────────────────────────────────────────────────────
+// ── 跨任务事件回调（短平快：只置原子标志/投小信箱，不做渲染/IO）──────────────
 
-void diagPrintHelp() {
-    printf("\ncommands:\n"
-           "  help     - show this help\n"
-           "  status   - boot status of all hardware\n"
-           "  battery  - battery voltage / percent / charging\n"
-           "  rtc      - read PCF8563 wall-clock time\n"
-           "  sd       - SD card status + root listing\n"
-           "  refresh  - redraw splash (full refresh)\n");
-    fflush(stdout);
+void onNetEvent(const eego::net::NetEvent& ev, void* ctx) {
+  static_cast<panel::PanelApp*>(ctx)->notifyNetEvent(
+      ev.wifi_state, ev.type == eego::net::NetEventType::SourceHealthChanged);
 }
 
-void diagStatus() {
-    printf("boot: latch=%d touch=%d buttons=%d frontlight=%d rtc=%d sd=%d display=%d\n",
-           bootStatus.powerLatched, bootStatus.touchReady, bootStatus.buttonsReady,
-           bootStatus.frontlightPresent, bootStatus.rtcReady, bootStatus.sdReady,
-           bootStatus.displayReady);
+void onAdminEvent(const eego::admin::AdminEvent& ev, void* ctx) {
+  int reason = -1;
+  if (ev.reason != nullptr) {
+    if (strcmp(ev.reason, "expired") == 0) reason = 0;
+    else if (strcmp(ev.reason, "success") == 0) reason = 1;
+    else if (strcmp(ev.reason, "manual") == 0) reason = 2;
+  }
+  static_cast<panel::PanelApp*>(ctx)->notifyAdminEvent(static_cast<int>(ev.type), reason,
+                                                       ev.window_remaining_s);
 }
 
-void diagBattery() {
-    const eego::BatteryInfo bat = eego::PowerManager::instance().readBattery();
-    printf("battery: %u mV, %u%%, charging=%d\n",
-           bat.millivolts, bat.percent, bat.charging ? 1 : 0);
+// net::AlertActionResult → admin::AlertActionResult 薄适配（M17/M20 同构注入点）。
+// 显式逐码映射（不依赖枚举数值一致，防未来重排）。
+admin::AlertActionResult adaptActionResult(const eego::net::AlertActionResult& r) {
+  admin::AlertActionResult out;
+  switch (r.code) {
+    case eego::net::AlertActionResult::Code::Ok:
+      out.code = admin::AlertActionResultCode::Ok;
+      break;
+    case eego::net::AlertActionResult::Code::NotFound:
+      out.code = admin::AlertActionResultCode::NotFound;
+      break;
+    case eego::net::AlertActionResult::Code::InvalidState:
+      out.code = admin::AlertActionResultCode::InvalidState;
+      break;
+    case eego::net::AlertActionResult::Code::InvalidAction:
+      out.code = admin::AlertActionResultCode::InvalidAction;
+      break;
+    case eego::net::AlertActionResult::Code::NoStore:
+      out.code = admin::AlertActionResultCode::NoStore;
+      break;
+    default:
+      out.code = admin::AlertActionResultCode::Unavailable;
+      break;
+  }
+  out.affected = r.affected;
+  out.detail = r.detail;
+  return out;
 }
 
-void diagRtc() {
-    eego::Pcf8563Rtc rtc(I2C_NUM_0);
-    const eego::RtcTime t = rtc.readTime();
-    if (t.year == 0 && !t.valid) {
-        printf("rtc: read failed\n");
-        return;
-    }
-    printf("rtc: %04u-%02u-%02u %02u:%02u:%02u wday=%u valid=%d\n",
-           t.year, t.month, t.day, t.hour, t.minute, t.second,
-           t.weekday, t.valid ? 1 : 0);
+// RTC wall-clock 时间源（net_task 上下文安全：I2C 端口级锁）：
+// RTC 有效用 RTC；否则回退 time(nullptr)（无 SNTP 时退化，记录时间戳为 0）。
+eego::Pcf8563Rtc& rtc() {
+  static eego::Pcf8563Rtc inst(I2C_NUM_0);
+  return inst;
 }
 
-void diagSd() {
-    eego::SdCard& sd = eego::SdCard::instance();
-    printf("sd: ready=%d\n", sd.ready() ? 1 : 0);
-    if (!sd.ready()) return;
-    eego::SdCard::DirEntry entries[16];
-    const int n = sd.listDir("/", entries, 16);
-    for (int i = 0; i < n; i++) {
-        printf("  %s %s %u\n", entries[i].isDir ? "DIR " : "FILE",
-               entries[i].name, static_cast<unsigned>(entries[i].size));
-    }
-}
-
-void handleDiagCommand(const char* cmd) {
-    if (strcmp(cmd, "help") == 0) {
-        diagPrintHelp();
-    } else if (strcmp(cmd, "status") == 0) {
-        diagStatus();
-    } else if (strcmp(cmd, "battery") == 0) {
-        diagBattery();
-    } else if (strcmp(cmd, "rtc") == 0) {
-        diagRtc();
-    } else if (strcmp(cmd, "sd") == 0) {
-        diagSd();
-    } else if (strcmp(cmd, "refresh") == 0) {
-        if (bootStatus.displayReady) {
-            drawSplash();
-            printf("splash redrawn\n");
-        } else {
-            printf("display not ready\n");
-        }
-    } else {
-        printf("ERR unknown cmd '%s', type help\n", cmd);
-    }
-    fflush(stdout);
-}
-
-// 诊断串口读取任务：阻塞读行后投递到主循环执行
-// （命令在 app_main 上下文执行，保证 I2C 单线程调用合同）
-void diagTask(void* arg) {
-    (void)arg;
-    char line[kDiagCmdMaxLen];
-    while (true) {
-        printf("diag> ");
-        fflush(stdout);
-        if (fgets(line, sizeof(line), stdin) == nullptr) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
-            line[--len] = '\0';
-        }
-        if (len == 0) continue;
-        xQueueSend(diagQueue, line, portMAX_DELAY);
-    }
+uint64_t rtcTimeFn() {
+  const eego::RtcTime t = rtc().readTime();
+  if (t.valid) return static_cast<uint64_t>(rtc().toEpoch(t));
+  return static_cast<uint64_t>(time(nullptr));
 }
 
 }  // namespace
 
 extern "C" void app_main(void) {
-    ESP_LOGI(TAG, "EEGO A4 alert panel boot (FW1 hardware foundation)");
+  ESP_LOGI(TAG, "EEGO A4 alert panel boot (FW5 panel app + diagnostics)");
 
-    // 1. 板级启动合同初始化（顺序即合同，见 board_boot.h）
-    bootStatus = eego::board::beginStandardHardware(display, touch);
+  // 1. 板级启动合同（顺序即合同，见 board_boot.h）
+  bootStatus = eego::board::beginStandardHardware(display, touch);
 
-    // 2. 字体：SD 卡字体优先，缺席时回退内置 5x7
-    tryLoadUiFontFromSd();
+  // 2. NVS / 认证 / 配置存储 / 类型覆盖 / 管理日志
+  if (eego::net::CredentialStore::ensureNvs() != ESP_OK) {
+    ESP_LOGE(TAG, "NVS init failed; credentials/config persistence unavailable");
+  }
+  admin::AuthManager::instance().init();
+  admin::ConfigStore& config = admin::ConfigStore::instance();
+  config.init("/sdcard/alertpanel/config.json");
+  if (!config.valid()) {
+    ESP_LOGW(TAG, "config.json invalid (backup made), running on defaults");
+  }
+  const alert_core::JsonValue dom = config.rawDom();
+  const alert_core::JsonValue* overrides = dom.find("alert_type_overrides");
+  if (overrides != nullptr) {
+    alert_core::ValidationError verr;
+    if (!registry.applyOverridesJson(*overrides, verr)) {
+      ESP_LOGW(TAG, "type overrides apply failed: %s.%s", verr.field.c_str(),
+               verr.message.c_str());
+    }
+  }
+  eego::admin::LogLevel logLevel;
+  if (eego::admin::logLevelFromString(config.admin().log_level, logLevel)) {
+    eego::admin::AdminLog::instance().init(logLevel);
+  } else {
+    eego::admin::AdminLog::instance().init();
+  }
 
-    // 3. Alert Panel 启动页（安全区内，含灰阶元素）
-    if (bootStatus.displayReady) {
-        drawSplash();
+  // 3. 字体
+  tryLoadUiFont();
+
+  // 4. 告警库恢复（store 写自此只在 net_task；load 先于 start，首帧快照覆盖）
+  if (eego::SdCard::instance().ready()) {
+    const size_t loaded = store.loadFrom(alertDb);
+    ESP_LOGI(TAG, "alerts.db restored: %u record(s)", static_cast<unsigned>(loaded));
+  } else {
+    ESP_LOGW(TAG, "SD not ready: alerts.db unavailable, running in-memory");
+  }
+  store.attachDb(&alertDb);
+
+  // 5. net_task 启动（快照发布 + expire 巡检由 net_task 承担）
+  eego::net::NetStackConfig netCfg;
+  netCfg.snapshot_publisher = &publisher;
+  const esp_err_t netErr =
+      eego::net::NetStack::instance().start(netCfg, &store, &registry, rtcTimeFn);
+  if (netErr != ESP_OK) {
+    ESP_LOGE(TAG, "net_task start failed: %s", esp_err_to_name(netErr));
+  }
+  for (const eego::net::SourceConfig& sc : config.sources()) {
+    std::string err;
+    if (!eego::net::NetStack::instance().addSource(sc, err)) {
+      ESP_LOGW(TAG, "source add failed: id=%s (%s)", sc.id.c_str(), err.c_str());
+    }
+  }
+
+  // 6. admin 注入（M17 同构注入点 + M20 现成 functor/薄适配）
+  eego::net::NetStack& net = eego::net::NetStack::instance();
+  admin::setAlertSnapshotSource(net.alertSnapshotSource());
+  admin::setAlertActionSink(
+      [](admin::AlertActionKind kind, const std::string& id, const std::string& ack_by) {
+        eego::net::AlertAction action;
+        switch (kind) {
+          case admin::AlertActionKind::Ack:
+            action.type = eego::net::AlertActionType::Ack;
+            break;
+          case admin::AlertActionKind::AckAll:
+            action.type = eego::net::AlertActionType::AckAll;
+            break;
+          default:
+            action.type = eego::net::AlertActionType::Clear;
+            break;
+        }
+        action.id = id;
+        action.ack_by = ack_by;
+        return adaptActionResult(eego::net::NetStack::instance().alertAction(action));
+      });
+  admin::setAdminCommandHandler(&admin::defaultCommandHandler, nullptr);
+  admin::setAdminEventCallback(&onAdminEvent, &app);
+  net.setEventCallback(&onNetEvent, &app);
+
+  // 7. 设备模式判定（M13 bootstrap）：无管理密码 → 配网门户；否则管理 API
+  if (!admin::AuthManager::instance().hasPassword()) {
+    ESP_LOGI(TAG, "no admin password: opening provisioning portal");
+    if (admin::ProvisionPortal::instance().open() == ESP_OK) {
+      app.enterProvision();
+    }
+  } else {
+    admin::AdminConfig acfg;
+    acfg.registry = &registry;
+    const esp_err_t admErr = admin::startAdminApi(acfg);
+    if (admErr != ESP_OK) {
+      ESP_LOGW(TAG, "admin API start failed: %s", esp_err_to_name(admErr));
+    }
+  }
+
+  // 8. 串口诊断（钩子全部在 app_task 上下文执行）+ UI 属主启动
+  diag::Handlers hooks;
+  hooks.status = [] { app.diagStatus(); };
+  hooks.battery = [] { app.diagBattery(); };
+  hooks.rtc = [] { app.diagRtc(); };
+  hooks.sd = [] { app.diagSd(); };
+  hooks.net = [] { app.diagNet(); };
+  hooks.alerts = [] { app.diagAlerts(); };
+  hooks.inject = [](const char* json) { app.diagInject(json); };
+  hooks.ack_all = [] { app.diagAckAll(); };
+  hooks.smoke = [] { app.diagSmoke(); };
+  hooks.version = [] { app.diagVersion(); };
+  hooks.lang = [](const char* arg) { app.diagLang(arg); };
+  hooks.page = [](const char* arg) { app.diagPage(arg); };
+  if (!diag::start(hooks)) {
+    ESP_LOGW(TAG, "diag start failed (serial diagnostics unavailable)");
+  }
+
+  panel::PanelApp::Deps deps;
+  deps.display = &display;
+  deps.touch = &touch;
+  deps.canvas = &canvas;
+  deps.boot = bootStatus;
+  deps.publisher = &publisher;
+  deps.registry = &registry;
+  app.begin(deps);
+
+  // 9. app_task 主循环（唯一 UI 属主；input/net/httpd/serial 只经队列/快照交互）
+  ESP_LOGI(TAG, "app_task running");
+  eego::ButtonEvent bevt;
+  while (true) {
+    // 触控轮询（8ms 合同，边沿触发；前键短/长按经触控 sentinel 上报）
+    const eego::TouchEvent tev = touch.poll();
+    if (tev.type != eego::TouchEventType::None) {
+      app.handleTouch(tev);
     }
 
-    // 4. 串口诊断入口 + 输入事件循环（不含告警业务）
-    diagQueue = xQueueCreate(kDiagQueueLen, kDiagCmdMaxLen);
-    if (diagQueue == nullptr ||
-        xTaskCreate(diagTask, "diag", kDiagTaskStack, nullptr, 3, nullptr) != pdPASS) {
-        ESP_LOGE(TAG, "diag task init failed");
+    // 按键事件队列（后台任务去抖）
+    while (eego::ButtonManager::instance().poll(&bevt, 0)) {
+      app.handleButton(bevt);
     }
-    ESP_LOGI(TAG, "serial diagnostics ready (115200), type 'help'");
-    diagPrintHelp();
 
-    char cmd[kDiagCmdMaxLen];
-    eego::ButtonEvent bevt;
-    while (true) {
-        // 触控轮询（8ms 合同，边沿触发）
-        const eego::TouchEvent tev = touch.poll();
-        if (tev.type == eego::TouchEventType::Touch) {
-            ESP_LOGI(TAG, "touch %s x=%u y=%u", tev.pressed ? "down" : "up",
-                     tev.x, tev.y);
-        } else if (tev.type == eego::TouchEventType::FrontKeyShort) {
-            ESP_LOGI(TAG, "front key short");
-        } else if (tev.type == eego::TouchEventType::FrontKeyLong) {
-            ESP_LOGI(TAG, "front key long");
-        }
+    // 串口诊断命令（读行在 diag 任务，执行在本上下文）
+    diag::service();
 
-        // 按键事件队列（后台任务去抖）
-        while (eego::ButtonManager::instance().poll(&bevt, 0)) {
-            ESP_LOGI(TAG, "button id=%d action=%d",
-                     static_cast<int>(bevt.id), static_cast<int>(bevt.action));
-        }
+    // admin 命令队列（httpd → app_task；0ms = 非阻塞轮询）
+    admin::serviceCommands(0);
 
-        // 串口诊断命令
-        if (xQueueReceive(diagQueue, cmd, 0) == pdTRUE) {
-            handleDiagCommand(cmd);
-        }
+    // 应用主服务（事件归并/电源 FSM/按需渲染；电池模式可能在此深睡不返回）
+    app.service();
 
-        vTaskDelay(pdMS_TO_TICKS(kTouchPollMs));
-    }
+    vTaskDelay(pdMS_TO_TICKS(kTouchPollMs));
+  }
 }
