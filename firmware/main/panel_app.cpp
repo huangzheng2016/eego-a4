@@ -809,6 +809,10 @@ void PanelApp::clearConfirm() {
 }
 
 void PanelApp::showBanner(const char* text, uint32_t ms) {
+  if (dashboardUsesRuntimeStatus(page_)) {
+    dashboard_.showStatusMessage(text != nullptr ? text : "", ms);
+    return;
+  }
   banner_ = text != nullptr ? text : "";
   sanitizeClamped(banner_, 90);
   bannerDeadlineMs_ = nowMs() + ms;

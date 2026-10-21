@@ -54,6 +54,7 @@ class DashboardRuntime {
   bool consumeExitRequest();
   bool gotoPage(const std::string& page_id);
   bool gotoPanel(const std::string& panel_id);
+  void showStatusMessage(const std::string& text, uint32_t duration_ms);
   std::string linkedPanelForAlert(const alert_core::AlertRecord& record) const;
 
   void diag(const char* args);

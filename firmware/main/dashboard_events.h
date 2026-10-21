@@ -17,6 +17,11 @@
 namespace panel {
 
 inline constexpr char kDashboardAlertCorePrefix[] = "alert_core:";
+inline constexpr char kDashboardDerivedRulePrefix[] = "derived_rule:";
+
+inline std::string dashboardDerivedRuleEventId(const std::string& rule_id) {
+  return std::string(kDashboardDerivedRulePrefix) + rule_id;
+}
 
 inline eego::dashboard::Event dashboardEventFromAlert(const alert_core::AlertRecord& record,
                                                       const std::string& linked_panel_id) {

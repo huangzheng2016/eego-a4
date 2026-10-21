@@ -3,12 +3,15 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "dashboard_core/expression.h"
 #include "dashboard_core/model.h"
+#include "data_pipeline/history.h"
 
 namespace panel {
 
@@ -27,6 +30,79 @@ inline DashboardCarouselRoute dashboardCarouselRoute(
   route.allowed = update_source == selected_source &&
                   (update_panel == owner_id || update_panel == selected_id);
   return route;
+}
+
+inline std::string dashboardResolveCarousel(
+    const std::map<std::string, std::string>& selections, std::string panel_id) {
+  std::set<std::string> visited;
+  while (true) {
+    if (!visited.insert(panel_id).second) return panel_id;
+    const auto selected = selections.find(panel_id);
+    if (selected == selections.end() || selected->second == panel_id) return panel_id;
+    panel_id = selected->second;
+  }
+}
+
+inline bool dashboardAggregationForExpression(std::string_view expression,
+                                              eego::dashboard::pipeline::Aggregation& out) {
+  while (!expression.empty() && expression.front() == ' ') expression.remove_prefix(1);
+  while (!expression.empty() && expression.back() == ' ') expression.remove_suffix(1);
+  if (expression == "sum") {
+    out = eego::dashboard::pipeline::Aggregation::Sum;
+  } else if (expression == "avg") {
+    out = eego::dashboard::pipeline::Aggregation::Avg;
+  } else if (expression == "min") {
+    out = eego::dashboard::pipeline::Aggregation::Min;
+  } else if (expression == "max") {
+    out = eego::dashboard::pipeline::Aggregation::Max;
+  } else if (expression == "delta") {
+    out = eego::dashboard::pipeline::Aggregation::Delta;
+  } else if (expression == "rate") {
+    out = eego::dashboard::pipeline::Aggregation::Rate;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+inline eego::dashboard::pipeline::WindowKind dashboardWindowFromPanel(
+    const eego::dashboard::PanelSpec& panel) {
+  if (panel.time_window.from == "today") return eego::dashboard::pipeline::WindowKind::Today;
+  if (panel.time_window.from == "-5h") return eego::dashboard::pipeline::WindowKind::Fixed5h;
+  if (panel.time_window.from == "-7d") return eego::dashboard::pipeline::WindowKind::Fixed7d;
+  return eego::dashboard::pipeline::WindowKind::Rolling24h;
+}
+
+inline eego::dashboard::MetricSample dashboardAggregateSample(
+    const eego::dashboard::PanelSpec& panel,
+    const eego::dashboard::pipeline::AggregationResult& aggregate, int64_t now_ms) {
+  eego::dashboard::MetricSample sample;
+  sample.source_id = panel.source_id;
+  sample.metric = panel.metric;
+  sample.timestamp_ms = aggregate.last_timestamp_ms != 0 ? aggregate.last_timestamp_ms : now_ms;
+  sample.value = aggregate.value;
+  sample.unit = panel.style.unit;
+  return sample;
+}
+
+inline bool dashboardEvaluateValueExpression(const eego::dashboard::PanelSpec& panel,
+                                             eego::dashboard::MetricSample& sample) {
+  if (panel.value_expression.empty()) return true;
+  eego::dashboard::pipeline::Aggregation aggregate;
+  if (dashboardAggregationForExpression(panel.value_expression, aggregate)) return true;
+  eego::dashboard::EvalValues values{
+      {"value", eego::dashboard::EvalValue::makeNumber(sample.value)},
+      {"now", eego::dashboard::EvalValue::makeNumber(static_cast<double>(sample.timestamp_ms))},
+      {"timestamp_ms",
+       eego::dashboard::EvalValue::makeNumber(static_cast<double>(sample.timestamp_ms))}};
+  double transformed = 0.0;
+  eego::dashboard::ExpressionError error;
+  if (!eego::dashboard::evaluateNumericExpression(panel.value_expression, values, transformed,
+                                                  error)) {
+    return false;
+  }
+  sample.value = transformed;
+  return true;
 }
 
 inline bool dashboardPanelRequiresPublication(const eego::dashboard::PanelSpec& panel) {

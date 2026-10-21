@@ -27,6 +27,8 @@ constexpr Page dashboardStartupPage(Page current, bool dashboard_loaded) {
   return dashboard_loaded && current != Page::Provision ? Page::Dashboard : current;
 }
 
+constexpr bool dashboardUsesRuntimeStatus(Page current) { return current == Page::Dashboard; }
+
 // 二次确认状态（5s 窗口内再次激活才执行；任何其他输入取消）。
 enum class ConfirmKind : uint8_t {
   None = 0,
