@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -617,6 +618,26 @@ void SdCache::cleanupImages(const std::string& source_id,
     closedir(directory);
   }
   std::remove(imagePath(source_id).c_str());
+}
+
+bool SdCache::clearSource(const std::string& source_id, std::string& error) {
+  error.clear();
+  if (!validId(source_id)) {
+    error = "invalid cache source id";
+    return false;
+  }
+  const std::string history = historyPath(source_id);
+  const std::string snapshot = snapshotPath(source_id);
+  const std::string paths[] = {history,          history + ".tmp",  snapshot,
+                               snapshot + ".tmp", snapshot + ".next", snapshot + ".next.tmp",
+                               imagePath(source_id) + ".tmp"};
+  bool ok = true;
+  for (const std::string& path : paths) {
+    if (std::remove(path.c_str()) != 0 && errno != ENOENT) ok = false;
+  }
+  cleanupImages(source_id, "");
+  if (!ok) error = "cache invalidation failed";
+  return ok;
 }
 
 bool SdCache::appendHistory(const std::string& source_id,

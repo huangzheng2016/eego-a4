@@ -1281,11 +1281,6 @@ struct DashboardRuntime::Impl {
     overrides = std::move(next);
     variables = std::move(resolved);
     published_panels.clear();
-    for (const dash::Page& current : config.pages) {
-      for (const dash::PanelSpec& panel : current.panels) {
-        if (!panel.source_id.empty()) pipeline->refreshPanel(panel.id);
-      }
-    }
     rebuildData();
     force_tick = true;
     dirty = true;

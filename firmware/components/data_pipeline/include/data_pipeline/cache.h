@@ -31,6 +31,7 @@ class SdCache {
 
   bool writeSnapshot(const SourceResult& result, std::string& error);
   bool readSnapshot(const std::string& source_id, SourceResult& out, std::string& error) const;
+  bool clearSource(const std::string& source_id, std::string& error);
 
   const std::string& directory() const { return directory_; }
   const CacheLimits& limits() const { return limits_; }

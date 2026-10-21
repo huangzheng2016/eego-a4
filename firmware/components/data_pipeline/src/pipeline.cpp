@@ -132,6 +132,27 @@ ResolvedWindow resolveCustomWindow(const PanelBinding& binding, int64_t now_ms,
           std::max(resolved.from_ms, resolved.to_ms)};
 }
 
+bool requestChanged(const SourcePlan& plan, const VariableValues& previous,
+                    const VariableValues& current, const TokenResolver& token_resolver) {
+  if (plan.source.kind == SourceKind::Http) {
+    net::NetRequest old_request;
+    net::NetRequest new_request;
+    std::string old_error;
+    std::string new_error;
+    const bool old_ok = buildSourceRequest(plan, previous, token_resolver, old_request, old_error);
+    const bool new_ok = buildSourceRequest(plan, current, token_resolver, new_request, new_error);
+    return !old_ok || !new_ok || sourceRequestKey(old_request) != sourceRequestKey(new_request);
+  }
+  std::string old_body;
+  std::string new_body;
+  std::string error;
+  const bool old_ok = interpolateVariables(plan.static_body, previous, old_body, error,
+                                           plan.source.max_response_bytes);
+  const bool new_ok = interpolateVariables(plan.static_body, current, new_body, error,
+                                           plan.source.max_response_bytes);
+  return !old_ok || !new_ok || old_body != new_body;
+}
+
 bool validRefreshOverride(uint32_t refresh_ms) {
   return refresh_ms == 0 || refresh_ms == 60000 || refresh_ms == 300000 ||
          refresh_ms == 900000 || refresh_ms == 1800000;
@@ -257,10 +278,38 @@ bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<Sourc
 bool DataPipeline::setVariables(const VariableValues& overrides, std::string& error) {
   VariableValues values;
   if (!defaultVariableValues(dashboard_.variables, overrides, values, error)) return false;
+  std::set<std::string> changed;
+  for (const auto& item : sources_) {
+    if (requestChanged(item.second->plan, variables_, values, config_.token_resolver))
+      changed.insert(item.first);
+  }
+  for (const std::string& source_id : changed) detachAsync(*sources_.at(source_id));
+  for (const std::string& source_id : changed) {
+    SourceRuntime& source = *sources_.at(source_id);
+    history_.clearSource(source_id);
+    source.result.reset();
+    source.status = SourceStatus{};
+    source.status.source_id = source_id;
+    if (cache_ != nullptr) {
+      std::string cache_error;
+      if (!cache_->clearSource(source_id, cache_error)) source.status.cache_error = cache_error;
+    }
+    source.next_poll_ms = 0;
+    source.initial_fanout = true;
+  }
+  for (auto& item : panels_) {
+    PanelState& panel = item.second;
+    if (changed.count(panel.binding.source_id) == 0) continue;
+    panel.pending = true;
+    panel.next_refresh_ms = 0;
+    dirty_panels_.insert(panel.binding.panel_id);
+  }
+  updates_.erase(std::remove_if(updates_.begin(), updates_.end(), [&](const PanelUpdate& update) {
+                   return changed.count(update.source_id) != 0;
+                 }),
+                 updates_.end());
   config_.variable_overrides = overrides;
   variables_ = std::move(values);
-  detachAllAsync();
-  for (auto& source : sources_) source.second->next_poll_ms = 0;
   return true;
 }
 
@@ -362,6 +411,7 @@ void DataPipeline::markStatusPanels(const SourceRuntime& source, int64_t now_ms)
 }
 
 void DataPipeline::servicePanels(const SourceRuntime& source, int64_t now_ms) {
+  if (source.async_pending) return;
   for (auto& item : panels_) {
     PanelState& panel = item.second;
     if (panel.binding.source_id != source.plan.source.id || now_ms < panel.next_refresh_ms)
