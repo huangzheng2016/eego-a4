@@ -3,13 +3,13 @@
 #include "admin/admin.h"
 
 #include <algorithm>
-#include <dirent.h>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <set>
 #include <vector>
 
 #include "admin_internal.h"
+#include "device_settings/device_settings.h"
 #include "esp_timer.h"
 #include "net_stack/credentials.h"
 #include "net_stack/net_task.h"
@@ -47,23 +47,22 @@ void scheduleReboot(uint32_t delay_ms) {
   esp_timer_start_once(g_reboot_timer, static_cast<int64_t>(delay_ms) * 1000);
 }
 
-// 递归删除 SD 目录（恢复出厂：删配置目录保留字体，M13 F8）。
-bool removeRecursive(const std::string& path) {
-  DIR* dir = opendir(path.c_str());
-  if (dir == nullptr) return true;  // 不存在视为成功
+// 只删除明确列出的配置/数据文件。不得递归删目录：字体和未知用户文件保留。
+bool removeFactoryConfigs() {
+  static constexpr const char* kPaths[] = {
+      "/sdcard/alertpanel/config.json",
+      "/sdcard/alertpanel/config.json.tmp",
+      "/sdcard/alertpanel/config.json.bak",
+      "/sdcard/alertpanel/alerts.db",
+      "/sdcard/alertpanel/alerts.db.tmp",
+      "/sdcard/alertpanel/dashboard.json",
+      "/sdcard/alertpanel/dashboard.json.tmp",
+      "/sdcard/alertpanel/dashboard.json.bak",
+  };
   bool ok = true;
-  struct dirent* ent;
-  while ((ent = readdir(dir)) != nullptr) {
-    if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
-    const std::string child = path + "/" + ent->d_name;
-    if (ent->d_type == DT_DIR) {
-      if (!removeRecursive(child)) ok = false;
-    } else {
-      if (remove(child.c_str()) != 0) ok = false;
-    }
+  for (const char* path : kPaths) {
+    if (remove(path) != 0 && errno != ENOENT) ok = false;
   }
-  closedir(dir);
-  if (rmdir(path.c_str()) != 0) ok = false;
   return ok;
 }
 
@@ -145,14 +144,12 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
 
   switch (cmd.type) {
     case AdminCommandType::ApplyConfig: {
-      // 1. 原子持久化（tmp+rename+回读；失败 RAM 不变 → httpd 500）
       std::string err;
       if (!store.commit(cmd.config, err)) {
         res.ok = false;
         res.err = err;
         return;
       }
-      // 2. admin 域热生效（日志只记 section 名，M13 F7）
       if (cmd.changed_sections & AdminCommand::kChangedAdmin) {
         const AdminDomainConfig admin = store.admin();
         AuthManager::instance().setSessionTtl(admin.session_ttl_s);
@@ -161,7 +158,30 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
         if (logLevelFromString(admin.log_level, lv)) AdminLog::instance().setMinLevel(lv);
         ADMIN_LOG_INFO("config applied: admin");
       }
-      // 3. alert_type_overrides → 注册表（整段替换语义：先清再应用）
+      // Legacy admin.display writes use the same DeviceSettings validator and
+      // subscription path as typed settings. Other admin-only writes do not
+      // reapply a possibly stale legacy display mirror.
+      if (cmd.changed_sections & AdminCommand::kChangedAdminDisplay) {
+        const alert_core::JsonValue* admin = cmd.config.find("admin");
+        const alert_core::JsonValue* display = admin != nullptr ? admin->find("display") : nullptr;
+        if (display != nullptr) {
+          const settings::Snapshot snap = settings::DeviceSettings::instance().snapshot();
+          settings::Settings candidate = snap.values;
+          settings::applyLegacyDisplay(*display, candidate);
+          if ((settings::changedFields(snap.values, candidate) & settings::kChangedFrontlight) != 0) {
+            if (!snap.capabilities.frontlight) {
+              ADMIN_LOG_WARN("legacy display ignored: frontlight unavailable");
+            } else {
+              uint32_t changed = 0;
+              if (!settings::DeviceSettings::instance().update(candidate, &changed, err)) {
+                res.ok = false;
+                res.err = err;
+                return;
+              }
+            }
+          }
+        }
+      }
       if ((cmd.changed_sections & AdminCommand::kChangedOverrides) && g_registry != nullptr) {
         g_registry->clearOverrides();
         const alert_core::JsonValue* ov = cmd.config.find("alert_type_overrides");
@@ -172,12 +192,10 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
         }
         ADMIN_LOG_INFO("config applied: alert_type_overrides");
       }
-      // 4. sources 热生效（整段替换）
       if (cmd.changed_sections & AdminCommand::kChangedSources) {
         syncSources(store.sources());
         ADMIN_LOG_INFO("config applied: sources");
       }
-      // 5. mute_rules 热生效（整段替换；M21）
       if (cmd.changed_sections & AdminCommand::kChangedMuteRules) {
         syncMuteRules(store.muteRules());
         ADMIN_LOG_INFO("config applied: mute_rules");
@@ -204,6 +222,28 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       res.ok = DashboardStore::instance().erase(
           cmd.dashboard_check_revision, cmd.dashboard_expected_revision, res.err, conflict);
       res.conflict = conflict;
+      return;
+    }
+
+    case AdminCommandType::ApplySettings: {
+      const settings::Snapshot snap = settings::DeviceSettings::instance().snapshot();
+      settings::Settings candidate;
+      settings::FieldErrors errors;
+      if (!settings::mergePatch(snap.values, cmd.settings_patch, candidate, errors)) {
+        res.ok = false;
+        res.err = errors.empty() ? "settings validation failed"
+                                 : errors.front().field + ": " + errors.front().message;
+        return;
+      }
+      uint32_t changed = 0;
+      std::string err;
+      if (!settings::DeviceSettings::instance().update(candidate, &changed, err)) {
+        res.ok = false;
+        res.err = err;
+        return;
+      }
+      ADMIN_LOG_INFO("device settings applied: mask=%u", static_cast<unsigned>(changed));
+      res.ok = true;
       return;
     }
 
@@ -240,7 +280,6 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
         res.err = "failed to persist wifi credentials to NVS";
         return;
       }
-      // config wifi_list 同步 + 原子提交（失败不阻断：NVS 已是权威）
       alert_core::JsonValue dom = store.rawDom();
       std::vector<std::pair<std::string, std::string>> list;
       for (size_t i = 0; i < accounts.size(); i++) {
@@ -254,25 +293,60 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       } else {
         ADMIN_LOG_ERROR("wifi_list config sync failed: %s", err.c_str());
       }
-      // 触发重连（net_task 上下文，线程安全）
       net::NetStack::instance().reconnectNow();
       res.ok = true;
       return;
     }
 
+    case AdminCommandType::WifiReset: {
+      ADMIN_LOG_WARN("wifi-only reset executing");
+      if (net::CredentialStore::clearWifiAccounts() != ESP_OK) {
+        res.ok = false;
+        res.err = "failed to clear wifi credentials";
+        return;
+      }
+      alert_core::JsonValue dom = store.rawDom();
+      std::string err;
+      if (!store.setWifiListInDom(dom, {}) || !store.commit(dom, err)) {
+        ADMIN_LOG_ERROR("wifi reset: wifi_list sync failed: %s", err.c_str());
+      }
+      net::NetStack::instance().reconnectNow();
+      const esp_err_t ap_err = ProvisionPortal::instance().openApFallback();
+      if (ap_err != ESP_OK && ap_err != ESP_ERR_INVALID_STATE) {
+        res.ok = false;
+        res.err = "wifi credentials cleared but recovery AP failed";
+        return;
+      }
+      res.ok = true;
+      return;
+    }
+
     case AdminCommandType::FactoryReset: {
-      // M13 F8：清 NVS sec/wifi + 删 SD 配置目录（保留字体）→ 重启
       ADMIN_LOG_WARN("factory reset executing");
-      net::CredentialStore::clearNamespace("sec");
-      net::CredentialStore::clearNamespace("wifi");
-      AuthManager::instance().revokeAllSessions();
-      if (::eego::SdCard::instance().ready()) {
-        if (!removeRecursive("/sdcard/alertpanel")) {
-          ADMIN_LOG_ERROR("factory reset: config dir removal incomplete");
+      net::NetStack::instance().stop();
+      bool ok = true;
+      for (const char* ns : {"sec", "wifi", "ui", "ble"}) {
+        if (net::CredentialStore::clearNamespace(ns) != ESP_OK) {
+          ADMIN_LOG_ERROR("factory reset: clear namespace failed: %s", ns);
+          ok = false;
         }
       }
-      res.ok = true;  // 先回 httpd 202，再延迟重启
+      if (settings::DeviceSettings::erasePersisted() != ESP_OK) {
+        ADMIN_LOG_ERROR("factory reset: clear device settings failed");
+        ok = false;
+      }
+      AuthManager::instance().revokeAllSessions();
+      if (::eego::SdCard::instance().ready() && !removeFactoryConfigs()) {
+        ADMIN_LOG_ERROR("factory reset: config file removal incomplete");
+        ok = false;
+      }
       scheduleReboot(cmd.delay_ms > 0 ? cmd.delay_ms : 2000);
+      if (!ok) {
+        res.ok = false;
+        res.err = "factory reset incomplete; rebooting for recovery";
+        return;
+      }
+      res.ok = true;
       return;
     }
 

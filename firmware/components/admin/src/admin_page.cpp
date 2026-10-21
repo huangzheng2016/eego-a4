@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 静态管理页资源（GET / 、/admin.js 、/admin.css）—— M17 任务 4。
-// 中英双语最小管理页：登录、告警列表/确认/清除、状态、来源、配置、危险操作确认。
+// 中英双语管理页：登录、告警、状态、typed 设备设置、来源、配置与危险操作确认。
 // 安全（M13 T11 强制项）：
 //   * 免认证可服务但零数据；token 只存 sessionStorage（非 localStorage/cookie）；
 //   * CSP default-src 'self'（外链仅 /admin.js /admin.css）；
@@ -32,6 +32,7 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
     <nav>
       <a href="#" data-tab="alerts" class="tab on" id="tab_alerts">告警</a>
       <a href="#" data-tab="status" class="tab" id="tab_status">状态</a>
+      <a href="#" data-tab="settings" class="tab" id="tab_settings">设置</a>
       <a href="#" data-tab="sources" class="tab" id="tab_sources">来源</a>
       <a href="#" data-tab="dashboard" class="tab" id="tab_dashboard">数据面板</a>
       <a href="#" data-tab="config" class="tab" id="tab_config">配置</a>
@@ -51,6 +52,48 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
   <section id="pane_status" style="display:none">
     <pre id="status_pre"></pre>
     <button id="btn_refresh_status">刷新</button>
+  </section>
+  <section id="pane_settings" style="display:none">
+    <div class="presetbox">
+      <h3 id="t_set_network"></h3>
+      <div id="set_net_status" class="dim"></div>
+      <div id="set_ble_status" class="dim"></div>
+    </div>
+    <div class="presetbox">
+      <h3 id="t_set_display"></h3>
+      <label><span id="l_fl_enabled"></span><input id="set_fl_enabled" type="checkbox"></label>
+      <label><span id="l_fl_brightness"></span><input id="set_fl_brightness" type="number" min="1" max="100"></label>
+      <label><span id="l_fl_warmth"></span><input id="set_fl_warmth" type="number" min="0" max="100"></label>
+      <label><span id="l_data_refresh"></span><input id="set_data_refresh" type="number" min="0" max="86400"></label>
+      <label><span id="l_epd_full"></span><input id="set_epd_full" type="number" min="0" max="604800"></label>
+    </div>
+    <div class="presetbox">
+      <h3 id="t_set_power"></h3>
+      <label><span id="l_power_mode"></span><select id="set_power_mode"><option value="auto" id="opt_power_auto"></option><option value="mains" id="opt_power_mains"></option><option value="battery" id="opt_power_battery"></option></select></label>
+      <label><span id="l_battery_poll"></span><input id="set_battery_poll" type="number" min="60" max="21600"></label>
+      <label><span id="l_idle_sleep"></span><input id="set_idle_sleep" type="number" min="0" max="600"></label>
+      <label><span id="l_sleep_start"></span><input id="set_sleep_start" type="text" placeholder="22:00" maxlength="5"></label>
+      <label><span id="l_sleep_end"></span><input id="set_sleep_end" type="text" placeholder="06:00" maxlength="5"></label>
+      <div id="set_deep_sleep_note" class="dim"></div>
+    </div>
+    <div class="presetbox">
+      <h3 id="t_set_time"></h3>
+      <label><span id="l_language"></span><select id="set_language"><option value="zh" id="opt_lang_zh"></option><option value="en" id="opt_lang_en"></option></select></label>
+      <label><span id="l_timezone"></span><input id="set_timezone" type="number" min="-840" max="840" step="15"></label>
+    </div>
+    <div class="presetbox">
+      <h3 id="t_set_storage_diag"></h3>
+      <div id="set_storage_status" class="dim"></div>
+      <label><span id="l_diag_enabled"></span><input id="set_diag_enabled" type="checkbox"></label>
+    </div>
+    <div class="presetbox">
+      <h3 id="t_set_security"></h3>
+      <div id="set_security_status" class="dim"></div>
+      <button id="btn_settings_recovery"></button>
+    </div>
+    <button id="btn_settings_save"></button>
+    <button id="btn_settings_reload" class="sec"></button>
+    <pre id="set_capabilities"></pre>
   </section>
   <section id="pane_sources" style="display:none">
     <table id="src_table"><thead><tr>
@@ -109,6 +152,9 @@ button.danger{background:#c00}
 button.sec{background:#888}
 button.mini{font-size:12px;padding:3px 8px}
 input,textarea,select{font-size:15px;padding:8px;border:1px solid #bbb;border-radius:4px;width:100%;box-sizing:border-box}
+input[type=checkbox]{width:auto;margin-right:8px}
+.presetbox label{display:block;margin:7px 0}
+.presetbox label span{display:block;margin-bottom:3px}
 #cfg_text{height:280px;font-family:monospace;font-size:12px}
 pre{background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px;font-size:12px;white-space:pre-wrap;word-break:break-all}
 .dim{color:#888}
@@ -139,7 +185,19 @@ var L={
   presets:'来源预设',preset_pick:'选择预设…',preset_fill:'填入配置草稿',
   preset_kind_push:'接入方式：http_push（推送桥接）',preset_kind_poll:'接入方式：http_poll（轮询）',
   preset_cap_native:'设备原生解析',preset_cap_script:'需自定义脚本桥接',
-  preset_filled:'已填入配置草稿（未保存）；检查 url/凭据后保存，校验规则不变'},
+  preset_filled:'已填入配置草稿（未保存）；检查 url/凭据后保存，校验规则不变',
+  tab_settings:'设置',set_network:'网络与蓝牙',set_display:'显示、前光与刷新',set_power:'休眠与电源',
+  set_time:'时间与语言',set_storage_diag:'存储与诊断',set_security:'安全与系统恢复',
+  fl_enabled:'前光启用',fl_brightness:'前光亮度（1-100）',fl_warmth:'前光色温（0-100）',
+  data_refresh:'数据刷新秒数（0=跟随源）',epd_full:'EPD 全刷秒数（0=仅手动）',
+  power_mode:'电源模式',battery_poll:'电池轮询秒数',idle_sleep:'无操作休眠秒数（0=禁用）',
+  sleep_start:'睡眠开始（HH:MM，留空禁用）',sleep_end:'睡眠结束（HH:MM）',
+  deep_sleep_note:'深睡期间 HTTP/BLE 不可实时访问；恢复窗口暂停自动入睡。',
+  language:'界面语言',timezone:'时区偏移（分钟，15 分钟步进）',diag_enabled:'启用串口诊断',
+  settings_save:'保存设置',settings_reload:'重载设置',settings_recovery:'打开恢复操作',
+  power_auto:'自动',power_mains:'常供电',power_battery:'电池',lang_zh:'中文',lang_en:'英文',
+  ok_settings:'设置已保存并生效',err_sleep_time:'睡眠时间格式必须为 HH:MM',
+  ble_unavailable:'蓝牙：不可用（本固件未启用）',capabilities:'能力与电源状态'},
  en:{login:'EEGO A4 Admin Sign-in',login_btn:'Sign in',pw_ph:'Admin password',badpw:'Sign-in failed (wrong password or device not provisioned)',
   tab_alerts:'Alerts',tab_status:'Status',tab_sources:'Sources',tab_config:'Config',tab_system:'System',logout:'Sign out',
   sev:'Severity',title:'Title',type:'Type',state:'State',seen:'Last seen',ops:'Actions',ack:'Ack',clear:'Clear',refresh:'Refresh',
@@ -156,7 +214,21 @@ var L={
   presets:'Source presets',preset_pick:'Choose a preset…',preset_fill:'Fill into config draft',
   preset_kind_push:'Access: http_push (push bridge)',preset_kind_poll:'Access: http_poll (polling)',
   preset_cap_native:'device-native parsing',preset_cap_script:'custom script bridge required',
-  preset_filled:'Draft filled into config (not saved); review url/credentials, then save — validation unchanged'}
+  preset_filled:'Draft filled into config (not saved); review url/credentials, then save — validation unchanged',
+  tab_settings:'Settings',set_network:'Network & Bluetooth',set_display:'Display, frontlight & refresh',
+  set_power:'Sleep & power',set_time:'Time & language',set_storage_diag:'Storage & diagnostics',
+  set_security:'Security & system recovery',fl_enabled:'Frontlight enabled',
+  fl_brightness:'Frontlight brightness (1-100)',fl_warmth:'Frontlight warmth (0-100)',
+  data_refresh:'Data refresh seconds (0=source schedules)',epd_full:'EPD full refresh seconds (0=manual)',
+  power_mode:'Power mode',battery_poll:'Battery poll seconds',idle_sleep:'Idle sleep seconds (0=disabled)',
+  sleep_start:'Sleep start (HH:MM, blank=disabled)',sleep_end:'Sleep end (HH:MM)',
+  deep_sleep_note:'No live HTTP/BLE while in deep sleep; recovery windows pause automatic sleep.',
+  language:'UI language',timezone:'Timezone offset (minutes, 15-minute steps)',
+  diag_enabled:'Enable serial diagnostics',settings_save:'Save settings',settings_reload:'Reload settings',
+  settings_recovery:'Open recovery operations',power_auto:'Auto',power_mains:'Mains',power_battery:'Battery',
+  lang_zh:'Chinese',lang_en:'English',ok_settings:'Settings saved and applied',
+  err_sleep_time:'Sleep time must use HH:MM format',ble_unavailable:'Bluetooth: unavailable in this firmware',
+  capabilities:'Capabilities & power state'}
 };
 function t(k){return L[LANG][k];}
 function $(id){return document.getElementById(id);}
@@ -165,6 +237,7 @@ function applyI18n(){
  $('t_login_title').textContent=t('login');$('btn_login').textContent=t('login_btn');
  $('pw').placeholder=t('pw_ph');
  $('tab_alerts').textContent=t('tab_alerts');$('tab_status').textContent=t('tab_status');
+ $('tab_settings').textContent=t('tab_settings');
  $('tab_sources').textContent=t('tab_sources');$('tab_config').textContent=t('tab_config');
  $('tab_system').textContent=t('tab_system');
  $('th_sev').textContent=t('sev');$('th_title').textContent=t('title');$('th_type').textContent=t('type');
@@ -177,6 +250,20 @@ function applyI18n(){
  $('t_danger').textContent=t('danger');$('btn_reboot').textContent=t('reboot');
  $('btn_reset').textContent=t('reset');$('btn_rotate').textContent=t('rotate');
  $('btn_logout').textContent=t('logout');
+ var settingsText={
+  t_set_network:'set_network',t_set_display:'set_display',t_set_power:'set_power',t_set_time:'set_time',
+  t_set_storage_diag:'set_storage_diag',t_set_security:'set_security',l_fl_enabled:'fl_enabled',
+  l_fl_brightness:'fl_brightness',l_fl_warmth:'fl_warmth',l_data_refresh:'data_refresh',
+  l_epd_full:'epd_full',l_power_mode:'power_mode',l_battery_poll:'battery_poll',
+  l_idle_sleep:'idle_sleep',l_sleep_start:'sleep_start',l_sleep_end:'sleep_end',
+  set_deep_sleep_note:'deep_sleep_note',l_language:'language',l_timezone:'timezone',
+  l_diag_enabled:'diag_enabled',btn_settings_recovery:'settings_recovery',
+  btn_settings_save:'settings_save',btn_settings_reload:'settings_reload',
+  opt_power_auto:'power_auto',opt_power_mains:'power_mains',opt_power_battery:'power_battery',
+  opt_lang_zh:'lang_zh',opt_lang_en:'lang_en',set_ble_status:'ble_unavailable',
+  set_capabilities:'capabilities'
+ };
+ Object.keys(settingsText).forEach(function(id){$(id).textContent=t(settingsText[id]);});
  $('lang_toggle').textContent=LANG==='zh'?'EN':'中文';
 }
 function msg(text,cls){var m=$('msg');m.textContent=text||'';m.className=cls||'';}
@@ -339,6 +426,50 @@ function showSchema(){
  api('/config/schema').then(function(s){var p=$('schema_pre');p.style.display='block';p.textContent=JSON.stringify(s,null,2);})
  .catch(function(e){if(e.message!=='401')msg(e.message,'err');});
 }
+// ---------- typed device settings ----------
+function minuteText(v){if(v<0)return '';return ('0'+Math.floor(v/60)).slice(-2)+':'+('0'+(v%60)).slice(-2);}
+function parseMinute(id){
+ var v=$(id).value.trim();if(!v)return -1;
+ var m=/^([01][0-9]|2[0-3]):([0-5][0-9])$/.exec(v);
+ if(!m)throw new Error(t('err_sleep_time'));
+ return Number(m[1])*60+Number(m[2]);
+}
+function loadSettings(){
+ Promise.all([api('/settings'),api('/status')]).then(function(r){
+  var j=r[0],st=r[1],s=j.settings,c=j.capabilities||{},power=j.power||{};
+  $('set_fl_enabled').checked=!!s.frontlight_enabled;
+  $('set_fl_brightness').value=s.frontlight_brightness;$('set_fl_warmth').value=s.frontlight_warmth;
+  $('set_data_refresh').value=s.data_refresh_s;$('set_epd_full').value=s.epd_full_refresh_s;
+  $('set_power_mode').value=s.power_mode;$('set_battery_poll').value=s.battery_poll_s;
+  $('set_idle_sleep').value=s.idle_sleep_s;$('set_sleep_start').value=minuteText(s.sleep_start_min);
+  $('set_sleep_end').value=minuteText(s.sleep_end_min);$('set_timezone').value=s.timezone_offset_min;
+  $('set_language').value=s.language;$('set_diag_enabled').checked=!!s.diagnostics_enabled;
+  ['set_fl_enabled','set_fl_brightness','set_fl_warmth'].forEach(function(id){$(id).disabled=!c.frontlight;});
+  var network=st.network||{};
+  $('set_net_status').textContent='WiFi: '+(network.ssid||'-')+' / '+(network.ip||'-')+
+   (power.recovery_ap_active?(' · recovery AP '+power.recovery_window_remaining_s+'s'):'');
+  $('set_ble_status').textContent=c.bluetooth?'Bluetooth: available':t('ble_unavailable');
+  $('set_storage_status').textContent='SD: '+JSON.stringify(st.storage||{});
+  $('set_security_status').textContent=JSON.stringify(st.security||{});
+  $('set_capabilities').textContent=t('capabilities')+'\n'+JSON.stringify({capabilities:c,power:power},null,2);
+ }).catch(function(e){if(e.message!=='401')msg(e.message,'err');});
+}
+function saveSettings(){
+ var start,end;
+ try{start=parseMinute('set_sleep_start');end=parseMinute('set_sleep_end');}
+ catch(e){msg(e.message,'err');return;}
+ var body={
+  schema_version:1,language:$('set_language').value,power_mode:$('set_power_mode').value,
+  battery_poll_s:Number($('set_battery_poll').value),data_refresh_s:Number($('set_data_refresh').value),
+  idle_sleep_s:Number($('set_idle_sleep').value),sleep_start_min:start,sleep_end_min:end,
+  timezone_offset_min:Number($('set_timezone').value),frontlight_enabled:$('set_fl_enabled').checked,
+  frontlight_brightness:Number($('set_fl_brightness').value),frontlight_warmth:Number($('set_fl_warmth').value),
+  epd_full_refresh_s:Number($('set_epd_full').value),diagnostics_enabled:$('set_diag_enabled').checked
+ };
+ api('/settings',{method:'PUT',body:JSON.stringify(body)}).then(function(){
+  msg(t('ok_settings'),'ok');loadSettings();
+ }).catch(function(e){if(e.message!=='401')msg(e.message,'err');});
+}
 // ---------- system ----------
 function doReboot(){
  var v=prompt(t('reboot_confirm'),'');
@@ -364,13 +495,14 @@ function doRotateKey(){
 // ---------- tabs ----------
 var cfgDraftPending=false;
 function switchTab(name){
- ['alerts','status','sources','dashboard','config','system'].forEach(function(n){
+ ['alerts','status','settings','sources','dashboard','config','system'].forEach(function(n){
   $('pane_'+n).style.display=(n===name)?'block':'none';
  });
  var links=document.querySelectorAll('nav a.tab');
  for(var i=0;i<links.length;i++){links[i].className='tab'+(links[i].getAttribute('data-tab')===name?' on':'');}
  if(name==='alerts')loadAlerts();
  if(name==='status')loadStatus();
+ if(name==='settings')loadSettings();
  if(name==='sources'){loadSources();loadPresets();}
  if(name==='dashboard'&&window.DashboardEditor)DashboardEditor.enter();
  if(name==='config'){if(cfgDraftPending){cfgDraftPending=false;}else{loadConfig();}}
@@ -392,6 +524,9 @@ $('btn_cfg_reload').onclick=loadConfig;
 $('btn_cfg_schema').onclick=showSchema;
 $('preset_sel').onchange=showPreset;
 $('btn_preset_fill').onclick=fillPreset;
+$('btn_settings_save').onclick=saveSettings;
+$('btn_settings_reload').onclick=loadSettings;
+$('btn_settings_recovery').onclick=function(){switchTab('system');};
 $('btn_reboot').onclick=doReboot;
 $('btn_reset').onclick=doFactoryReset;
 $('btn_rotate').onclick=doRotateKey;

@@ -123,6 +123,44 @@ enum class Lang : uint8_t {
   X(AgeMinFmt, "%u 分钟前", "%um ago") \
   X(AgeHourFmt, "%u 小时前", "%uh ago") \
   X(AgeDayFmt, "%u 天前", "%ud ago") \
+  X(SetNetwork, "网络", "NETWORK") \
+  X(SetRecoveryAp, "网络恢复 AP", "RECOVERY AP") \
+  X(SetWifiReset, "仅重置 WiFi", "WIFI-ONLY RESET") \
+  X(SetBluetooth, "蓝牙状态", "BLUETOOTH") \
+  X(SetTimezone, "时区", "TIMEZONE") \
+  X(SetBrightness, "前光亮度", "BRIGHTNESS") \
+  X(SetWarmth, "前光色温", "WARMTH") \
+  X(SetDataRefresh, "数据刷新", "DATA REFRESH") \
+  X(SetEpdFull, "EPD 全刷周期", "EPD FULL INTERVAL") \
+  X(SetEpdNow, "立即 EPD 全刷", "EPD FULL NOW") \
+  X(SetIdleSleep, "无操作休眠", "IDLE SLEEP") \
+  X(SetSleepPlan, "睡眠计划", "SLEEP SCHEDULE") \
+  X(SetNextWake, "下一唤醒", "NEXT WAKE") \
+  X(SetLastWake, "上次唤醒原因", "LAST WAKE") \
+  X(SetStorage, "存储状态", "STORAGE") \
+  X(SetDiagnostics, "串口诊断", "SERIAL DIAGNOSTICS") \
+  X(SetRunDiagnostics, "运行诊断", "RUN DIAGNOSTICS") \
+  X(SetSecurity, "安全状态", "SECURITY") \
+  X(SetFactoryReset, "恢复出厂设置", "FACTORY RESET") \
+  X(Unavailable, "不可用", "UNAVAILABLE") \
+  X(SourceSchedules, "跟随源", "SOURCE SCHEDULES") \
+  X(ManualOnly, "仅手动", "MANUAL ONLY") \
+  X(NotScheduled, "未排程", "NOT SCHEDULED") \
+  X(DeepSleepOffline, "深睡时 HTTP/BLE 不可达", "NO HTTP/BLE IN DEEP SLEEP") \
+  X(ConfirmPhysical, "再按实体电源键确认", "PRESS POWER BUTTON AGAIN") \
+  X(RecoveryApStarted, "恢复 AP：EEGO-A4-Setup / 192.168.4.1", "AP: EEGO-A4-Setup / 192.168.4.1") \
+  X(WifiResetDone, "WiFi 已重置，恢复 AP 已开启", "WIFI RESET; RECOVERY AP OPEN") \
+  X(FactoryResetDone, "恢复完成，即将重启", "RESET COMPLETE; REBOOTING") \
+  X(FullRefreshQueued, "已请求全屏刷新", "FULL REFRESH QUEUED") \
+  X(WakeTimer, "定时器", "TIMER") \
+  X(WakeButton, "电源键", "POWER BUTTON") \
+  X(WakeReset, "复位/上电", "RESET/POWER ON") \
+  X(WakeOther, "其他", "OTHER") \
+  X(SecuritySet, "已设管理密码", "PASSWORD SET") \
+  X(SecurityMissing, "未设管理密码", "NO PASSWORD") \
+  X(SdReady, "SD 就绪", "SD READY") \
+  X(SdMissing, "SD 不可用", "SD UNAVAILABLE") \
+  X(SettingsPageFmt, "第 %u/%u 页", "PAGE %u/%u") \
   X(LangZh, "中文", "CHINESE") \
   X(LangEn, "英文", "ENGLISH")
 

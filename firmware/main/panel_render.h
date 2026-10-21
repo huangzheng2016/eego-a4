@@ -117,6 +117,8 @@ struct S4RowModel {
 struct S4Model {
   std::vector<S4RowModel> rows;
   size_t selected = 0;
+  size_t page = 0;
+  size_t pageCount = 1;
 };
 
 struct ProvisionModel {

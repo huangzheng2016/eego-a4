@@ -34,6 +34,7 @@ idf_component_register(
         alert_core
         dashboard_core
         data_pipeline
+        device_settings
         net_stack
         eego_hal
         esp_http_server

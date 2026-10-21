@@ -16,7 +16,7 @@
 //   * 常供电：WiFi modem-sleep（setPowerSave(true)）常驻，http_push 即时可达；
 //   * 电池：唤醒 → 重连 → 全源轮询 → 渲染 → 短暂交互窗口 → 安全深睡
 //     （GPIO4 锁存保持 + 定时唤醒 + 电源键 EXT0 唤醒）；唤醒=重启，循环。
-//   模式判定：prefs Auto = 充电状态（无电池读数回退常供电），S4 可强制。
+//   模式判定：DeviceSettings Auto = 充电状态（无电池读数回退常供电），S4 可强制。
 //
 // 静音（M21 store 级）：详情静音 = 指纹规则经 net_task 落入 AlertStore
 // （重估 muted 标志 + 快照发布），并持久化到 config.json mute_rules（重启
@@ -33,7 +33,7 @@
 #include "alert_core/type_registry.h"
 #include "board/board_boot.h"
 #include "dashboard_runtime.h"
-#include "device_prefs.h"
+#include "device_settings/device_settings.h"
 #include "eego_hal.h"
 #include "eego_ui.h"
 #include "net_stack/source_health.h"
@@ -48,9 +48,8 @@ struct MuteRule;
 
 namespace panel {
 
-// 二次确认状态机契约：危险/批量动作（全部确认/静音/清除/清静音）首次激活
-// 布防（5s 窗口），同一控件的再次激活执行（按键 = 电源键；触控 = 同一软键/
-// 同一行，判定见 panel_types.h::confirmTargetMatches），任何其他输入取消。
+// 二次确认状态机契约：普通动作接受同控件再次激活；网络恢复、WiFi 重置和
+// 恢复出厂只接受实体电源键的第二次确认。任何其他输入取消，窗口为 5s。
 
 class PanelApp {
  public:
@@ -67,7 +66,7 @@ class PanelApp {
   PanelApp(const PanelApp&) = delete;
   PanelApp& operator=(const PanelApp&) = delete;
 
-  // 初始化状态（读 prefs、应用语言/前光/电源模式、首帧全量渲染）。
+  // 初始化状态（读 DeviceSettings、应用语言/前光/电源模式、首帧全量渲染）。
   void begin(const Deps& deps);
 
   // app_task 主循环每轮调用：事件归并 → 电源 FSM → 按需渲染。
@@ -114,33 +113,38 @@ class PanelApp {
   void moveFocus(int delta);      // S0/S2/S3 软键聚焦、S1 行选择、S4 行聚焦
   void activateFocused();         // 电源键短按
   void activateSoftKey(size_t idx);
-  void activateSettingRow(size_t row);  // S4 行激活（0..7）
+  void activateSettingRow(size_t row);  // S4 全局行号，按 8 行分页显示
 
-  // ---- 动作（经 NetStack 命令队列 / prefs）----
+  // ---- 动作（NetStack / DeviceSettings / recovery）----
   void doAck(const std::string& id);
   void doAckAll();
   void doClear(const std::string& id);
-  void doMute(const alert_core::AlertRecord& rec);  // store 级指纹规则（M21）
-  void doClearMutes();                              // 清空规则表（M21，二次确认）
-  // 规则表持久化到 config.json mute_rules（app_task 上下文原子写；失败仅记
-  // 日志——运行时已生效，下次启动丢失可接受且可诊断）。
+  void doMute(const alert_core::AlertRecord& rec);
+  void doClearMutes();
   void persistMuteRules(const std::vector<alert_core::MuteRule>& rules);
-  void refreshMuteRuleCount();  // S4 行显示用（进设置页/规则变更后刷新）
+  void refreshMuteRuleCount();
   void doPollNow();
+  void doOpenRecovery();
+  void doWifiReset();
+  void doFactoryReset();
+  bool updateSettings(const eego::settings::Settings& candidate);
+  void applySettings(uint32_t changed);
+  static void onSettingsChanged(const eego::settings::Settings& values, uint32_t changed,
+                                void* ctx);
+  uint64_t nextWakeAt(int64_t nowMs) const;
   void armConfirm(ConfirmKind kind);
-  void executeArmedConfirm();  // 执行当前布防动作并清除布防（按键/触控共用）
+  void executeArmedConfirm();
   void clearConfirm();
   void showBanner(const char* text, uint32_t ms);
   void showBannerFmt(uint32_t ms, const char* fmt, ...)
       __attribute__((format(printf, 3, 4)));
 
   // ---- 电源模式 ----
-  bool computeMains();            // 依 prefs + 充电状态 + 电池读数
+  bool computeMains();
   void onModeChange(bool mains);
   void batteryFsm(int64_t nowMs);
-  // 安全深睡：waitIdle 超时重试一轮仍不静默则中止本次休眠（回 Serving 稍后
-  // 重试），绝不带在途传输断电 WiFi；成功路径 esp_deep_sleep_start() 不返回。
-  void enterSleep(int64_t nowMs);
+  // durationMs < 0 使用电池轮询周期；计划睡眠传入明确的窗口剩余时长。
+  void enterSleep(int64_t nowMs, int64_t durationMs = -1);
 
   // ---- 渲染 ----
   void markDirty(bool forceFull = false) {
@@ -174,16 +178,17 @@ class PanelApp {
   void drainNetBits();
 
   Deps deps_;
-  DevicePrefs& prefs_ = DevicePrefs::instance();
   DashboardRuntime dashboard_;
+  eego::settings::Settings settings_;
+  int settingsSubscription_ = -1;
+  int wakeCause_ = 0;
 
   // 页面/导航状态（仅 app_task 上下文读写）
   Page page_ = Page::Overview;
-  size_t focus_ = 0;       // S0/S2/S3 软键、S4 行、S1 行（页内）聚焦下标
+  size_t focus_ = 0;
   size_t tablePage_ = 0;
-  std::string detailId_;   // S2 目标记录 id
+  std::string detailId_;
   bool provisionSucceeded_ = false;
-  bool frontlightOn_ = false;
 
   // 确认与横幅
   ConfirmKind confirm_ = ConfirmKind::None;
@@ -199,6 +204,9 @@ class PanelApp {
   bool dirty_ = true;
   bool forceFull_ = true;
   int64_t lastRenderMs_ = -10000;
+  int64_t lastFullRenderMs_ = 0;
+  int64_t lastDataRefreshMs_ = 0;
+  int64_t lastScheduleCheckMs_ = -10000;
 
   // 电池/充电缓存
   eego::BatteryInfo batCache_{};
@@ -218,7 +226,6 @@ class PanelApp {
   eego::net::NetStatusSnapshot netStatusCache_{};
   int64_t netStatusCacheMs_ = 0;
 
-  // 静音规则数（S4「静音列表」行显示；进设置页与规则变更后刷新，M21）
   size_t muteRuleCount_ = 0;
 
   // 电源模式状态

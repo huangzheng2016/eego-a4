@@ -33,8 +33,10 @@
 #include "dashboard_api.h"
 #include "dashboard_page.h"
 #include "dashboard_path.h"
+#include "device_settings/device_settings.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
+#include "esp_sleep.h"
 #include "esp_http_server.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
@@ -962,8 +964,30 @@ namespace {
 // ---------------------------------------------------------------------------
 // 配置端点
 // ---------------------------------------------------------------------------
+alert_core::JsonValue configWithSettingsMirror() {
+  using alert_core::JsonValue;
+  JsonValue dom = ConfigStore::instance().maskedDom();
+  const settings::Settings values = settings::DeviceSettings::instance().snapshot().values;
+  for (auto& admin_kv : mutableItems(dom)) {
+    if (admin_kv.first != "admin" || admin_kv.second.type() != JsonValue::Type::Object) continue;
+    for (auto& section : mutableItems(admin_kv.second)) {
+      if (section.first != "display" || section.second.type() != JsonValue::Type::Object) continue;
+      for (auto& field : mutableItems(section.second)) {
+        if (field.first == "brightness") {
+          field.second = JsonValue::makeInt(values.frontlight_enabled
+                                                ? values.frontlight_brightness
+                                                : 0);
+        } else if (field.first == "warmth") {
+          field.second = JsonValue::makeInt(values.frontlight_warmth);
+        }
+      }
+    }
+  }
+  return dom;
+}
+
 esp_err_t h_config_get(httpd_req_t* req) {
-  return sendJson(req, 200, ConfigStore::instance().maskedDom().toString());
+  return sendJson(req, 200, configWithSettingsMirror().toString());
 }
 
 esp_err_t h_config_put(httpd_req_t* req) {
@@ -980,7 +1004,6 @@ esp_err_t h_config_put(httpd_req_t* req) {
     return sendError(req, 400, errc::kValidationFailed, "config validation failed", &errs);
   }
 
-  // 变更 section 掩码（供 app_task 决定热生效范围）
   uint32_t mask = 0;
   {
     alert_core::JsonValue patch;
@@ -988,6 +1011,10 @@ esp_err_t h_config_put(httpd_req_t* req) {
     if (alert_core::jsonParse(body, patch, perr) &&
         patch.type() == alert_core::JsonValue::Type::Object) {
       if (patch.find("admin") != nullptr) mask |= AdminCommand::kChangedAdmin;
+      if (const alert_core::JsonValue* admin = patch.find("admin");
+          admin != nullptr && admin->find("display") != nullptr) {
+        mask |= AdminCommand::kChangedAdminDisplay;
+      }
       if (patch.find("sources") != nullptr) mask |= AdminCommand::kChangedSources;
       if (patch.find("alert_type_overrides") != nullptr) {
         mask |= AdminCommand::kChangedOverrides;
@@ -1001,14 +1028,100 @@ esp_err_t h_config_put(httpd_req_t* req) {
   cmd.config = std::move(merged);
   cmd.changed_sections = mask;
   AdminResult res;
-  if (!runCommand(req, cmd, res)) return ESP_OK;  // 持久化失败 → 500 已回滚
+  if (!runCommand(req, cmd, res)) return ESP_OK;
 
   ADMIN_LOG_INFO("config updated");
-  return sendJson(req, 200, ConfigStore::instance().maskedDom().toString());
+  return sendJson(req, 200, configWithSettingsMirror().toString());
 }
 
 esp_err_t h_config_schema(httpd_req_t* req) {
   return sendJson(req, 200, ConfigStore::schemaJson());
+}
+
+const char* wakeReasonName() {
+  switch (esp_sleep_get_wakeup_cause()) {
+    case ESP_SLEEP_WAKEUP_UNDEFINED: return "power_on_or_reset";
+    case ESP_SLEEP_WAKEUP_EXT0: return "power_button";
+    case ESP_SLEEP_WAKEUP_TIMER: return "timer";
+    default: return "other";
+  }
+}
+
+esp_err_t h_settings_get(httpd_req_t* req) {
+  using alert_core::JsonValue;
+  const settings::Snapshot snap = settings::DeviceSettings::instance().snapshot();
+  const settings::Capabilities& cap = snap.capabilities;
+  uint64_t wake_at = 0;
+  uint32_t remaining = 0;
+  const int64_t now = static_cast<int64_t>(time(nullptr));
+  if (now > 0) {
+    settings::scheduledSleep(snap.values, static_cast<uint64_t>(now), wake_at, remaining);
+  }
+  const JsonValue power = JsonValue::makeObject({
+      {"last_wake_reason", JsonValue::makeString(wakeReasonName())},
+      {"next_scheduled_wake", JsonValue::makeInt(static_cast<int64_t>(wake_at))},
+      {"deep_sleep_http_reachable", JsonValue::makeBool(false)},
+      {"deep_sleep_ble_reachable", JsonValue::makeBool(false)},
+      {"recovery_ap_active", JsonValue::makeBool(ProvisionPortal::instance().apActive())},
+      {"recovery_window_remaining_s",
+       JsonValue::makeInt(ProvisionPortal::instance().windowRemainingMs() / 1000)},
+      {"auto_sleep_suspended", JsonValue::makeBool(ProvisionPortal::instance().apActive())},
+  });
+  const JsonValue capabilities = JsonValue::makeObject({
+      {"frontlight", JsonValue::makeBool(cap.frontlight)},
+      {"battery", JsonValue::makeBool(cap.battery)},
+      {"bluetooth", JsonValue::makeBool(cap.bluetooth)},
+      {"display", JsonValue::makeBool(cap.display)},
+      {"sd", JsonValue::makeBool(cap.sd)},
+      {"rtc", JsonValue::makeBool(cap.rtc)},
+  });
+  return sendJson(req, 200,
+                  JsonValue::makeObject({
+                      {"schema_version", JsonValue::makeInt(settings::kSchemaVersion)},
+                      {"revision", JsonValue::makeInt(snap.revision)},
+                      {"migrated", JsonValue::makeBool(snap.migrated)},
+                      {"settings", settings::toJson(snap.values)},
+                      {"capabilities", capabilities},
+                      {"power", power},
+                  })
+                      .toString());
+}
+
+esp_err_t h_settings_schema(httpd_req_t* req) {
+  return sendJson(req, 200, settings::schemaJson());
+}
+
+esp_err_t h_settings_put(httpd_req_t* req) {
+  if (!contentTypeJsonOk(req)) {
+    return sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
+  }
+  std::string body;
+  const int rb = readBodyBudget(req, kBodyBudgetConfig, body);
+  if (rb != 0) return ESP_OK;
+  alert_core::JsonValue patch;
+  if (!parseJsonBody(req, body, patch)) return ESP_OK;
+
+  const settings::Snapshot snap = settings::DeviceSettings::instance().snapshot();
+  settings::Settings candidate;
+  settings::FieldErrors settings_errors;
+  if (!settings::mergePatch(snap.values, patch, candidate, settings_errors)) {
+    FieldErrors errors;
+    for (const auto& error : settings_errors) errors.push_back({error.field, error.message});
+    return sendError(req, 400, errc::kValidationFailed, "settings validation failed", &errors);
+  }
+  if ((settings::changedFields(snap.values, candidate) & settings::kChangedFrontlight) != 0 &&
+      !snap.capabilities.frontlight) {
+    FieldErrors errors = fieldErr("frontlight_enabled", "frontlight hardware is unavailable");
+    return sendError(req, 400, errc::kValidationFailed, "settings validation failed", &errors);
+  }
+
+  AdminCommand cmd;
+  cmd.type = AdminCommandType::ApplySettings;
+  cmd.settings_patch = std::move(patch);
+  AdminResult res;
+  if (!runCommand(req, cmd, res)) return ESP_OK;
+  ADMIN_LOG_INFO("typed device settings updated");
+  return h_settings_get(req);
 }
 
 esp_err_t h_wifi_add(httpd_req_t* req) {
@@ -1428,6 +1541,14 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
       if (!bearer()) return ESP_OK;
       return h_config_schema(req);
     }
+    if (strcmp(path, "settings") == 0) {
+      if (!bearer()) return ESP_OK;
+      return h_settings_get(req);
+    }
+    if (strcmp(path, "settings/schema") == 0) {
+      if (!bearer()) return ESP_OK;
+      return h_settings_schema(req);
+    }
     if (strcmp(path, "sources/presets") == 0) {
       if (!bearer()) return ESP_OK;
       return h_source_presets(req);
@@ -1510,6 +1631,10 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     if (strcmp(path, "config") == 0) {
       if (!bearer()) return ESP_OK;
       return h_config_put(req);
+    }
+    if (strcmp(path, "settings") == 0) {
+      if (!bearer()) return ESP_OK;
+      return h_settings_put(req);
     }
     // PUT /types/{id}
     if (strncmp(path, "types/", 6) == 0 && path[6] != '\0' && strchr(path + 6, '/') == nullptr) {

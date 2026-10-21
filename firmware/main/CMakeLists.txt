@@ -7,7 +7,7 @@
 # panel_render.*   S0–S4 纯绘制层（安全区内，灰阶严重度）
 # panel_diag.cpp   diag 串口命令钩子实现
 # ui_text.*        中英界面文案表
-# device_prefs.*   设备本地偏好（NVS "ui" 命名空间）
+# device_prefs.*   旧 NVS "ui" 静音指纹的一次性迁移（其他偏好在 device_settings）
 # time_source.*    统一时间源（SNTP 系统时间 > RTC > 不可用；M21）
 idf_component_register(
     SRCS
@@ -29,6 +29,7 @@ idf_component_register(
         dashboard_core
         dashboard_ui
         data_pipeline
+        device_settings
         net_stack
         diag
         nvs_flash

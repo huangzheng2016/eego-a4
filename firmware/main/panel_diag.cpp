@@ -47,7 +47,7 @@ void PanelApp::diagStatus() {
          deps_.boot.rtcReady ? 1 : 0, deps_.boot.sdReady ? 1 : 0,
          deps_.boot.displayReady ? 1 : 0);
   printf("power: pref=%d effective=%s charging=%d bat=%umV/%u%% page=%s\n",
-         static_cast<int>(prefs_.powerMode()), mains_ ? "mains" : "battery",
+         static_cast<int>(settings_.power_mode), mains_ ? "mains" : "battery",
          (charging_ || batCache_.charging) ? 1 : 0, batCache_.millivolts, batCache_.percent,
          pageName(page_));
   printf("uptime: %lld s, snapshot seq=%llu records=%u\n",
@@ -232,12 +232,12 @@ void PanelApp::diagSmoke() {
   check(admin::ConfigStore::instance().valid(), "config",
         admin::ConfigStore::instance().valid() ? "config.json valid" : "config invalid/bak");
 
-  // 8. NVS prefs 可读 + store 静音规则数（M21：UI 级指纹表已迁移为 store 规则）
+  // 8. DeviceSettings 快照 + store 静音规则数
   std::vector<alert_core::MuteRule> mute_rules;
   eego::net::NetStack::instance().queryMuteRules(mute_rules);
-  printf("[PASS] prefs: lang=%s pmode=%d bpoll=%us mute_rules=%u\n", langCode(prefs_.lang()),
-         static_cast<int>(prefs_.powerMode()), static_cast<unsigned>(prefs_.batteryPollS()),
-         static_cast<unsigned>(mute_rules.size()));
+  printf("[PASS] settings: lang=%s pmode=%d bpoll=%us mute_rules=%u\n",
+         settings_.language.c_str(), static_cast<int>(settings_.power_mode),
+         static_cast<unsigned>(settings_.battery_poll_s), static_cast<unsigned>(mute_rules.size()));
   pass++;
 
   if (dashboard_.available()) {
@@ -274,14 +274,12 @@ void PanelApp::diagVersion() {
 void PanelApp::diagLang(const char* arg) {
   Lang lang;
   if (!langFromString(arg, lang)) {
-    printf("ERR usage: lang zh|en (current=%s)\n", langCode(prefs_.lang()));
+    printf("ERR usage: lang zh|en (current=%s)\n", settings_.language.c_str());
     return;
   }
-  prefs_.setLang(lang);
-  prefs_.save();
-  setLang(lang);
-  markDirty(true);
-  printf("lang: -> %s\n", langCode(lang));
+  eego::settings::Settings next = settings_;
+  next.language = langCode(lang);
+  if (updateSettings(next)) printf("lang: -> %s\n", langCode(lang));
 }
 
 void PanelApp::diagPage(const char* arg) {

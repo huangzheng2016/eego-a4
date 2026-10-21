@@ -29,14 +29,22 @@ constexpr Page dashboardStartupPage(Page current, bool dashboard_loaded) {
 
 constexpr bool dashboardUsesRuntimeStatus(Page current) { return current == Page::Dashboard; }
 
-// 二次确认状态（5s 窗口内再次激活才执行；任何其他输入取消）。
+// 二次确认状态（5s 窗口；恢复动作只能由实体电源键完成第二次确认）。
 enum class ConfirmKind : uint8_t {
   None = 0,
   AckAll,
   Mute,
   Clear,
   ClearMutes,
+  NetworkRecovery,
+  WifiReset,
+  FactoryReset,
 };
+
+constexpr bool requiresPhysicalConfirm(ConfirmKind kind) {
+  return kind == ConfirmKind::NetworkRecovery || kind == ConfirmKind::WifiReset ||
+         kind == ConfirmKind::FactoryReset;
+}
 
 // 电池模式阶段机。
 enum class BattPhase : uint8_t {
@@ -45,17 +53,18 @@ enum class BattPhase : uint8_t {
   Serving,    // 交互窗口（输入延长，到点休眠）
 };
 
-// 命中目标是否即布防确认的控件（同控件再次激活 = 执行；其他输入 = 取消）。
+// 触控只可确认普通操作；恢复动作的第二次确认不接受触屏。
 constexpr bool confirmTargetMatches(ConfirmKind kind, Page page, int hitIdx, bool hitRow) {
+  if (requiresPhysicalConfirm(kind)) return false;
   switch (kind) {
-    case ConfirmKind::AckAll:     // S0 软键 1 [全部确认]
+    case ConfirmKind::AckAll:
       return page == Page::Overview && !hitRow && hitIdx == 1;
-    case ConfirmKind::Mute:       // S2 软键 1 [静音]
+    case ConfirmKind::Mute:
       return page == Page::Detail && !hitRow && hitIdx == 1;
-    case ConfirmKind::Clear:      // S2 软键 2 [清除]
+    case ConfirmKind::Clear:
       return page == Page::Detail && !hitRow && hitIdx == 2;
-    case ConfirmKind::ClearMutes:  // S4 第 5 行（hitIdx = 行下标 4 + 1）
-      return page == Page::Settings && hitRow && hitIdx == 5;
+    case ConfirmKind::ClearMutes:
+      return page == Page::Settings && hitRow && hitIdx == 24;
     default:
       return false;
   }
