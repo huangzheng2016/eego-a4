@@ -8,6 +8,7 @@
 
 #include "dashboard_core/model.h"
 #include "dashboard_ui/geometry.h"
+#include "dashboard_ui/text_result.h"
 #include "font_manager.h"
 #include "portrait_canvas.h"
 

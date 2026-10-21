@@ -244,11 +244,7 @@ struct DashboardRuntime::Impl {
     bool armed = false;
   };
 
-  struct RuleState {
-    bool active = false;
-    int64_t true_since_ms = -1;
-    std::string event_id;
-  };
+  using RuleState = DashboardDerivedRuleState;
 
   struct RuntimeImageProvider final : public ui::ImageProvider {
     explicit RuntimeImageProvider(Impl* impl) : owner(impl) {}
@@ -1109,7 +1105,8 @@ struct DashboardRuntime::Impl {
       for (dash::PanelSpec& panel : current.panels) {
         if (panel.kind == dash::PanelKind::Text && !panel.source_id.empty()) {
           const std::shared_ptr<const dp::SourceResult> result = currentResult(panel.source_id);
-          if (result != nullptr && result->has_text) panel.text.content = result->text.text;
+          if (result != nullptr && result->has_text)
+            panel.text.content = ui::literalTextForTemplate(result->text.text);
         }
         if (!usesSeries(panel)) continue;
         if (!published_panels.contains(panel.id)) publishPanel(panel);
@@ -1261,6 +1258,24 @@ struct DashboardRuntime::Impl {
     }
   }
 
+  void resetDerivedRules(const std::set<std::string>& changed_sources,
+                         std::set<std::string>& invalidated_links) {
+    for (const dash::AlertRule& rule : config.alert_rules) {
+      if (changed_sources.count(rule.source_id) == 0) continue;
+      rule_samples.erase(rule.id);
+      const auto state = rule_states.find("rule_" + rule.id);
+      if (state != rule_states.end())
+        dashboardResetDerivedRule(state->second, event_tracker, rule.source_id);
+      if (!rule.style.linked_panel_id.empty()) invalidated_links.insert(rule.style.linked_panel_id);
+      for (const dash::Page& current : view.pages) {
+        for (const dash::PanelSpec& panel : current.panels) {
+          if (panel.kind == dash::PanelKind::Alert && panel.source_id == rule.source_id)
+            invalidated_links.insert(panel.id);
+        }
+      }
+    }
+  }
+
   bool setVariable(const std::string& name, const std::string& value) {
     dash::VariableValues next = overrides;
     bool found = false;
@@ -1304,6 +1319,7 @@ struct DashboardRuntime::Impl {
       invalidateImageSource(source_id, previous_results[source_id], current);
       invalidate_links(current);
     }
+    resetDerivedRules(changed_sources, invalidated_links);
     for (const std::string& linked : invalidated_links) renderer.invalidatePanel(linked);
     published_panels.clear();
     rebuildData();

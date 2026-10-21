@@ -284,6 +284,21 @@ class DashboardEventTracker {
   std::map<std::string, uint64_t> acknowledged_;
 };
 
+struct DashboardDerivedRuleState {
+  bool active = false;
+  int64_t true_since_ms = -1;
+  std::string event_id;
+};
+
+inline void dashboardResetDerivedRule(DashboardDerivedRuleState& state,
+                                      DashboardEventTracker& tracker,
+                                      const std::string& source_id) {
+  if (!state.event_id.empty()) tracker.eraseAcknowledgement(source_id, state.event_id);
+  state.active = false;
+  state.true_since_ms = -1;
+  state.event_id.clear();
+}
+
 inline const eego::dashboard::AlertRule* dashboardRuleForEvent(
     const std::vector<eego::dashboard::AlertRule>& rules, const eego::dashboard::Event& event) {
   for (const eego::dashboard::AlertRule& rule : rules) {
