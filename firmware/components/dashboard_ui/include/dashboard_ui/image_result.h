@@ -28,6 +28,24 @@ inline bool dashboardSourceMatchesUri(const Source& source, std::string_view res
          expanded == resolved_uri;
 }
 
+inline const Source* dashboardImageSourceForUri(const Asset& asset,
+                                                std::string_view resolved_uri,
+                                                const VariableValues& variables,
+                                                const std::vector<Source>& sources) {
+  for (const Source& source : sources) {
+    if (dashboardSourceMatchesUri(source, resolved_uri, variables)) return &source;
+  }
+  std::string base_uri;
+  std::string error;
+  if (interpolateVariables(asset.uri, variables, base_uri, error, 4096) &&
+      base_uri == resolved_uri) {
+    for (const Source& source : sources) {
+      if (source.id == asset.id) return &source;
+    }
+  }
+  return nullptr;
+}
+
 inline bool copySourceImage(const pipeline::SourceResult& result, uint8_t* output,
                             size_t capacity, size_t& output_size) {
   output_size = 0;

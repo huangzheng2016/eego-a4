@@ -822,17 +822,9 @@ struct DashboardRuntime::Impl {
         (resolved_uri.substr(0, 7) != "http://" && resolved_uri.substr(0, 8) != "https://")) {
       return false;
     }
-    std::string source_id;
-    for (const dash::Source& source : config.sources) {
-      if (source.id == asset.id) {
-        source_id = source.id;
-        break;
-      }
-      if (ui::dashboardSourceMatchesUri(source, resolved_uri, variables)) {
-        source_id = source.id;
-        break;
-      }
-    }
+    const dash::Source* source =
+        ui::dashboardImageSourceForUri(asset, resolved_uri, variables, config.sources);
+    const std::string source_id = source == nullptr ? "" : source->id;
     if (source_id.empty()) return false;
     const std::shared_ptr<const dp::SourceResult> result = currentResult(source_id);
     if (result != nullptr && result->has_image) {
