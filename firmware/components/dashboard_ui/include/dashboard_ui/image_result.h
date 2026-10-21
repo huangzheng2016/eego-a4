@@ -9,6 +9,17 @@
 
 namespace eego::dashboard::ui {
 
+inline bool dashboardAssetMatchesSource(const Asset& asset, const Source& source,
+                                        const VariableValues& variables) {
+  if (asset.id == source.id) return true;
+  std::string source_url;
+  std::string asset_uri;
+  std::string error;
+  return interpolateVariables(source.url, variables, source_url, error, 4096) &&
+         interpolateVariables(asset.uri, variables, asset_uri, error, 4096) &&
+         source_url == asset_uri;
+}
+
 inline bool copySourceImage(const pipeline::SourceResult& result, uint8_t* output,
                             size_t capacity, size_t& output_size) {
   output_size = 0;

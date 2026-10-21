@@ -548,8 +548,10 @@ struct DashboardRuntime::Impl {
         binding.source_id = panel.source_id;
         binding.metric = panel.metric;
         binding.window = dashboardWindowFromPanel(panel);
+        binding.time_window = panel.time_window;
         binding.aggregation = aggregation;
         binding.has_aggregation = true;
+        binding.has_custom_window = dashboardPanelHasCustomWindow(panel);
         if (!candidate->setPanelBinding(binding, error)) {
           config_error = ui::sanitizeText(error, false, 160);
           return false;
@@ -830,7 +832,8 @@ struct DashboardRuntime::Impl {
       }
       std::string expanded;
       std::string error;
-      if (dash::interpolateVariables(source.url, variables, expanded, error, 4096) &&
+      if (ui::dashboardAssetMatchesSource(asset, source, variables) &&
+          dash::interpolateVariables(source.url, variables, expanded, error, 4096) &&
           expanded == resolved_uri) {
         source_id = source.id;
         break;
@@ -868,11 +871,8 @@ struct DashboardRuntime::Impl {
         continue;
       }
       for (const dash::Source& source : config.sources) {
-        if (source.id != source_id) continue;
-        std::string expanded;
-        std::string error;
-        if (dash::interpolateVariables(source.url, variables, expanded, error, 4096) &&
-            expanded == asset.uri) {
+        if (source.id == source_id &&
+            ui::dashboardAssetMatchesSource(asset, source, variables)) {
           renderer.invalidateImage(asset.id);
         }
       }
@@ -922,10 +922,18 @@ struct DashboardRuntime::Impl {
     if (panel.source_id.empty() || panel.metric.empty()) return out;
     dp::Aggregation aggregation;
     if (dashboardAggregationForExpression(panel.value_expression, aggregation)) {
-      const dp::AggregationResult aggregate = pipeline->history().aggregate(
-          panel.source_id, panel.metric, {}, dashboardWindowFromPanel(panel), pipelineMs(),
-          aggregation, 0);
-      if (aggregate.valid) out.push_back(dashboardAggregateSample(panel, aggregate, pipelineMs()));
+      const int64_t now = pipelineMs();
+      dp::AggregationResult aggregate;
+      if (dashboardPanelHasCustomWindow(panel)) {
+        const std::vector<dash::MetricSample> samples = pipeline->history().query(
+            panel.source_id, panel.metric, {}, dashboardResolvePanelWindow(panel, now));
+        aggregate = dp::aggregateSamples(samples, aggregation);
+      } else {
+        aggregate = pipeline->history().aggregate(panel.source_id, panel.metric, {},
+                                                  dashboardWindowFromPanel(panel), now,
+                                                  aggregation, 0);
+      }
+      if (aggregate.valid) out.push_back(dashboardAggregateSample(panel, aggregate, now));
       return out;
     }
     std::set<std::string> seen;
@@ -1987,7 +1995,21 @@ struct DashboardRuntime::Impl {
     response.body = body;
     dp::SourceResult result;
     if (!dp::parseSourceResponse(plan, response, variables, pipelineMs(), result, error)) return false;
-    injected[source_id] = std::make_shared<const dp::SourceResult>(std::move(result));
+    const std::shared_ptr<const dp::SourceResult> previous = currentResult(source_id);
+    const auto replacement = std::make_shared<const dp::SourceResult>(std::move(result));
+    invalidateImageSource(source_id, previous, replacement);
+    std::set<std::string> invalidated_links;
+    auto invalidate_links = [&](const std::shared_ptr<const dp::SourceResult>& effective) {
+      if (effective == nullptr) return;
+      for (const dash::Event& event : effective->events) {
+        const std::string linked = linkedForEvent(event);
+        if (!linked.empty()) invalidated_links.insert(linked);
+      }
+    };
+    invalidate_links(previous);
+    invalidate_links(replacement);
+    injected[source_id] = replacement;
+    source_pointers[source_id] = pipeline->sourceResult(source_id);
     for (const dash::Page& current : view.pages) {
       for (const dash::PanelSpec& panel : current.panels) {
         if (panel.source_id != source_id) continue;
@@ -1995,9 +2017,10 @@ struct DashboardRuntime::Impl {
         renderer.invalidatePanel(panel.id);
       }
     }
+    for (const std::string& linked : invalidated_links) renderer.invalidatePanel(linked);
     rebuildData();
-    metrics = injected[source_id]->metrics.size();
-    events = injected[source_id]->events.size();
+    metrics = replacement->metrics.size();
+    events = replacement->events.size();
     dirty = true;
     status_dirty = true;
     return true;

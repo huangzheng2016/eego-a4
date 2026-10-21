@@ -27,8 +27,7 @@ inline DashboardCarouselRoute dashboardCarouselRoute(
     const std::string& selected_source, const std::string& selected_metric,
     const std::string& update_panel, const std::string& update_source) {
   DashboardCarouselRoute route{false, owner_id, selected_source, selected_metric};
-  route.allowed = update_source == selected_source &&
-                  (update_panel == owner_id || update_panel == selected_id);
+  route.allowed = update_source == selected_source && update_panel == selected_id;
   return route;
 }
 
@@ -71,6 +70,25 @@ inline eego::dashboard::pipeline::WindowKind dashboardWindowFromPanel(
   if (panel.time_window.from == "-5h") return eego::dashboard::pipeline::WindowKind::Fixed5h;
   if (panel.time_window.from == "-7d") return eego::dashboard::pipeline::WindowKind::Fixed7d;
   return eego::dashboard::pipeline::WindowKind::Rolling24h;
+}
+
+inline bool dashboardPanelHasCustomWindow(const eego::dashboard::PanelSpec& panel) {
+  return panel.time_window.to != "now" ||
+         (panel.time_window.from != "today" && panel.time_window.from != "-5h" &&
+          panel.time_window.from != "-7d");
+}
+
+inline eego::dashboard::pipeline::ResolvedWindow dashboardResolvePanelWindow(
+    const eego::dashboard::PanelSpec& panel, int64_t now_ms) {
+  eego::dashboard::pipeline::ResolvedWindow resolved =
+      eego::dashboard::pipeline::resolveWindow(dashboardWindowFromPanel(panel), now_ms);
+  int64_t endpoint = 0;
+  if (eego::dashboard::parseTimeExpression(panel.time_window.from, now_ms, endpoint))
+    resolved.from_ms = endpoint;
+  if (eego::dashboard::parseTimeExpression(panel.time_window.to, now_ms, endpoint))
+    resolved.to_ms = endpoint;
+  return {std::min(resolved.from_ms, resolved.to_ms),
+          std::max(resolved.from_ms, resolved.to_ms)};
 }
 
 inline eego::dashboard::MetricSample dashboardAggregateSample(

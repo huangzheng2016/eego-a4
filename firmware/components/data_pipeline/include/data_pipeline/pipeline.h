@@ -27,8 +27,10 @@ struct PanelBinding {
   std::string metric;
   std::vector<KeyValue> labels;
   WindowKind window = WindowKind::Rolling24h;
+  TimeWindow time_window;
   Aggregation aggregation = Aggregation::Avg;
   bool has_aggregation = false;
+  bool has_custom_window = false;
 };
 
 struct PanelUpdate {

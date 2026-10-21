@@ -115,6 +115,23 @@ WindowKind windowFromPanel(const PanelSpec& panel) {
   return WindowKind::Rolling24h;
 }
 
+bool hasCustomWindow(const TimeWindow& window) {
+  return window.to != "now" ||
+         (window.from != "today" && window.from != "-5h" && window.from != "-7d");
+}
+
+ResolvedWindow resolveCustomWindow(const PanelBinding& binding, int64_t now_ms,
+                                   int32_t timezone_offset_minutes) {
+  ResolvedWindow resolved = resolveWindow(binding.window, now_ms, 0, timezone_offset_minutes);
+  int64_t endpoint = 0;
+  if (parseTimeExpression(binding.time_window.from, now_ms, endpoint))
+    resolved.from_ms = endpoint;
+  if (parseTimeExpression(binding.time_window.to, now_ms, endpoint))
+    resolved.to_ms = endpoint;
+  return {std::min(resolved.from_ms, resolved.to_ms),
+          std::max(resolved.from_ms, resolved.to_ms)};
+}
+
 bool validRefreshOverride(uint32_t refresh_ms) {
   return refresh_ms == 0 || refresh_ms == 60000 || refresh_ms == 300000 ||
          refresh_ms == 900000 || refresh_ms == 1800000;
@@ -235,6 +252,8 @@ bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<Sourc
       panel.binding.source_id = spec.source_id;
       panel.binding.metric = spec.metric;
       panel.binding.window = windowFromPanel(spec);
+      panel.binding.time_window = spec.time_window;
+      panel.binding.has_custom_window = hasCustomWindow(spec.time_window);
       panel.refresh_ms = spec.refresh_ms != 0 ? spec.refresh_ms : config_.default_panel_refresh_ms;
       panels_.emplace(spec.id, std::move(panel));
     }
@@ -310,10 +329,18 @@ PanelUpdate DataPipeline::makeUpdate(const PanelState& panel, const SourceRuntim
   update.result = source.result;
   update.status = source.status;
   if (panel.binding.has_aggregation) {
-    update.aggregate = history_.aggregate(panel.binding.source_id, panel.binding.metric,
-                                          panel.binding.labels, panel.binding.window, now_ms,
-                                          panel.binding.aggregation,
-                                          config_.timezone_offset_minutes);
+    if (panel.binding.has_custom_window) {
+      const ResolvedWindow window =
+          resolveCustomWindow(panel.binding, now_ms, config_.timezone_offset_minutes);
+      const std::vector<MetricSample> samples = history_.query(
+          panel.binding.source_id, panel.binding.metric, panel.binding.labels, window);
+      update.aggregate = aggregateSamples(samples, panel.binding.aggregation);
+    } else {
+      update.aggregate = history_.aggregate(panel.binding.source_id, panel.binding.metric,
+                                            panel.binding.labels, panel.binding.window, now_ms,
+                                            panel.binding.aggregation,
+                                            config_.timezone_offset_minutes);
+    }
   }
   return update;
 }
