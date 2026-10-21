@@ -247,8 +247,9 @@ void parseTimeWindow(Reader& reader, const JsonValue& value, const std::string& 
 void parseStyle(Reader& reader, const JsonValue& value, const std::string& path, Style& out) {
   out = Style{};
   if (!reader.object(value, path, "style")) return;
-  reader.known(value, path, {"unit", "precision", "line_width", "show_legend", "invert"});
+  reader.known(value, path, {"unit", "variant", "precision", "line_width", "show_legend", "invert"});
   reader.string(value, "unit", path, out.unit, 32);
+  reader.string(value, "variant", path, out.variant, 32);
   reader.uint32(value, "precision", path, out.precision, 0, 8);
   reader.uint32(value, "line_width", path, out.line_width, 1, 8);
   reader.boolean(value, "show_legend", path, out.show_legend);

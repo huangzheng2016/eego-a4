@@ -67,9 +67,21 @@ static void fitBox(int sw, int sh, int mw, int mh, int& tw, int& th) {
 // 双线性缩放：src(sw×sh, 0-255) → dst(dw×dh, 0-255)
 // 像素中心对齐：dst(dx,dy) ← src((dx+0.5)*sw/dw-0.5, (dy+0.5)*sh/dh-0.5)
 // 边界 clamp。定点 Q16 计算。
-static void bilinearScale(const uint8_t* src, int sw, int sh,
+static void scaleCoordinate(int index, int src, int dst, int& source, int& fraction) {
+    const int64_t num = 2LL * index * src + src - dst;
+    const int64_t denom = 2LL * dst;
+    int64_t s = num / denom;
+    if (num < 0 && num % denom != 0) s--;
+    int64_t f = (num - s * denom) * 65536 / denom;
+    if (s < 0) { s = 0; f = 0; }
+    if (s >= src) { s = src - 1; f = 0; }
+    source = (int)s;
+    fraction = (int)f;
+}
+
+static bool bilinearScale(const uint8_t* src, int sw, int sh,
                           uint8_t* dst, int dw, int dh) {
-    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return false;
 
     // 预算每列的 sx0/sx1/fx_q16（PSRAM，避免每像素重复算除法）
     int* sx0 = (int*)heap_caps_malloc(sizeof(int) * dw, MALLOC_CAP_SPIRAM);
@@ -77,26 +89,19 @@ static void bilinearScale(const uint8_t* src, int sw, int sh,
     int* fxq = (int*)heap_caps_malloc(sizeof(int) * dw, MALLOC_CAP_SPIRAM);
     if (!sx0 || !sx1 || !fxq) {
         heap_caps_free(sx0); heap_caps_free(sx1); heap_caps_free(fxq);
-        return;
+        return false;
     }
     for (int dx = 0; dx < dw; dx++) {
-        // num = 2*dx*sw + sw - dw（= (dx+0.5)*sw/dw - 0.5 乘以 2*dw 后的整数）
-        int num = 2 * dx * sw + sw - dw;
-        int sxi = num / (2 * dw);  // 整数部分（向下取整，负数也向下）
-        int fx = (num - sxi * (2 * dw)) * 65536 / (2 * dw);  // 小数 ×65536
-        if (sxi < 0) { sxi = 0; fx = 0; }
-        if (sxi >= sw) { sxi = sw - 1; fx = 0; }
+        int sxi = 0, fx = 0;
+        scaleCoordinate(dx, sw, dw, sxi, fx);
         int sxi1 = sxi + 1;
         if (sxi1 >= sw) sxi1 = sw - 1;
         sx0[dx] = sxi; sx1[dx] = sxi1; fxq[dx] = fx;
     }
 
     for (int dy = 0; dy < dh; dy++) {
-        int num = 2 * dy * sh + sh - dh;
-        int syi = num / (2 * dh);
-        int fy = (num - syi * (2 * dh)) * 65536 / (2 * dh);
-        if (syi < 0) { syi = 0; fy = 0; }
-        if (syi >= sh) { syi = sh - 1; fy = 0; }
+        int syi = 0, fy = 0;
+        scaleCoordinate(dy, sh, dh, syi, fy);
         int syi1 = syi + 1;
         if (syi1 >= sh) syi1 = sh - 1;
 
@@ -120,6 +125,7 @@ static void bilinearScale(const uint8_t* src, int sw, int sh,
     heap_caps_free(sx0);
     heap_caps_free(sx1);
     heap_caps_free(fxq);
+    return true;
 }
 
 // ==================== tjpgd 回调 ====================
@@ -250,7 +256,15 @@ bool ImageRenderer::decodePng(const uint8_t* data, size_t len, uint8_t*& outGray
     outGray = nullptr;
     if (width) *width = 0;
     if (height) *height = 0;
-    if (!data || len < 8) return false;
+    if (!data || len < 24 || memcmp(data + 12, "IHDR", 4) != 0) return false;
+    const uint32_t sourceW = ((uint32_t)data[16] << 24) | ((uint32_t)data[17] << 16) |
+                             ((uint32_t)data[18] << 8) | data[19];
+    const uint32_t sourceH = ((uint32_t)data[20] << 24) | ((uint32_t)data[21] << 16) |
+                             ((uint32_t)data[22] << 8) | data[23];
+    if (sourceW == 0 || sourceH == 0 || (uint64_t)sourceW * sourceH > kMaxDecodedPixels) {
+        ESP_LOGW(TAG, "png header too large: %ux%u", (unsigned)sourceW, (unsigned)sourceH);
+        return false;
+    }
     (void)maxWidth; (void)maxHeight;  // lodepng 无缩放档，整图解码后由 drawGrayToCanvas 缩放
 
     // lodepng_decode32 一次性解码为 32-bit RGBA，缓冲由 lodepng 内部分配
@@ -313,10 +327,22 @@ bool ImageRenderer::decodeGifFirstFrame(const uint8_t* data, size_t len, uint8_t
 
 // ==================== 灰度上屏 ====================
 
-void ImageRenderer::drawGrayToCanvas(PortraitCanvas& canvas, const uint8_t* gray,
+static uint8_t ditherGray4(uint8_t gray, int x, int y) {
+    static constexpr uint8_t kBayer4[4][4] = {
+        {0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+    static constexpr uint8_t kLevels[4] = {0, 5, 10, 15};
+    const uint32_t scaled = static_cast<uint32_t>(gray) * 3;
+    uint32_t level = scaled / 255;
+    const uint32_t fraction = scaled % 255;
+    const uint8_t threshold = kBayer4[(y % 4 + 4) % 4][(x % 4 + 4) % 4];
+    if (level < 3 && fraction * 32 > (threshold * 2 + 1) * 255) level++;
+    return kLevels[level];
+}
+
+bool ImageRenderer::drawGrayToCanvas(PortraitCanvas& canvas, const uint8_t* gray,
                                      int srcW, int srcH, int16_t x, int16_t y,
                                      int16_t maxW, int16_t maxH) {
-    if (!gray || srcW <= 0 || srcH <= 0 || maxW <= 0 || maxH <= 0) return;
+    if (!gray || srcW <= 0 || srcH <= 0 || maxW <= 0 || maxH <= 0) return false;
 
     int tw, th;
     fitBox(srcW, srcH, maxW, maxH, tw, th);
@@ -328,28 +354,36 @@ void ImageRenderer::drawGrayToCanvas(PortraitCanvas& canvas, const uint8_t* gray
         for (int dy = 0; dy < th; dy++) {
             const uint8_t* srow = gray + dy * srcW;
             for (int dx = 0; dx < tw; dx++) {
-                uint8_t g15 = (uint8_t)((srow[dx] * 15 + 128) / 255);
-                canvas.drawPixelGray((int16_t)(ox + dx), (int16_t)(oy + dy), g15);
+                const int px = ox + dx;
+                const int py = oy + dy;
+                canvas.drawPixelGray((int16_t)px, (int16_t)py,
+                                     ditherGray4(srow[dx], px, py));
             }
         }
-        return;
+        return true;
     }
 
     // 双线性缩放到 tw×th 临时缓冲，再上屏
     uint8_t* tmp = (uint8_t*)heap_caps_malloc((size_t)tw * th, MALLOC_CAP_SPIRAM);
     if (!tmp) {
         ESP_LOGE(TAG, "drawGray scale alloc failed (%dx%d)", tw, th);
-        return;
+        return false;
     }
-    bilinearScale(gray, srcW, srcH, tmp, tw, th);
+    if (!bilinearScale(gray, srcW, srcH, tmp, tw, th)) {
+        heap_caps_free(tmp);
+        return false;
+    }
     for (int dy = 0; dy < th; dy++) {
         const uint8_t* srow = tmp + dy * tw;
         for (int dx = 0; dx < tw; dx++) {
-            uint8_t g15 = (uint8_t)((srow[dx] * 15 + 128) / 255);
-            canvas.drawPixelGray((int16_t)(ox + dx), (int16_t)(oy + dy), g15);
+            const int px = ox + dx;
+            const int py = oy + dy;
+            canvas.drawPixelGray((int16_t)px, (int16_t)py,
+                                 ditherGray4(srow[dx], px, py));
         }
     }
     heap_caps_free(tmp);
+    return true;
 }
 
 // ==================== render ====================
@@ -379,9 +413,9 @@ bool ImageRenderer::renderFromBuffer(PortraitCanvas& canvas,
         return false;
     }
 
-    drawGrayToCanvas(canvas, gray, gw, gh, x, y, maxWidth, maxHeight);
+    const bool drawn = drawGrayToCanvas(canvas, gray, gw, gh, x, y, maxWidth, maxHeight);
     heap_caps_free(gray);
-    return true;
+    return drawn;
 }
 
 bool ImageRenderer::renderFromFile(PortraitCanvas& canvas,

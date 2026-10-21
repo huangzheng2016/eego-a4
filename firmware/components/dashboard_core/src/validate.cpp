@@ -26,6 +26,22 @@ bool validId(std::string_view id) {
   return true;
 }
 
+bool validVariant(PanelKind kind, std::string_view variant) {
+  if (variant == "default") return true;
+  switch (kind) {
+    case PanelKind::Text:
+      return variant == "single" || variant == "multiline" || variant == "key_value" ||
+             variant == "description" || variant == "log_tail" || variant == "markdown";
+    case PanelKind::Card:
+      return variant == "delta" || variant == "progress" || variant == "status" ||
+             variant == "dual" || variant == "triple";
+    case PanelKind::Table:
+      return variant == "status_grid" || variant == "heatmap" || variant == "timeline";
+    default:
+      return false;
+  }
+}
+
 bool validVariableName(std::string_view name) {
   if (name.empty() || name.size() > kMaxIdCodePoints ||
       !((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z') ||
@@ -424,6 +440,45 @@ class Validator {
                 child(path, "linked_panel_ids") + "[" + std::to_string(j) + "]",
                 "duplicate panel link");
       }
+      const bool dual_card = panel.kind == PanelKind::Card && panel.style.variant == "dual";
+      const bool triple_card = panel.kind == PanelKind::Card && panel.style.variant == "triple";
+      if (dual_card || triple_card) {
+        const size_t expected_links = dual_card ? 1 : 2;
+        check(panel.linked_panel_ids.size() == expected_links, child(path, "linked_panel_ids"),
+              dual_card ? "dual card requires one linked card" : "triple card requires two linked cards");
+        check(!panel.source_id.empty() && !panel.metric.empty(), path,
+              "multi-metric cards require source_id and metric");
+        std::vector<std::pair<std::string, std::string>> multi_series;
+        multi_series.emplace_back(panel.source_id, panel.metric);
+        for (size_t j = 0; j < panel.linked_panel_ids.size(); ++j) {
+          const std::string& link = panel.linked_panel_ids[j];
+          const std::string link_path = child(path, "linked_panel_ids") + "[" + std::to_string(j) + "]";
+          const PanelSpec* target = nullptr;
+          const Page* target_page = nullptr;
+          for (const auto& location : panels_) {
+            if (location.panel->id == link) {
+              target = location.panel;
+              target_page = location.page;
+              break;
+            }
+          }
+          check(target != nullptr && target_page == &page, link_path,
+                "multi-metric links must reference a card on the same page");
+          if (target == nullptr) continue;
+          check(target->kind == PanelKind::Card, link_path, "multi-metric links must reference cards");
+          if (target->kind != PanelKind::Card) continue;
+          check(!target->source_id.empty() && !target->metric.empty(), link_path,
+                "linked card requires source_id and metric");
+          check(target->style.variant != "dual" && target->style.variant != "triple", link_path,
+                "nested multi-metric cards are not supported");
+          bool independent = true;
+          for (const auto& key : multi_series) {
+            if (key.first == target->source_id && key.second == target->metric) independent = false;
+          }
+          check(independent, link_path, "multi-metric cards require independent source_id+metric series");
+          multi_series.emplace_back(target->source_id, target->metric);
+        }
+      }
       count(panel.actions.size(), limits_.max_actions_per_panel, child(path, "actions"));
       for (size_t j = 0; j < panel.actions.size(); ++j) {
         action(panel.actions[j], child(path, "actions") + "[" + std::to_string(j) + "]");
@@ -433,6 +488,9 @@ class Validator {
       }
       check(panel.style.precision <= 8 && panel.style.line_width >= 1 && panel.style.line_width <= 8,
             child(path, "style"), "invalid style values");
+      check(jsonCodePointCount(panel.style.variant) <= 32 &&
+                validVariant(panel.kind, panel.style.variant),
+            child(path, "style.variant"), "unsupported variant for panel kind");
       const bool text_kind = panel.kind == PanelKind::Text || panel.kind == PanelKind::Card ||
                              panel.kind == PanelKind::Alert;
       if (!text_kind)

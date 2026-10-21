@@ -89,6 +89,7 @@ struct Style {
   uint32_t line_width = 1;
   bool show_legend = true;
   bool invert = false;
+  std::string variant = "default";
 };
 
 struct Action {
