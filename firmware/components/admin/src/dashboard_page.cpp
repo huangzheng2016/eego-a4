@@ -90,7 +90,7 @@ function renderShell(){
  button(actions,tr('校验并原子应用','Validate & apply atomically'),apply,'');
  button(actions,tr('仅校验','Validate only'),validateDraft,'sec');
  button(actions,tr('重新加载','Reload'),reload,'sec');
- button(actions,tr('载入样板','Load sample'),loadSample,'sec');
+ button(actions,tr('载入样板','Load sample'),function(){loadSample(false);},'sec');
  button(actions,tr('导入 JSON','Import JSON'),function(){$('de_file').click();},'sec');
  button(actions,tr('导出草稿','Export draft'),exportDraft,'sec');
  var file=document.createElement('input');file.type='file';file.accept='.json,application/json';file.id='de_file';file.className='de-import';file.onchange=importFile;actions.appendChild(file);
@@ -169,7 +169,14 @@ function formLayout(parent){var p=selectedPage();if(!p){parent.textContent=tr('�
 function newItem(){
  var d=dash(),id;
  if(S.view==='pages'){d.pages=d.pages||[];id=unique('page',d.pages,'id');d.pages.push({id:id,title:id,visible:true,grid_columns:24,row_height:16,panels:[]});if(!d.default_page_id)d.default_page_id=id;}
- if(S.view==='panels'){var pg=byId(d.pages,'id',(selected()||((d.pages[0]||{}).id)).split('/')[0]);if(!pg){status(tr('请先新建页面。','Create a page first.'),true);return;}pg.panels=pg.panels||[];id=unique('panel',pg.panels,'id');pg.panels.push(normalizePanel({id:id,kind:'text',title:id,grid:{x:0,y:0,w:6,h:4},text:{content:'Text',multiline:false,max_lines:1}}));id=pg.id+'/'+id;}
+ if(S.view==='panels'){
+  var pageList=d.pages||[];
+  if(!pageList.length){status(tr('请先新建页面。','Create a page first.'),true);return;}
+  var selectedId=selected(),pageId=selectedId?selectedId.split('/')[0]:pageList[0].id;
+  var pg=byId(pageList,'id',pageId);
+  if(!pg){status(tr('请先新建页面。','Create a page first.'),true);return;}
+  pg.panels=pg.panels||[];id=unique('panel',pg.panels,'id');pg.panels.push(normalizePanel({id:id,kind:'text',title:id,grid:{x:0,y:0,w:6,h:4},text:{content:'Text',multiline:false,max_lines:1}}));id=pg.id+'/'+id;
+ }
  if(S.view==='sources'){d.sources=d.sources||[];id=unique('source',d.sources,'id');d.sources.push(normalizeSource({id:id,kind:'http',url:'http://192.168.1.1/metrics',headers:{}}));}
  if(S.view==='variables'){d.variables=d.variables||[];id=unique('variable',d.variables,'name');d.variables.push({name:id,label:id,kind:'text',default_value:'',options:[],source_id:'',value_path:'',multi:false,include_all:false});}
  if(S.view==='alerts'){d.alert_rules=d.alert_rules||[];id=unique('alert',d.alert_rules,'id');d.alert_rules.push({id:id,title:id,enabled:true,source_id:(d.sources[0]||{}).id||'',metric:'metric',expression:'value > 0',for_ms:0,message:'',style:{surfaces:['card'],severity:'info',linked_panel_id:''}});}
@@ -187,9 +194,10 @@ function deleteItem(){
 }
 function apply(){if(invalidJsonGuard())return;api('/dashboard',mutation({method:'PUT',body:JSON.stringify(S.draft)})).then(function(j){setCurrent(j);status(tr('配置已校验并原子应用。','Configuration validated and atomically applied.'));render();}).catch(showError);}
 function validateDraft(){if(invalidJsonGuard())return;api('/dashboard/validate',{method:'POST',body:JSON.stringify(S.draft)}).then(function(j){var text=j.valid?tr('校验通过','Validation passed'):tr('校验失败','Validation failed');if(j.migrated)text+=' · '+tr('已从 v1 迁移','migrated from v1');if(j.errors&&j.errors.length)text+='\n'+JSON.stringify(j.errors,null,2);status(text,!j.valid);}).catch(showError);}
-function setCurrent(j){S.jsonBuffers={};S.current=clone(j);S.draft=clone(j);S.dirty=false;}
-function reload(){if(S.dirty&&!confirm(tr('放弃未保存修改？','Discard unsaved changes?')))return;api('/dashboard').then(function(j){setCurrent(j);status('');render();}).catch(function(e){if(e.status===404){S.current=e.body&&typeof e.body.revision==='number'?{revision:e.body.revision}:null;loadSample(true);}else showError(e);});}
-function loadSample(force){if(!force&&S.dirty&&!confirm(tr('用样板替换当前草稿？','Replace the current draft with the sample?')))return;api('/dashboard/sample').then(function(j){S.jsonBuffers={};S.sample=clone(j);S.draft=clone(j);S.dirty=!force;status(tr('样板仅载入草稿，点击应用后才生效。','Sample loaded as a draft; apply to make it active.'));render();}).catch(showError);}
+function loadFailed(e){showError(e);if(S.draft)return;S.ready=false;var root=$('pane_dashboard');if(!root)return;root.textContent='';root.appendChild(el('div','err',tr('Dashboard 加载失败：','Dashboard load failed: ')+(e&&e.message?e.message:tr('未知错误','unknown error'))));button(root,tr('重试','Retry'),reload,'sec');}
+function setCurrent(j){S.jsonBuffers={};S.current=clone(j);S.draft=clone(j);S.dirty=false;S.ready=true;}
+function reload(){if(S.dirty&&!confirm(tr('放弃未保存修改？','Discard unsaved changes?')))return;api('/dashboard').then(function(j){setCurrent(j);status('');render();}).catch(function(e){if(e.status===404){S.current=e.body&&typeof e.body.revision==='number'?{revision:e.body.revision}:null;loadSample(true);}else loadFailed(e);});}
+function loadSample(force){force=force===true;if(!force&&S.dirty&&!confirm(tr('用样板替换当前草稿？','Replace the current draft with the sample?')))return;api('/dashboard/sample').then(function(j){S.jsonBuffers={};S.sample=clone(j);S.draft=clone(j);S.dirty=!force;S.ready=true;status(tr('样板仅载入草稿，点击应用后才生效。','Sample loaded as a draft; apply to make it active.'));render();}).catch(loadFailed);}
 function importFile(e){if(S.dirty&&!confirm(tr('导入文件并替换当前草稿？','Import a file and replace the current draft?'))){e.target.value='';return;}var file=e.target.files&&e.target.files[0];if(!file)return;if(file.size>196608){status(tr('文件超过 192 KiB。','File exceeds 192 KiB.'),true);return;}var reader=new FileReader();reader.onload=function(){try{var j=JSON.parse(reader.result);if(!j.dashboard)j={schema:'eego.dashboard-bundle/1',schema_version:1,revision:baseRevision(),dashboard:j,source_plans:[]};S.jsonBuffers={};S.draft=j;S.dirty=true;status(tr('文件已导入草稿，请先校验再应用。','File imported as a draft; validate before applying.'));render();}catch(err){status('JSON: '+err.message,true);}};reader.readAsText(file);e.target.value='';}
 function exportDraft(){if(invalidJsonGuard())return;var blob=new Blob([JSON.stringify(S.draft,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(dash().id||'dashboard')+'.json';document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},0);}
 function variableValues(){var out={};(dash().variables||[]).forEach(function(v){out[v.name]=v.default_value||'';});return out;}
@@ -217,7 +225,7 @@ function renderPreview(){
  });
 }
 function canLeave(destination){if(destination==='dashboard'||!S.dirty)return true;if(!confirm(tr('有未保存的 dashboard 草稿，确定放弃？','Discard the unsaved dashboard draft?')))return false;S.jsonBuffers={};if(S.current&&S.current.dashboard)S.draft=clone(S.current);else if(S.sample)S.draft=clone(S.sample);else{S.draft=null;S.ready=false;}S.dirty=false;updateDirty();return true;}
-function enter(){if(!S.ready){S.ready=true;reload();}else render();}
+function enter(){if(!S.ready)reload();else render();}
 function language(){$('tab_dashboard').textContent=tr('数据面板','Dashboard');if(S.draft)render();}
 window.addEventListener('beforeunload',function(e){if(S.dirty){e.preventDefault();e.returnValue='';}});
 window.DashboardEditor={enter:enter,canLeave:canLeave,language:language};
