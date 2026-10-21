@@ -205,6 +205,15 @@ void drawDefaultCard(PortraitCanvas& canvas, FontManager& font, const PanelSpec&
   }
 }
 
+int16_t scaleForText(FontManager& font, std::string_view text, const Rect& bounds,
+                     int16_t max_scale) {
+  const int16_t font_height = font.uiFontHeight();
+  if (max_scale < 1 || font_height <= 0 || bounds.w <= 0 || bounds.h < font_height) return 0;
+  int16_t scale = std::min(max_scale, static_cast<int16_t>(bounds.h / font_height));
+  while (scale > 1 && measureText(font, text, scale) > bounds.w) --scale;
+  return scale;
+}
+
 void drawDeltaCard(PortraitCanvas& canvas, FontManager& font, const PanelSpec& panel,
                    const std::vector<const MetricSample*>& samples, const Rect& bounds) {
   const MetricSample& latest = *samples.back();
@@ -217,10 +226,19 @@ void drawDeltaCard(PortraitCanvas& canvas, FontManager& font, const PanelSpec& p
                              formatValue(delta, panel.style.unit.empty() ? std::string_view(latest.unit) : std::string_view(panel.style.unit),
                                          panel.style.precision);
   const int16_t line_height = font.uiFontHeight() + 4;
-  drawTextFit(canvas, font, bounds.x, bounds.y, bounds.w, current, bounds.h >= 40 ? 2 : 1, true, 0);
-  centered(canvas, font, {bounds.x, static_cast<int16_t>(bounds.y + line_height), bounds.w,
-                          static_cast<int16_t>(bounds.h - line_height)},
-           change, bounds.h >= 60 ? 3 : 2, true, delta < 0 ? 6 : 0);
+  Rect current_bounds = bounds;
+  current_bounds.h = std::min(line_height, bounds.h);
+  const int16_t current_scale = scaleForText(font, current, current_bounds, 2);
+  if (current_scale > 0) {
+    drawTextFit(canvas, font, current_bounds.x, current_bounds.y, current_bounds.w, current,
+                current_scale, true, 0);
+  }
+  Rect change_bounds{bounds.x, static_cast<int16_t>(bounds.y + current_bounds.h), bounds.w,
+                     static_cast<int16_t>(bounds.h - current_bounds.h)};
+  const int16_t change_scale = scaleForText(font, change, change_bounds, 3);
+  if (change_scale > 0) {
+    centered(canvas, font, change_bounds, change, change_scale, true, delta < 0 ? 6 : 0);
+  }
 }
 
 void drawProgressCard(PortraitCanvas& canvas, FontManager& font, const PanelSpec& panel,
@@ -228,11 +246,13 @@ void drawProgressCard(PortraitCanvas& canvas, FontManager& font, const PanelSpec
   const std::string value = formatValue(sample.value,
                                         panel.style.unit.empty() ? "%" : std::string_view(panel.style.unit),
                                         panel.style.precision);
-  centered(canvas, font, {bounds.x, bounds.y, bounds.w, static_cast<int16_t>(bounds.h - 18)},
-           value, bounds.h >= 56 ? 3 : 2, true, 0);
+  Rect value_bounds = bounds;
+  value_bounds.h = std::max<int16_t>(0, bounds.h - 18);
+  const int16_t value_scale = scaleForText(font, value, value_bounds, 3);
+  if (value_scale > 0) centered(canvas, font, value_bounds, value, value_scale, true, 0);
   const int16_t bar_y = bounds.y + bounds.h - 12;
   canvas.drawRect(bounds.x, bar_y, bounds.w, 10, 0);
-  const double clamped = std::clamp(sample.value, 0.0, 100.0);
+  const double clamped = std::isfinite(sample.value) ? std::clamp(sample.value, 0.0, 100.0) : 0.0;
   const int16_t filled = static_cast<int16_t>((bounds.w - 4) * clamped / 100.0);
   if (filled > 0) {
     const Severity severity = severityFor(panel, sample.value);
