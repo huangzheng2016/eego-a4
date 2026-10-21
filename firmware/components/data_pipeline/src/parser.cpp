@@ -281,7 +281,7 @@ bool mapMetric(const SourcePlan& plan, const MetricMapping& mapping, const JsonV
       const JsonValue* label_value = first(record, label.path);
       if (label_value == nullptr || !label_value->isScalar()) continue;
       value_text = label_value->scalarText();
-    } else if (!interpolateVariables(label.value, variables, value_text, error, 512)) {
+    } else if (!interpolateVariables(label.value, variables, value_text, error, 512 * 4)) {
       return false;
     }
     if (!jsonIsValidUtf8(value_text) || jsonCodePointCount(value_text) > 512) {
@@ -298,13 +298,14 @@ bool mapMetric(const SourcePlan& plan, const MetricMapping& mapping, const JsonV
         return false;
       }
       for (const auto& member : labels->objectItems()) {
-        if (!member.second.isScalar() || member.first.empty() || member.first.size() > 64 ||
+        if (!member.second.isScalar() || member.first.empty() ||
+            !jsonIsValidUtf8(member.first) || jsonCodePointCount(member.first) > 64 ||
             label_names.count(member.first) != 0) {
           error = "invalid or duplicate standard metric label";
           return false;
         }
         const std::string label_value = member.second.scalarText();
-        if (jsonCodePointCount(label_value) > 512) {
+        if (!jsonIsValidUtf8(label_value) || jsonCodePointCount(label_value) > 512) {
           error = "standard metric label value is too long";
           return false;
         }
@@ -536,11 +537,17 @@ bool promLabels(const JsonValue& item, const MetricMapping& mapping, MetricSampl
         }
         sample.metric = member.second.scalarText();
       } else {
-        if (!member.second.isScalar() || member.first.empty() || member.first.size() > 64) {
+        if (!member.second.isScalar() || member.first.empty() ||
+            !jsonIsValidUtf8(member.first) || jsonCodePointCount(member.first) > 64) {
           error = "invalid Prometheus label";
           return false;
         }
-        sample.labels.push_back({member.first, member.second.scalarText()});
+        const std::string value = member.second.scalarText();
+        if (!jsonIsValidUtf8(value) || jsonCodePointCount(value) > 512) {
+          error = "invalid Prometheus label value";
+          return false;
+        }
+        sample.labels.push_back({member.first, value});
       }
     }
   }

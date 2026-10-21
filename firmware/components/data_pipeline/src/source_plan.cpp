@@ -284,7 +284,8 @@ bool validateMetric(const MetricMapping& mapping, std::string& error) {
   }
   names.clear();
   for (const LabelMapping& label : mapping.labels) {
-    if (label.name.empty() || label.name.size() > 64 || !names.insert(label.name).second ||
+    if (label.name.empty() || !jsonIsValidUtf8(label.name) ||
+        jsonCodePointCount(label.name) > 64 || !names.insert(label.name).second ||
         label.path.empty() == label.value.empty() || !checkPath(label.path, false, error)) {
       if (error.empty()) error = "invalid or duplicate label mapping";
       return false;
