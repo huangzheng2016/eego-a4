@@ -12,14 +12,14 @@ const char kDashboardCss[] = R"CSS(#pane_dashboard{max-width:1180px}
 .de-row{border:1px solid #ddd;border-radius:6px;padding:7px;margin:6px 0}.de-row h4{margin:0 0 5px}.de-section{border-top:1px solid #ddd;margin-top:10px;padding-top:6px}
 .de-json{height:220px;font-family:monospace;font-size:11px}.de-plan{height:300px;font-family:monospace;font-size:11px}
 .de-result{max-height:320px;overflow:auto}.de-preview{background:#fff;border:1px solid #ddd;border-radius:8px;padding:10px;margin-top:8px}
-.de-page{display:grid;grid-template-columns:repeat(24,minmax(0,1fr));grid-auto-rows:18px;gap:3px;min-height:180px;background:#eee;border:1px solid #ccc}
+.de-page{display:grid;grid-template-columns:repeat(1,minmax(0,1fr));grid-auto-rows:18px;gap:3px;min-height:180px;background:#eee;border:1px solid #ccc}
 .de-panel{border:1px solid #999;background:#fff;padding:4px;overflow:hidden;font-size:11px;min-width:0}.de-panel strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.de-panel .de-value{font-size:18px;font-weight:bold;margin-top:4px}.de-critical{color:#b00020}.de-warning{color:#9a5b00}.de-info{color:#245b8a}
 .de-actions{margin-top:8px}.de-import{display:none}@media(max-width:760px){.de-page{grid-auto-rows:14px}.de-form{padding:6px}.de-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 )CSS";
 
 const char kDashboardJs[] = R"JS((function(){
 'use strict';
-var S={current:null,draft:null,dirty:false,view:'dashboard',selected:{},ready:false};
+var S={current:null,draft:null,dirty:false,view:'dashboard',selected:{},ready:false,jsonBuffers:{}};
 function tr(zh,en){return LANG==='zh'?zh:en;}
 function clone(v){return v==null?v:JSON.parse(JSON.stringify(v));}
 function el(tag,cls,text){var n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;}
@@ -31,12 +31,15 @@ function updateDirty(){var n=$('de_dirty');if(n){n.textContent=S.dirty?tr('有�
 function baseRevision(){return S.current?S.current.revision:0;}
 function mutation(opts){opts=opts||{};opts.headers=opts.headers||{};opts.headers['If-Match']=String(baseRevision());return opts;}
 function showError(e){if(e.message==='401')return;var text=e.message||tr('操作失败','Operation failed');if(e.body&&e.body.error&&e.body.error.fields)text+='\n'+JSON.stringify(e.body.error.fields,null,2);status(text,true);}
+function invalidJsonGuard(){var keys=Object.keys(S.jsonBuffers);if(!keys.length)return false;status(tr('请先修正无效 JSON：','Fix invalid JSON first: ')+keys.join(', '),true);return true;}
+function remapSourceBuffers(oldId,newId){if(oldId===newId)return;var prefix='source:'+oldId+':',replacement='source:'+newId+':';Object.keys(S.jsonBuffers).forEach(function(key){if(key.indexOf(prefix)===0){S.jsonBuffers[replacement+key.slice(prefix.length)]=S.jsonBuffers[key];delete S.jsonBuffers[key];}});}
+function dropSourceBuffers(id){var prefix='source:'+id+':';Object.keys(S.jsonBuffers).forEach(function(key){if(key.indexOf(prefix)===0)delete S.jsonBuffers[key];});}
 function field(parent,label,node,wide){var w=el('label','de-field'+(wide?' de-wide':''));w.appendChild(el('span','',label));w.appendChild(node);parent.appendChild(w);return node;}
 function input(parent,label,value,cb,type,wide){var n=document.createElement('input');n.type=type||'text';if(n.type==='checkbox')n.checked=!!value;else n.value=value==null?'':value;n.oninput=n.onchange=function(){cb(n.type==='checkbox'?n.checked:n.value);dirty();};if(n.type==='checkbox'){var w=el('label','de-check');w.appendChild(n);w.appendChild(el('span','',label));parent.appendChild(w);return n;}return field(parent,label,n,wide);}
 function number(parent,label,value,cb){return input(parent,label,value,function(v){var n=Number(v);if(isFinite(n))cb(n);},'number');}
 function select(parent,label,value,options,cb,wide){var n=document.createElement('select');options.forEach(function(o){var x=document.createElement('option');x.value=o[0];x.textContent=o[1];n.appendChild(x);});n.value=value==null?'':value;n.onchange=function(){cb(n.value);dirty();};return field(parent,label,n,wide);}
-function textarea(parent,label,value,cb,cls){var n=document.createElement('textarea');if(cls)n.className=cls;n.value=value||'';n.onchange=function(){cb(n.value);};return field(parent,label,n,true);}
-function jsonArea(parent,label,value,cb,cls){return textarea(parent,label,JSON.stringify(value,null,2),function(text){try{cb(JSON.parse(text));dirty();status('');}catch(e){status('JSON: '+e.message,true);}},cls||'de-json');}
+function textarea(parent,label,value,cb,cls){var n=document.createElement('textarea');if(cls)n.className=cls;n.value=value||'';n.oninput=function(){cb(n.value);};return field(parent,label,n,true);}
+function jsonArea(parent,label,value,cb,cls,key){var text=S.jsonBuffers[key]===undefined?JSON.stringify(value,null,2):S.jsonBuffers[key];return textarea(parent,label,text,function(edited){S.jsonBuffers[key]=edited;dirty();try{var parsed=JSON.parse(edited);delete S.jsonBuffers[key];cb(parsed);status('');}catch(e){S.jsonBuffers[key]=edited;status('JSON: '+e.message,true);}},cls||'de-json');}
 function grid(parent){var g=el('div','de-grid');parent.appendChild(g);return g;}
 function section(parent,title){var s=el('div','de-section');s.appendChild(el('h3','',title));parent.appendChild(s);return s;}
 function button(parent,label,fn,cls){var b=el('button',cls||'',label);b.type='button';b.onclick=fn;parent.appendChild(b);return b;}
@@ -104,7 +107,7 @@ function formDashboard(parent){
  select(g,tr('默认页面','Default page'),d.default_page_id,pageOptions(),function(v){d.default_page_id=v;});
  number(g,tr('刷新间隔 (ms)','Refresh (ms)'),d.refresh_ms,function(v){d.refresh_ms=v;});
  var advanced=section(parent,tr('完整 bundle / 高级 JSON','Full bundle / advanced JSON'));
- jsonArea(advanced,tr('可直接编辑 assets、samples、events 等全部配置；替换后仍须校验和应用。','Edit assets, samples, events and the full configuration; validation and apply are still required.'),S.draft,function(v){if(!v||!v.dashboard)throw new Error('bundle.dashboard required');S.draft=v;render();},'de-json');
+ jsonArea(advanced,tr('可直接编辑 assets、samples、events 等全部配置；替换后仍须校验和应用。','Edit assets, samples, events and the full configuration; validation and apply are still required.'),S.draft,function(v){if(!v||!v.dashboard)throw new Error('bundle.dashboard required');S.draft=v;render();},'de-json','bundle');
 }
 function formPage(parent){var p=selectedPage();if(!p){parent.textContent=tr('请先新建页面。','Create a page first.');return;}var g=grid(parent);input(g,'ID',p.id,function(v){p.id=v;S.selected.pages=v;});input(g,tr('标题','Title'),p.title,function(v){p.title=v;});input(g,tr('可见','Visible'),p.visible,function(v){p.visible=v;},'checkbox');number(g,tr('Grid 列数','Grid columns'),p.grid_columns,function(v){p.grid_columns=v;});number(g,tr('行高','Row height'),p.row_height,function(v){p.row_height=v;});}
 function formPanel(parent){
@@ -137,17 +140,17 @@ function formPanel(parent){
 }
 function formSource(parent){
  var s=byId(dash().sources,'id',selected());if(!s){parent.textContent=tr('请先新建数据源。','Create a source first.');return;}normalizeSource(s);var g=grid(parent);
- input(g,'ID',s.id,function(v){var old=s.id,p=byId(plans(),'id',old);s.id=v;if(p)p.id=v;S.selected.sources=v;});
+ input(g,'ID',s.id,function(v){var old=s.id,p=byId(plans(),'id',old);remapSourceBuffers(old,v);s.id=v;if(p)p.id=v;S.selected.sources=v;});
  select(g,tr('类型','Kind'),s.kind,[['http','http'],['static','static']],function(v){s.kind=v;if(v==='static')s.url='';syncPlan(s);});
  input(g,tr('启用','Enabled'),s.enabled,function(v){s.enabled=v;syncPlan(s);},'checkbox');input(g,'URL',s.url||'',function(v){s.url=v;syncPlan(s);},'text',true);
  number(g,tr('刷新 (ms)','Refresh (ms)'),s.refresh_ms,function(v){s.refresh_ms=v;syncPlan(s);});number(g,tr('超时 (ms)','Timeout (ms)'),s.timeout_ms,function(v){s.timeout_ms=v;syncPlan(s);});number(g,tr('响应上限 (bytes)','Response budget (bytes)'),s.max_response_bytes,function(v){s.max_response_bytes=v;syncPlan(s);});
  input(g,'TLS verify',s.tls_verify,function(v){s.tls_verify=v;syncPlan(s);},'checkbox');input(g,'auth_token_ref',s.auth_token_ref,function(v){s.auth_token_ref=v;syncPlan(s);});
- jsonArea(parent,tr('请求头（敏感值保持掩码；替换掩码即更新）','Headers (sensitive values stay masked; replace the mask to change)'),s.headers,function(v){s.headers=v;syncPlan(s);},'de-json');
+ jsonArea(parent,tr('请求头（敏感值保持掩码；替换掩码即更新）','Headers (sensitive values stay masked; replace the mask to change)'),s.headers,function(v){s.headers=v;syncPlan(s);},'de-json','source:'+s.id+':headers');
  var ps=section(parent,tr('查询与转换 SourcePlan（声明式，无脚本）','Query & transform SourcePlan (declarative, no scripts)'));var p=byId(plans(),'id',s.id);
- if(!p){button(ps,tr('添加 SourcePlan','Add SourcePlan'),function(){plans().push(defaultPlan(s));dirty();render();},'sec');button(ps,tr('测试默认 Standard JSON','Test default Standard JSON'),function(){testSource(defaultPlan(s));},'sec');return;}
- jsonArea(ps,tr('response、JSONPath、metrics/events 映射、单位与安全表达式','response, JSONPath, metric/event mappings, units and safe expressions'),p,function(v){var i=plans().indexOf(p);if(i>=0)plans()[i]=v;syncPlan(s);},'de-plan');
+ if(!p){button(ps,tr('添加 SourcePlan','Add SourcePlan'),function(){delete S.jsonBuffers['source:'+s.id+':plan'];plans().push(defaultPlan(s));dirty();render();},'sec');button(ps,tr('测试默认 Standard JSON','Test default Standard JSON'),function(){testSource(defaultPlan(s));},'sec');return;}
+ jsonArea(ps,tr('response、JSONPath、metrics/events 映射、单位与安全表达式','response, JSONPath, metric/event mappings, units and safe expressions'),p,function(v){var i=plans().indexOf(p);if(i>=0)plans()[i]=v;syncPlan(s);},'de-plan','source:'+s.id+':plan');
  button(ps,tr('测试并归一化预览','Test & normalized preview'),function(){testSource(p);},'');
- button(ps,tr('移除 SourcePlan（使用默认解析）','Remove SourcePlan (use default parser)'),function(){var i=plans().indexOf(p);if(i>=0)plans().splice(i,1);dirty();render();},'danger');
+ button(ps,tr('移除 SourcePlan（使用默认解析）','Remove SourcePlan (use default parser)'),function(){var i=plans().indexOf(p);if(i>=0)plans().splice(i,1);delete S.jsonBuffers['source:'+s.id+':plan'];dirty();render();},'danger');
 }
 function formVariable(parent){
  var v=byId(dash().variables,'name',selected());if(!v){parent.textContent=tr('请先新建变量。','Create a variable first.');return;}v.options=v.options||[];var g=grid(parent);
@@ -176,20 +179,20 @@ function deleteItem(){
  var id=selected();if(!id||!confirm(tr('确定删除此项？引用检查会在应用时执行。','Delete this item? References are checked when applying.')))return;var d=dash();
  if(S.view==='pages')d.pages=d.pages.filter(function(p){return p.id!==id;});
  if(S.view==='panels'){var parts=id.split('/'),pg=byId(d.pages,'id',parts[0]);if(pg)pg.panels=pg.panels.filter(function(p){return p.id!==parts.slice(1).join('/');});}
- if(S.view==='sources'){d.sources=d.sources.filter(function(s){return s.id!==id;});S.draft.source_plans=plans().filter(function(p){return p.id!==id;});}
+ if(S.view==='sources'){d.sources=d.sources.filter(function(s){return s.id!==id;});S.draft.source_plans=plans().filter(function(p){return p.id!==id;});dropSourceBuffers(id);}
  if(S.view==='variables')d.variables=d.variables.filter(function(v){return v.name!==id;});
  if(S.view==='alerts')d.alert_rules=d.alert_rules.filter(function(a){return a.id!==id;});
  delete S.selected[S.view];dirty();render();
 }
-function apply(){api('/dashboard',mutation({method:'PUT',body:JSON.stringify(S.draft)})).then(function(j){setCurrent(j);status(tr('配置已校验并原子应用。','Configuration validated and atomically applied.'));render();}).catch(showError);}
-function validateDraft(){api('/dashboard/validate',{method:'POST',body:JSON.stringify(S.draft)}).then(function(j){var text=j.valid?tr('校验通过','Validation passed'):tr('校验失败','Validation failed');if(j.migrated)text+=' · '+tr('已从 v1 迁移','migrated from v1');if(j.errors&&j.errors.length)text+='\n'+JSON.stringify(j.errors,null,2);status(text,!j.valid);}).catch(showError);}
-function setCurrent(j){S.current=clone(j);S.draft=clone(j);S.dirty=false;}
+function apply(){if(invalidJsonGuard())return;api('/dashboard',mutation({method:'PUT',body:JSON.stringify(S.draft)})).then(function(j){setCurrent(j);status(tr('配置已校验并原子应用。','Configuration validated and atomically applied.'));render();}).catch(showError);}
+function validateDraft(){if(invalidJsonGuard())return;api('/dashboard/validate',{method:'POST',body:JSON.stringify(S.draft)}).then(function(j){var text=j.valid?tr('校验通过','Validation passed'):tr('校验失败','Validation failed');if(j.migrated)text+=' · '+tr('已从 v1 迁移','migrated from v1');if(j.errors&&j.errors.length)text+='\n'+JSON.stringify(j.errors,null,2);status(text,!j.valid);}).catch(showError);}
+function setCurrent(j){S.jsonBuffers={};S.current=clone(j);S.draft=clone(j);S.dirty=false;}
 function reload(){if(S.dirty&&!confirm(tr('放弃未保存修改？','Discard unsaved changes?')))return;api('/dashboard').then(function(j){setCurrent(j);status('');render();}).catch(function(e){if(e.status===404){S.current=e.body&&typeof e.body.revision==='number'?{revision:e.body.revision}:null;loadSample(true);}else showError(e);});}
-function loadSample(force){if(!force&&S.dirty&&!confirm(tr('用样板替换当前草稿？','Replace the current draft with the sample?')))return;api('/dashboard/sample').then(function(j){S.draft=clone(j);S.dirty=!force;status(tr('样板仅载入草稿，点击应用后才生效。','Sample loaded as a draft; apply to make it active.'));render();}).catch(showError);}
-function importFile(e){var file=e.target.files&&e.target.files[0];if(!file)return;if(file.size>196608){status(tr('文件超过 192 KiB。','File exceeds 192 KiB.'),true);return;}var reader=new FileReader();reader.onload=function(){try{var j=JSON.parse(reader.result);if(!j.dashboard)j={schema:'eego.dashboard-bundle/1',schema_version:1,revision:baseRevision(),dashboard:j,source_plans:[]};S.draft=j;S.dirty=true;status(tr('文件已导入草稿，请先校验再应用。','File imported as a draft; validate before applying.'));render();}catch(err){status('JSON: '+err.message,true);}};reader.readAsText(file);e.target.value='';}
-function exportDraft(){var blob=new Blob([JSON.stringify(S.draft,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(dash().id||'dashboard')+'.json';document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},0);}
+function loadSample(force){if(!force&&S.dirty&&!confirm(tr('用样板替换当前草稿？','Replace the current draft with the sample?')))return;api('/dashboard/sample').then(function(j){S.jsonBuffers={};S.draft=clone(j);S.dirty=!force;status(tr('样板仅载入草稿，点击应用后才生效。','Sample loaded as a draft; apply to make it active.'));render();}).catch(showError);}
+function importFile(e){if(S.dirty&&!confirm(tr('导入文件并替换当前草稿？','Import a file and replace the current draft?'))){e.target.value='';return;}var file=e.target.files&&e.target.files[0];if(!file)return;if(file.size>196608){status(tr('文件超过 192 KiB。','File exceeds 192 KiB.'),true);return;}var reader=new FileReader();reader.onload=function(){try{var j=JSON.parse(reader.result);if(!j.dashboard)j={schema:'eego.dashboard-bundle/1',schema_version:1,revision:baseRevision(),dashboard:j,source_plans:[]};S.jsonBuffers={};S.draft=j;S.dirty=true;status(tr('文件已导入草稿，请先校验再应用。','File imported as a draft; validate before applying.'));render();}catch(err){status('JSON: '+err.message,true);}};reader.readAsText(file);e.target.value='';}
+function exportDraft(){if(invalidJsonGuard())return;var blob=new Blob([JSON.stringify(S.draft,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(dash().id||'dashboard')+'.json';document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},0);}
 function variableValues(){var out={};(dash().variables||[]).forEach(function(v){out[v.name]=v.default_value||'';});return out;}
-function testSource(plan){status(tr('正在测试…','Testing…'));api('/dashboard/sources/test',{method:'POST',body:JSON.stringify({plan:plan,variables:variableValues()})}).then(function(j){$('de_result').textContent=JSON.stringify(j,null,2);status(tr('预览仅含归一化字段，不含原始响应。','Preview contains normalized fields only; no raw response.'));}).catch(showError);}
+function testSource(plan){if(invalidJsonGuard())return;status(tr('正在测试…','Testing…'));api('/dashboard/sources/test',{method:'POST',body:JSON.stringify({plan:plan,variables:variableValues()})}).then(function(j){$('de_result').textContent=JSON.stringify(j,null,2);status(tr('预览仅含归一化字段，不含原始响应。','Preview contains normalized fields only; no raw response.'));}).catch(showError);}
 function previewData(){
  var metrics=clone(dash().samples||[]),events=clone(dash().events||[]);
  plans().forEach(function(p){if(p.kind!=='static'||!p.static_body)return;try{var j=JSON.parse(p.static_body);(j.metrics||[]).forEach(function(m){var x=clone(m);if(!x.source_id)x.source_id=p.id;metrics.push(x);});(j.events||[]).forEach(function(e){var x=clone(e);if(!x.source_id)x.source_id=p.id;events.push(x);});}catch(ignore){}});
@@ -199,9 +202,10 @@ function latest(metrics,p){var hit=null;metrics.forEach(function(m){if(m.source_
 function renderPreview(){
  var root=$('de_preview');if(!root||!S.draft)return;root.textContent='';var d=dash(),pages=d.pages||[];if(!pages.length){root.textContent=tr('暂无页面预览。','No page preview.');return;}
  var pageId=S.view==='panels'?selected().split('/')[0]:(S.view==='pages'||S.view==='layout'?selected():d.default_page_id);var page=byId(pages,'id',pageId)||pages[0];
+ var columns=Math.floor(Number(page.grid_columns));if(!isFinite(columns))columns=1;columns=Math.max(1,Math.min(64,columns));
  var bar=el('div','de-bar');root.appendChild(bar);bar.appendChild(el('strong','',tr('样板预览：','Sample preview:')+' '+page.id));bar.appendChild(el('span','dim',tr('使用草稿 samples/events/static_body，不发起网络请求','Uses draft samples/events/static_body; no network request')));
- var canvas=el('div','de-page');root.appendChild(canvas);var data=previewData();
- (page.panels||[]).forEach(function(p){if(p.visible===false)return;normalizePanel(p);var card=el('div','de-panel');var x=Number(p.grid.x)||0,y=Number(p.grid.y)||0,w=Number(p.grid.w)||6,h=Number(p.grid.h)||4;x=Math.max(0,Math.min(23,x));w=Math.max(1,Math.min(24-x,w));h=Math.max(1,Math.min(30,h));card.style.gridColumn=(x+1)+' / span '+w;card.style.gridRow=(y+1)+' / span '+h;card.appendChild(el('strong','',p.title||p.id));var m=latest(data.metrics,p);
+ var canvas=el('div','de-page');root.appendChild(canvas);canvas.style.gridTemplateColumns='repeat('+columns+',minmax(0,1fr))';var data=previewData();
+ (page.panels||[]).forEach(function(p){if(p.visible===false)return;normalizePanel(p);var card=el('div','de-panel');var x=Math.floor(Number(p.grid.x)||0),y=Math.floor(Number(p.grid.y)||0),w=Math.floor(Number(p.grid.w)||6),h=Math.floor(Number(p.grid.h)||4);x=Math.max(0,Math.min(columns-1,x));w=Math.max(1,Math.min(columns-x,w));h=Math.max(1,Math.min(30,h));card.style.gridColumn=(x+1)+' / span '+w;card.style.gridRow=(y+1)+' / span '+h;card.appendChild(el('strong','',p.title||p.id));var m=latest(data.metrics,p);
   if(p.kind==='text')card.appendChild(el('span','',(p.text&&p.text.content)||''));
   else if(p.kind==='alert'){var list=data.events.filter(function(e){return !p.linked_panel_ids.length||p.linked_panel_ids.indexOf(e.linked_panel_id)>=0;}).slice(0,3);if(!list.length)card.appendChild(el('span','dim',tr('无告警','No alerts')));list.forEach(function(e){card.appendChild(el('div','de-'+e.severity,(e.title||e.id)+' '+(e.message||'')));});}
   else if(p.kind==='button')(p.actions||[]).forEach(function(a){card.appendChild(el('span','','['+(a.label||a.id)+'] '));});
@@ -211,7 +215,7 @@ function renderPreview(){
   canvas.appendChild(card);
  });
 }
-function canLeave(destination){if(destination==='dashboard'||!S.dirty)return true;if(!confirm(tr('有未保存的 dashboard 草稿，确定放弃？','Discard the unsaved dashboard draft?')))return false;if(S.current)S.draft=clone(S.current);S.dirty=false;updateDirty();return true;}
+function canLeave(destination){if(destination==='dashboard'||!S.dirty)return true;if(!confirm(tr('有未保存的 dashboard 草稿，确定放弃？','Discard the unsaved dashboard draft?')))return false;S.jsonBuffers={};if(S.current&&S.current.dashboard)S.draft=clone(S.current);S.dirty=false;updateDirty();return true;}
 function enter(){if(!S.ready){S.ready=true;reload();}else render();}
 function language(){$('tab_dashboard').textContent=tr('数据面板','Dashboard');if(S.draft)render();}
 window.addEventListener('beforeunload',function(e){if(S.dirty){e.preventDefault();e.returnValue='';}});
