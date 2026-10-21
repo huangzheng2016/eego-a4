@@ -57,31 +57,42 @@ bool sensitiveHeader(const std::string& key) {
          k.find("secret") != std::string::npos || k.find("cookie") != std::string::npos;
 }
 
-JsonValue maskJson(const JsonValue& value) {
+bool isTableColumnMappingKey(const std::string& path) {
+  const size_t panels = path.rfind(".panels[");
+  const size_t columns = path.rfind("].columns[");
+  return !path.empty() && path.back() == ']' && panels != std::string::npos &&
+         columns != std::string::npos && columns > panels;
+}
+
+JsonValue maskJson(const JsonValue& value, const std::string& path) {
   if (value.type() == JsonValue::Type::Array) {
     JsonValue::Array out;
     out.reserve(value.arrayItems().size());
-    for (const auto& item : value.arrayItems()) out.push_back(maskJson(item));
+    for (size_t i = 0; i < value.arrayItems().size(); ++i) {
+      out.push_back(maskJson(value.arrayItems()[i], path + "[" + std::to_string(i) + "]"));
+    }
     return JsonValue::makeArray(std::move(out));
   }
   if (value.type() != JsonValue::Type::Object) return value;
   JsonValue::Object out;
   out.reserve(value.objectItems().size());
   for (const auto& member : value.objectItems()) {
+    const std::string child_path = path.empty() ? member.first : path + "." + member.first;
     if (member.first == "headers" && member.second.type() == JsonValue::Type::Object) {
       JsonValue::Object headers;
       for (const auto& header : member.second.objectItems()) {
         if (header.second.type() == JsonValue::Type::String && sensitiveHeader(header.first)) {
           headers.emplace_back(header.first, JsonValue::makeString(kMask));
         } else {
-          headers.emplace_back(header.first, maskJson(header.second));
+          headers.emplace_back(header.first, maskJson(header.second, child_path + "." + header.first));
         }
       }
       out.emplace_back(member.first, JsonValue::makeObject(std::move(headers)));
-    } else if (member.second.type() == JsonValue::Type::String && sensitiveKey(member.first)) {
+    } else if (member.second.type() == JsonValue::Type::String && sensitiveKey(member.first) &&
+               !(member.first == "key" && isTableColumnMappingKey(path))) {
       out.emplace_back(member.first, JsonValue::makeString(kMask));
     } else {
-      out.emplace_back(member.first, maskJson(member.second));
+      out.emplace_back(member.first, maskJson(member.second, child_path));
     }
   }
   return JsonValue::makeObject(std::move(out));
@@ -471,7 +482,7 @@ JsonValue DashboardStore::toJson(const DashboardDocument& document, bool mask_se
     bundle.emplace_back("source_plans", document.source_plan_values);
     output = JsonValue::makeObject(std::move(bundle));
   }
-  return mask_secrets ? maskJson(output) : output;
+  return mask_secrets ? maskJson(output, "") : output;
 }
 
 bool DashboardStore::commit(const DashboardDocument& candidate, bool check_revision,
