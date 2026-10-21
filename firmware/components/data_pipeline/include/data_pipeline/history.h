@@ -90,6 +90,7 @@ class MetricHistory {
                               int32_t timezone_offset_minutes = 0) const;
   // Raw samples and exact fixed-window state for SD persistence; query() returns display buckets.
   std::vector<HistoryEntry> entries(const std::string& source_id = "") const;
+  void reconcileReset(const SourceResult& result);
   int64_t resetAt(const std::string& source_id, const std::string& metric) const;
 
   size_t pointCount() const { return point_count_; }  // display buckets
@@ -133,7 +134,7 @@ class MetricHistory {
   };
 
   static std::string keyFor(const MetricSample& sample);
-  bool appendEntry(HistoryEntry entry, std::string& error);
+  bool appendEntry(HistoryEntry entry, std::string& error, bool add_fixed = true);
   void addFixed(Series& series, const MetricSample& sample);
   void addWindowSample(Series& series, WindowKind kind, int64_t from_ms,
                        const MetricSample& sample, bool coverage_lost = false);

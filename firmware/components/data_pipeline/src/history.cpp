@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 
 namespace eego::dashboard::pipeline {
 namespace {
@@ -420,7 +421,7 @@ std::string MetricHistory::keyFor(const MetricSample& sample) {
   return key;
 }
 
-bool MetricHistory::appendEntry(HistoryEntry entry, std::string& error) {
+bool MetricHistory::appendEntry(HistoryEntry entry, std::string& error, bool add_fixed) {
   error.clear();
   if (!validSample(entry.sample)) {
     error = "history rejected an invalid metric sample";
@@ -441,7 +442,7 @@ bool MetricHistory::appendEntry(HistoryEntry entry, std::string& error) {
     it = series_.emplace(key, std::move(series)).first;
   }
   Series& series = it->second;
-  series.reset_at_ms = entry.reset_at_ms;
+  series.reset_at_ms = std::max(series.reset_at_ms, entry.reset_at_ms);
   if (series.unit.empty()) series.unit = entry.sample.unit;
   auto position = std::lower_bound(series.raw_points.begin(), series.raw_points.end(),
                                    entry.sample.timestamp_ms,
@@ -454,7 +455,7 @@ bool MetricHistory::appendEntry(HistoryEntry entry, std::string& error) {
   } else {
     position = series.raw_points.insert(position, std::move(entry.sample));
   }
-  addFixed(series, *position);
+  if (add_fixed) addFixed(series, *position);
   HistoryEntry display;
   display.sample = *position;
   display.reset_at_ms = series.reset_at_ms;
@@ -547,6 +548,13 @@ bool MetricHistory::replaceSource(const std::string& source_id,
                                                       const HistoryEntry& right) {
     return left.sample.timestamp_ms < right.sample.timestamp_ms;
   });
+  std::set<std::string> windowed_series;
+  for (const HistoryEntry& entry : ordered) {
+    if (!entry.window_state) continue;
+    MetricSample canonical = entry.sample;
+    canonical.labels = canonicalLabels(std::move(canonical.labels));
+    windowed_series.insert(keyFor(canonical));
+  }
   for (HistoryEntry& entry : ordered) {
     if (entry.window_state) continue;
     if (entry.sample.source_id.empty()) entry.sample.source_id = source_id;
@@ -560,7 +568,7 @@ bool MetricHistory::replaceSource(const std::string& source_id,
     const std::string key = keyFor(canonical);
     const int64_t raw_gap = entry.raw_gap_before_ms;
     const bool fixed_gap = entry.fixed_gap;
-    if (!appendEntry(std::move(entry), error)) {
+    if (!appendEntry(std::move(entry), error, windowed_series.count(key) == 0)) {
       clearSource(source_id);
       return false;
     }
@@ -598,7 +606,7 @@ bool MetricHistory::replaceSource(const std::string& source_id,
       it = series_.emplace(key, std::move(series)).first;
     }
     Series& series = it->second;
-    series.reset_at_ms = entry.reset_at_ms;
+    series.reset_at_ms = std::max(series.reset_at_ms, entry.reset_at_ms);
     series.raw_gap_before_ms = std::max(series.raw_gap_before_ms, entry.raw_gap_before_ms);
     if (series.unit.empty()) series.unit = canonical.unit;
     if (entry.coverage_sample) {
@@ -835,6 +843,14 @@ std::vector<HistoryEntry> MetricHistory::entries(const std::string& source_id) c
     }
   }
   return out;
+}
+
+void MetricHistory::reconcileReset(const SourceResult& result) {
+  for (auto& item : series_) {
+    Series& series = item.second;
+    if (series.source_id != result.source_id) continue;
+    series.reset_at_ms = std::max(series.reset_at_ms, result.resetAtFor(series.metric));
+  }
 }
 
 int64_t MetricHistory::resetAt(const std::string& source_id, const std::string& metric) const {

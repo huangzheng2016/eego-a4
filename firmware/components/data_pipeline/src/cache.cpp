@@ -570,7 +570,9 @@ bool SdCache::appendHistory(const std::string& source_id,
   } else if (exists && !loadHistory(source_id, combined, error)) {
     return false;
   }
-  combined.insert(combined.end(), entries.begin(), entries.end());
+  const std::vector<HistoryEntry> prepared = boundHistory(entries, limits_, error);
+  if (!error.empty()) return false;
+  combined.insert(combined.end(), prepared.begin(), prepared.end());
   combined = boundHistory(combined, limits_, error);
   if (!error.empty()) return false;
   const bool had_entries = !combined.empty();

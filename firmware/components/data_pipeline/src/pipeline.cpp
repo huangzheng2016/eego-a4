@@ -192,6 +192,7 @@ bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<Sourc
       SourceResult cached;
       if (cache_->readSnapshot(item.first, cached, cache_error)) {
         runtime.result = std::make_shared<const SourceResult>(std::move(cached));
+        history_.reconcileReset(*runtime.result);
         runtime.status.last_success_ms = runtime.result->fetched_at_ms;
         runtime.status.offline = true;
         runtime.status.stale = true;
