@@ -1126,7 +1126,6 @@ void PanelApp::batteryFsm(int64_t now) {
 }
 
 void PanelApp::enterSleep(int64_t now, int64_t durationMs) {
-  eego::FrontlightManager::instance().off();
   ESP_LOGI(TAG, "entering deep sleep");
   int64_t sleepMs = durationMs;
   if (sleepMs < 0) {
@@ -1152,9 +1151,11 @@ void PanelApp::enterSleep(int64_t now, int64_t durationMs) {
     battPhase_ = mains_ ? BattPhase::Mains : BattPhase::Serving;
     awakeDeadlineMs_ = now + 30000;
     lastScheduleCheckMs_ = now + 30000;
+    applySettings(eego::settings::kChangedFrontlight);
     markDirty();
     return;
   }
+  eego::FrontlightManager::instance().off();
   NetStack::instance().wifi().powerOff();
 
   if (deps_.boot.displayReady && deps_.canvas != nullptr) {
