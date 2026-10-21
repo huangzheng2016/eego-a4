@@ -20,6 +20,7 @@ enum class Page : uint8_t {
   Status,
   Settings,
   Provision,
+  Dashboard,
 };
 
 // 二次确认状态（5s 窗口内再次激活才执行；任何其他输入取消）。
