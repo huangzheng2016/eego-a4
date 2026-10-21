@@ -19,7 +19,7 @@ const char kDashboardCss[] = R"CSS(#pane_dashboard{max-width:1180px}
 
 const char kDashboardJs[] = R"JS((function(){
 'use strict';
-var S={current:null,draft:null,dirty:false,view:'dashboard',selected:{},ready:false,jsonBuffers:{}};
+var S={current:null,draft:null,sample:null,dirty:false,view:'dashboard',selected:{},ready:false,jsonBuffers:{}};
 function tr(zh,en){return LANG==='zh'?zh:en;}
 function clone(v){return v==null?v:JSON.parse(JSON.stringify(v));}
 function el(tag,cls,text){var n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;}
@@ -39,7 +39,8 @@ function input(parent,label,value,cb,type,wide){var n=document.createElement('in
 function number(parent,label,value,cb){return input(parent,label,value,function(v){var n=Number(v);if(isFinite(n))cb(n);},'number');}
 function select(parent,label,value,options,cb,wide){var n=document.createElement('select');options.forEach(function(o){var x=document.createElement('option');x.value=o[0];x.textContent=o[1];n.appendChild(x);});n.value=value==null?'':value;n.onchange=function(){cb(n.value);dirty();};return field(parent,label,n,wide);}
 function textarea(parent,label,value,cb,cls){var n=document.createElement('textarea');if(cls)n.className=cls;n.value=value||'';n.oninput=function(){cb(n.value);};return field(parent,label,n,true);}
-function jsonArea(parent,label,value,cb,cls,key){var text=S.jsonBuffers[key]===undefined?JSON.stringify(value,null,2):S.jsonBuffers[key];return textarea(parent,label,text,function(edited){S.jsonBuffers[key]=edited;dirty();try{var parsed=JSON.parse(edited);delete S.jsonBuffers[key];cb(parsed);status('');}catch(e){S.jsonBuffers[key]=edited;status('JSON: '+e.message,true);}},cls||'de-json');}
+function jsonBufferKey(key){return typeof key==='function'?key():key;}
+function jsonArea(parent,label,value,cb,cls,key){var initialKey=jsonBufferKey(key),text=S.jsonBuffers[initialKey]===undefined?JSON.stringify(value,null,2):S.jsonBuffers[initialKey];return textarea(parent,label,text,function(edited){var activeKey=jsonBufferKey(key);S.jsonBuffers[activeKey]=edited;dirty();try{var parsed=JSON.parse(edited);delete S.jsonBuffers[activeKey];cb(parsed);status('');}catch(e){S.jsonBuffers[activeKey]=edited;status('JSON: '+e.message,true);}},cls||'de-json');}
 function grid(parent){var g=el('div','de-grid');parent.appendChild(g);return g;}
 function section(parent,title){var s=el('div','de-section');s.appendChild(el('h3','',title));parent.appendChild(s);return s;}
 function button(parent,label,fn,cls){var b=el('button',cls||'',label);b.type='button';b.onclick=fn;parent.appendChild(b);return b;}
@@ -145,10 +146,10 @@ function formSource(parent){
  input(g,tr('启用','Enabled'),s.enabled,function(v){s.enabled=v;syncPlan(s);},'checkbox');input(g,'URL',s.url||'',function(v){s.url=v;syncPlan(s);},'text',true);
  number(g,tr('刷新 (ms)','Refresh (ms)'),s.refresh_ms,function(v){s.refresh_ms=v;syncPlan(s);});number(g,tr('超时 (ms)','Timeout (ms)'),s.timeout_ms,function(v){s.timeout_ms=v;syncPlan(s);});number(g,tr('响应上限 (bytes)','Response budget (bytes)'),s.max_response_bytes,function(v){s.max_response_bytes=v;syncPlan(s);});
  input(g,'TLS verify',s.tls_verify,function(v){s.tls_verify=v;syncPlan(s);},'checkbox');input(g,'auth_token_ref',s.auth_token_ref,function(v){s.auth_token_ref=v;syncPlan(s);});
- jsonArea(parent,tr('请求头（敏感值保持掩码；替换掩码即更新）','Headers (sensitive values stay masked; replace the mask to change)'),s.headers,function(v){s.headers=v;syncPlan(s);},'de-json','source:'+s.id+':headers');
+ jsonArea(parent,tr('请求头（敏感值保持掩码；替换掩码即更新）','Headers (sensitive values stay masked; replace the mask to change)'),s.headers,function(v){s.headers=v;syncPlan(s);},'de-json',function(){return 'source:'+s.id+':headers';});
  var ps=section(parent,tr('查询与转换 SourcePlan（声明式，无脚本）','Query & transform SourcePlan (declarative, no scripts)'));var p=byId(plans(),'id',s.id);
  if(!p){button(ps,tr('添加 SourcePlan','Add SourcePlan'),function(){delete S.jsonBuffers['source:'+s.id+':plan'];plans().push(defaultPlan(s));dirty();render();},'sec');button(ps,tr('测试默认 Standard JSON','Test default Standard JSON'),function(){testSource(defaultPlan(s));},'sec');return;}
- jsonArea(ps,tr('response、JSONPath、metrics/events 映射、单位与安全表达式','response, JSONPath, metric/event mappings, units and safe expressions'),p,function(v){var i=plans().indexOf(p);if(i>=0)plans()[i]=v;syncPlan(s);},'de-plan','source:'+s.id+':plan');
+ jsonArea(ps,tr('response、JSONPath、metrics/events 映射、单位与安全表达式','response, JSONPath, metric/event mappings, units and safe expressions'),p,function(v){var i=plans().indexOf(p);if(i>=0)plans()[i]=v;syncPlan(s);},'de-plan',function(){return 'source:'+s.id+':plan';});
  button(ps,tr('测试并归一化预览','Test & normalized preview'),function(){testSource(p);},'');
  button(ps,tr('移除 SourcePlan（使用默认解析）','Remove SourcePlan (use default parser)'),function(){var i=plans().indexOf(p);if(i>=0)plans().splice(i,1);delete S.jsonBuffers['source:'+s.id+':plan'];dirty();render();},'danger');
 }
@@ -188,7 +189,7 @@ function apply(){if(invalidJsonGuard())return;api('/dashboard',mutation({method:
 function validateDraft(){if(invalidJsonGuard())return;api('/dashboard/validate',{method:'POST',body:JSON.stringify(S.draft)}).then(function(j){var text=j.valid?tr('校验通过','Validation passed'):tr('校验失败','Validation failed');if(j.migrated)text+=' · '+tr('已从 v1 迁移','migrated from v1');if(j.errors&&j.errors.length)text+='\n'+JSON.stringify(j.errors,null,2);status(text,!j.valid);}).catch(showError);}
 function setCurrent(j){S.jsonBuffers={};S.current=clone(j);S.draft=clone(j);S.dirty=false;}
 function reload(){if(S.dirty&&!confirm(tr('放弃未保存修改？','Discard unsaved changes?')))return;api('/dashboard').then(function(j){setCurrent(j);status('');render();}).catch(function(e){if(e.status===404){S.current=e.body&&typeof e.body.revision==='number'?{revision:e.body.revision}:null;loadSample(true);}else showError(e);});}
-function loadSample(force){if(!force&&S.dirty&&!confirm(tr('用样板替换当前草稿？','Replace the current draft with the sample?')))return;api('/dashboard/sample').then(function(j){S.jsonBuffers={};S.draft=clone(j);S.dirty=!force;status(tr('样板仅载入草稿，点击应用后才生效。','Sample loaded as a draft; apply to make it active.'));render();}).catch(showError);}
+function loadSample(force){if(!force&&S.dirty&&!confirm(tr('用样板替换当前草稿？','Replace the current draft with the sample?')))return;api('/dashboard/sample').then(function(j){S.jsonBuffers={};S.sample=clone(j);S.draft=clone(j);S.dirty=!force;status(tr('样板仅载入草稿，点击应用后才生效。','Sample loaded as a draft; apply to make it active.'));render();}).catch(showError);}
 function importFile(e){if(S.dirty&&!confirm(tr('导入文件并替换当前草稿？','Import a file and replace the current draft?'))){e.target.value='';return;}var file=e.target.files&&e.target.files[0];if(!file)return;if(file.size>196608){status(tr('文件超过 192 KiB。','File exceeds 192 KiB.'),true);return;}var reader=new FileReader();reader.onload=function(){try{var j=JSON.parse(reader.result);if(!j.dashboard)j={schema:'eego.dashboard-bundle/1',schema_version:1,revision:baseRevision(),dashboard:j,source_plans:[]};S.jsonBuffers={};S.draft=j;S.dirty=true;status(tr('文件已导入草稿，请先校验再应用。','File imported as a draft; validate before applying.'));render();}catch(err){status('JSON: '+err.message,true);}};reader.readAsText(file);e.target.value='';}
 function exportDraft(){if(invalidJsonGuard())return;var blob=new Blob([JSON.stringify(S.draft,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(dash().id||'dashboard')+'.json';document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},0);}
 function variableValues(){var out={};(dash().variables||[]).forEach(function(v){out[v.name]=v.default_value||'';});return out;}
@@ -215,7 +216,7 @@ function renderPreview(){
   canvas.appendChild(card);
  });
 }
-function canLeave(destination){if(destination==='dashboard'||!S.dirty)return true;if(!confirm(tr('有未保存的 dashboard 草稿，确定放弃？','Discard the unsaved dashboard draft?')))return false;S.jsonBuffers={};if(S.current&&S.current.dashboard)S.draft=clone(S.current);S.dirty=false;updateDirty();return true;}
+function canLeave(destination){if(destination==='dashboard'||!S.dirty)return true;if(!confirm(tr('有未保存的 dashboard 草稿，确定放弃？','Discard the unsaved dashboard draft?')))return false;S.jsonBuffers={};if(S.current&&S.current.dashboard)S.draft=clone(S.current);else if(S.sample)S.draft=clone(S.sample);else{S.draft=null;S.ready=false;}S.dirty=false;updateDirty();return true;}
 function enter(){if(!S.ready){S.ready=true;reload();}else render();}
 function language(){$('tab_dashboard').textContent=tr('数据面板','Dashboard');if(S.draft)render();}
 window.addEventListener('beforeunload',function(e){if(S.dirty){e.preventDefault();e.returnValue='';}});
