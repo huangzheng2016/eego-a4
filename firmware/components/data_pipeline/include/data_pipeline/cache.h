@@ -12,7 +12,7 @@ namespace eego::dashboard::pipeline {
 struct CacheLimits {
   size_t max_history_points = 8192;
   size_t downsample_points = 2048;
-  size_t max_history_bytes = 4 * 1024 * 1024;  // matches the rolling 1m envelope
+  size_t max_history_bytes = 16 * 1024 * 1024;  // bounded full 1s fixed_5h coverage
   size_t max_snapshot_bytes = 512 * 1024;
   size_t max_image_bytes = kMaxImageBytes;
   int32_t timezone_offset_minutes = 0;
@@ -43,6 +43,8 @@ class SdCache {
   std::string imageGenerationPath(const std::string& source_id,
                                   const std::string& generation) const;
   void cleanupImages(const std::string& source_id, const std::string& keep_generation) const;
+  bool loadHistoryLimited(const std::string& source_id, std::vector<HistoryEntry>& out,
+                          std::string& error, size_t max_bytes) const;
 
   std::string directory_;
   CacheLimits limits_;

@@ -365,37 +365,68 @@ std::string serializeHistory(std::vector<HistoryEntry> entries, size_t max_bytes
                                                       const HistoryEntry& right) {
     return left.sample.timestamp_ms < right.sample.timestamp_ms;
   });
-  std::vector<std::string> lines;
-  lines.reserve(entries.size());
-  size_t total = 0;
-  for (const HistoryEntry& entry : entries) {
-    lines.push_back(historyEntryToJson(entry) + "\n");
-    total += lines.back().size();
-  }
-  size_t first = 0;
-  int64_t dropped_raw = 0;
-  bool dropped_fixed = false;
-  while (total > max_bytes && first < lines.size()) {
-    total -= lines[first].size();
-    if (entries[first].window_state)
-      dropped_fixed = true;
-    else
-      dropped_raw = std::max(dropped_raw, entries[first].sample.timestamp_ms);
-    ++first;
-  }
-  if (first == entries.size()) return {};
-  if (dropped_fixed) {
-    for (size_t i = first; i < entries.size(); ++i) entries[i].fixed_gap = true;
-  }
-  if (dropped_raw > 0) {
-    for (size_t i = first; i < entries.size(); ++i) {
-      entries[i].raw_gap_before_ms = std::max(entries[i].raw_gap_before_ms, dropped_raw);
+  for (;;) {
+    std::vector<std::string> lines;
+    lines.reserve(entries.size());
+    size_t total = 0;
+    for (const HistoryEntry& entry : entries) {
+      lines.push_back(historyEntryToJson(entry) + "\n");
+      total += lines.back().size();
+    }
+    if (total <= max_bytes) {
+      std::string out;
+      out.reserve(total);
+      for (const std::string& line : lines) out += line;
+      return out;
+    }
+    size_t first = 0;
+    int64_t dropped_raw = 0;
+    bool dropped_fixed = false;
+    std::set<std::pair<int, int64_t>> dropped_windows;
+    while (total > max_bytes && first < lines.size()) {
+      total -= lines[first].size();
+      if (entries[first].window_state) {
+        dropped_fixed = true;
+        if (entries[first].coverage_windows.empty()) {
+          dropped_windows.emplace(static_cast<int>(entries[first].window_kind),
+                                  entries[first].window_from_ms);
+        } else {
+          for (const auto& window : entries[first].coverage_windows) {
+            dropped_windows.emplace(static_cast<int>(window.first), window.second);
+          }
+        }
+      } else {
+        dropped_raw = std::max(dropped_raw, entries[first].sample.timestamp_ms);
+      }
+      ++first;
+    }
+    if (first == entries.size()) return {};
+    entries.erase(entries.begin(), entries.begin() + first);
+    if (dropped_fixed) {
+      for (HistoryEntry& entry : entries) {
+        entry.fixed_gap = true;
+        if (!entry.window_state) continue;
+        const auto affected = [&](WindowKind kind, int64_t from_ms) {
+          return dropped_windows.count({static_cast<int>(kind), from_ms}) != 0;
+        };
+        if (entry.coverage_windows.empty()) {
+          if (affected(entry.window_kind, entry.window_from_ms)) entry.coverage_lost = true;
+        } else {
+          for (const auto& window : entry.coverage_windows) {
+            if (affected(window.first, window.second)) {
+              entry.coverage_lost = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (dropped_raw > 0) {
+      for (HistoryEntry& entry : entries) {
+        entry.raw_gap_before_ms = std::max(entry.raw_gap_before_ms, dropped_raw);
+      }
     }
   }
-  std::string out;
-  out.reserve(total);
-  for (size_t i = first; i < entries.size(); ++i) out += historyEntryToJson(entries[i]) + "\n";
-  return out;
 }
 
 }  // namespace
@@ -456,7 +487,18 @@ bool SdCache::appendHistory(const std::string& source_id,
   struct stat info;
   const bool exists = ::stat(historyPath(source_id).c_str(), &info) == 0;
   std::vector<HistoryEntry> combined;
-  if (exists && !loadHistory(source_id, combined, error)) return false;
+  if (exists && info.st_size > static_cast<off_t>(limits_.max_history_bytes * 16)) {
+    error = "cache file exceeds recovery budget";
+    return false;
+  }
+  if (exists && info.st_size > static_cast<off_t>(limits_.max_history_bytes)) {
+    if (!loadHistoryLimited(source_id, combined, error,
+                            static_cast<size_t>(info.st_size))) {
+      return false;
+    }
+  } else if (exists && !loadHistory(source_id, combined, error)) {
+    return false;
+  }
   combined.insert(combined.end(), entries.begin(), entries.end());
   combined = boundHistory(combined, limits_, error);
   if (!error.empty()) return false;
@@ -469,8 +511,8 @@ bool SdCache::appendHistory(const std::string& source_id,
   return writeAtomic(historyPath(source_id), data, error);
 }
 
-bool SdCache::loadHistory(const std::string& source_id, std::vector<HistoryEntry>& out,
-                          std::string& error) const {
+bool SdCache::loadHistoryLimited(const std::string& source_id, std::vector<HistoryEntry>& out,
+                                 std::string& error, size_t max_bytes) const {
   out.clear();
   error.clear();
   if (!validId(source_id)) {
@@ -483,7 +525,7 @@ bool SdCache::loadHistory(const std::string& source_id, std::vector<HistoryEntry
     error = "cache file is unavailable";
     return false;
   }
-  if (static_cast<uint64_t>(info.st_size) > limits_.max_history_bytes) {
+  if (static_cast<uint64_t>(info.st_size) > max_bytes) {
     error = "cache file exceeds configured byte budget";
     return false;
   }
@@ -539,6 +581,11 @@ bool SdCache::loadHistory(const std::string& source_id, std::vector<HistoryEntry
   }
   out = boundHistory(out, limits_, error);
   return error.empty();
+}
+
+bool SdCache::loadHistory(const std::string& source_id, std::vector<HistoryEntry>& out,
+                          std::string& error) const {
+  return loadHistoryLimited(source_id, out, error, limits_.max_history_bytes);
 }
 
 bool SdCache::writeSnapshot(const SourceResult& result, std::string& error) {

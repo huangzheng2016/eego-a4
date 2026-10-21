@@ -308,7 +308,10 @@ void MetricHistory::addWindowSample(Series& series, WindowKind kind, int64_t fro
     if (!std::isfinite(state.sum)) state.coverage_lost = true;
     return;
   }
-  const size_t limit = kind == WindowKind::Today ? 1440 : kind == WindowKind::Fixed5h ? 300 : 10080;
+  // Inclusive endpoints at the fastest supported 1s cadence; faster data is explicitly incomplete.
+  const size_t limit = kind == WindowKind::Today
+                           ? 86401
+                           : kind == WindowKind::Fixed5h ? 18001 : 604801;
   if (state.samples.size() >= limit) {
     state.coverage_lost = true;
     return;
