@@ -239,32 +239,7 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
 void PanelApp::onButtonShort(eego::ButtonId id) {
   // 二次确认执行：armed 状态下电源短按 = 确认（其他输入在各自分支先取消）
   if (id == eego::ButtonId::Power && confirm_ != ConfirmKind::None) {
-    switch (confirm_) {
-      case ConfirmKind::AckAll:
-        doAckAll();
-        break;
-      case ConfirmKind::Mute: {
-        const alert_core::AlertRecord* rec = findRecord(detailId_);
-        if (rec != nullptr) {
-          doMute(*rec);
-        } else {
-          showBanner(tr(Str::ActionFailed), 3000);
-        }
-        break;
-      }
-      case ConfirmKind::Clear:
-        doClear(detailId_);
-        break;
-      case ConfirmKind::ClearMutes:
-        prefs_.clearMutes();
-        prefs_.save();
-        showBanner(tr(Str::DoneClear), 3000);
-        markDirty();
-        break;
-      default:
-        break;
-    }
-    clearConfirm();
+    executeArmedConfirm();
     return;
   }
 
@@ -481,8 +456,10 @@ void PanelApp::activateSoftKey(size_t idx) {
 // ── 触控 ────────────────────────────────────────────────────────────────────
 
 void PanelApp::onTouchTap(int16_t x, int16_t y) {
-  clearConfirm();
-  // 软键栏
+  // 1. 命中解析：软键下标（S4 软键 0=返回）或 S4 行（hitIdx=行下标+1, hitRow=true）；
+  //    内容区命中保持 hitIdx=-1（永不匹配布防 → 取消）。
+  int hitIdx = -1;
+  bool hitRow = false;
   if (y >= geom::kSoftKeyY && y <= geom::kSoftKeyY + geom::kSoftKeyH) {
     const size_t n = softKeyCount();
     if (n > 0) {
@@ -491,11 +468,45 @@ void PanelApp::onTouchTap(int16_t x, int16_t y) {
       int idx = (x - geom::kContentX) / (kw + gap);
       if (idx < 0) idx = 0;
       if (idx >= static_cast<int>(n)) idx = static_cast<int>(n) - 1;
-      if (page_ == Page::Settings) {
-        back();  // S4 软键只有"返回"
-      } else {
-        activateSoftKey(static_cast<size_t>(idx));
-      }
+      hitIdx = idx;
+    }
+  } else if (page_ == Page::Settings) {
+    const int16_t rowsY = geom::kContentTop + 64;
+    if (y >= rowsY && y < rowsY + 8 * 56) {
+      hitRow = true;
+      hitIdx = static_cast<int>((y - rowsY) / 56) + 1;
+    }
+  }
+
+  // 2. 二次确认：布防状态下命中同一控件 = 执行；过期或其他命中 = 取消后正常分发
+  //    （与 onButtonShort 的语义一致，触控/按键同契约）。
+  if (confirm_ != ConfirmKind::None) {
+    if (nowMs() > confirmDeadlineMs_) {
+      clearConfirm();
+    } else if (confirmTargetMatches(confirm_, page_, hitIdx, hitRow)) {
+      executeArmedConfirm();
+      return;
+    } else {
+      clearConfirm();
+    }
+  }
+
+  // 3. 正常分发
+  if (hitIdx >= 0 && !hitRow) {  // 软键栏
+    if (page_ == Page::Settings) {
+      back();  // S4 软键只有"返回"
+    } else {
+      activateSoftKey(static_cast<size_t>(hitIdx));
+    }
+    return;
+  }
+  if (hitRow) {  // S4 设置行
+    const size_t row = static_cast<size_t>(hitIdx - 1);
+    if (row == focus_) {
+      activateSoftKey(static_cast<size_t>(hitIdx));
+    } else {
+      focus_ = row;
+      markDirty();
     }
     return;
   }
@@ -516,19 +527,6 @@ void PanelApp::onTouchTap(int16_t x, int16_t y) {
           focus_ = row;
           detailId_ = vis[tablePage_ * geom::kRowsPerPage + row]->id;
           gotoPage(Page::Detail);
-        }
-      }
-      break;
-    }
-    case Page::Settings: {
-      const int16_t rowsY = geom::kContentTop + 64;
-      if (y >= rowsY && y < rowsY + 8 * 56) {
-        const size_t row = static_cast<size_t>((y - rowsY) / 56);
-        if (row == focus_) {
-          activateSoftKey(row + 1);
-        } else {
-          focus_ = row;
-          markDirty();
         }
       }
       break;
@@ -667,6 +665,35 @@ void PanelApp::activateSettingRow(size_t row) {
   }
 }
 
+void PanelApp::executeArmedConfirm() {
+  switch (confirm_) {
+    case ConfirmKind::AckAll:
+      doAckAll();
+      break;
+    case ConfirmKind::Mute: {
+      const alert_core::AlertRecord* rec = findRecord(detailId_);
+      if (rec != nullptr) {
+        doMute(*rec);
+      } else {
+        showBanner(tr(Str::ActionFailed), 3000);
+      }
+      break;
+    }
+    case ConfirmKind::Clear:
+      doClear(detailId_);
+      break;
+    case ConfirmKind::ClearMutes:
+      prefs_.clearMutes();
+      prefs_.save();
+      showBanner(tr(Str::DoneClear), 3000);
+      markDirty();
+      break;
+    default:
+      break;
+  }
+  clearConfirm();
+}
+
 void PanelApp::armConfirm(ConfirmKind kind) {
   confirm_ = kind;
   confirmDeadlineMs_ = nowMs() + kConfirmWindowMs;
@@ -743,7 +770,14 @@ void PanelApp::batteryFsm(int64_t now) {
       if (wifiState_.load() == 2 /*Connected*/ || now > pollDeadlineMs_) {
         ESP_LOGI(TAG, "battery poll cycle: poll all sources");
         NetStack::instance().pollNow("");
-        NetStack::instance().waitIdle(30000);
+        // 显式处理静默等待超时：记录并重试一轮；仍超时只影响本轮数据新鲜度，
+        // 下周期重试（不在此断电任何硬件）
+        if (!NetStack::instance().waitIdle(30000)) {
+          ESP_LOGW(TAG, "battery poll: waitIdle timeout, retrying once");
+          if (!NetStack::instance().waitIdle(10000)) {
+            ESP_LOGW(TAG, "battery poll: net still not idle, serving with current data");
+          }
+        }
         battPhase_ = BattPhase::Serving;
         awakeDeadlineMs_ = now + kAwakeWindowMs;
         markDirty(true);
@@ -764,11 +798,23 @@ void PanelApp::batteryFsm(int64_t now) {
 
 void PanelApp::enterSleep(int64_t now) {
   ESP_LOGI(TAG, "battery: entering deep sleep");
-  // 1. 网络静默 + WiFi 断电（安全休眠前提）
-  NetStack::instance().waitIdle(10000);
+  // 实际睡眠时长 = 轮询周期剩余（不是完整周期），先算好供休眠画面与唤醒定时共用
+  int64_t sleepMs = cycleStartMs_ + static_cast<int64_t>(prefs_.batteryPollS()) * 1000 - now;
+  if (sleepMs < 10000) sleepMs = 10000;  // 防高频醒睡循环
+
+  // 1. 网络静默（显式处理超时：重试一轮；仍超时则中止本次休眠回 Serving，
+  //    30s 后重试——绝不带在途 HTTP 传输断电 WiFi）
+  if (!NetStack::instance().waitIdle(10000) &&
+      !NetStack::instance().waitIdle(5000)) {
+    ESP_LOGW(TAG, "battery: net not idle after retries, sleep aborted this round");
+    battPhase_ = BattPhase::Serving;
+    awakeDeadlineMs_ = now + 30000;
+    markDirty();
+    return;
+  }
   NetStack::instance().wifi().powerOff();
 
-  // 2. 休眠画面（Full 刷新；e-ink 断电保持图像）
+  // 2. 休眠画面（Full 刷新；e-ink 断电保持图像；唤醒时刻 = now + 实际睡眠时长）
   if (deps_.boot.displayReady && deps_.canvas != nullptr) {
     eego::PortraitCanvas& c = *deps_.canvas;
     c.clear();
@@ -776,7 +822,7 @@ void PanelApp::enterSleep(int64_t now) {
     eego::FontManager::instance().drawTextGray(c, 76, 320, tr(Str::Sleeping), 2, 0);
     eego::FontManager::instance().drawTextGray(c, 76, 360, tr(Str::WakeHint), 1, 6);
     char wake[48];
-    const uint64_t wakeTs = nowUnix() + static_cast<uint64_t>(prefs_.batteryPollS());
+    const uint64_t wakeTs = nowUnix() + static_cast<uint64_t>(sleepMs / 1000);
     struct tm tm_buf;
     time_t t = static_cast<time_t>(wakeTs);
     gmtime_r(&t, &tm_buf);
@@ -792,9 +838,7 @@ void PanelApp::enterSleep(int64_t now) {
   gpio_hold_en(static_cast<gpio_num_t>(eego::POWER_LATCH));
   gpio_deep_sleep_hold_en();
 
-  // 4. 唤醒源：定时（剩余轮询周期）+ 电源键 EXT0（GPIO8 active-high）
-  int64_t sleepMs = cycleStartMs_ + static_cast<int64_t>(prefs_.batteryPollS()) * 1000 - now;
-  if (sleepMs < 10000) sleepMs = 10000;  // 防高频醒睡循环
+  // 4. 唤醒源：定时（实际睡眠时长）+ 电源键 EXT0（GPIO8 active-high）
   esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(sleepMs) * 1000ULL);
   esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(eego::BUTTON_POWER), 1);
 
@@ -885,8 +929,13 @@ void PanelApp::formatTs(uint64_t ts, char* out, size_t cap) const {
 }
 
 void PanelApp::formatAge(uint64_t ts, char* out, size_t cap) {
+  if (ts == 0) {
+    // 从未发生（如源从未成功）：如实显示"从未"，而不是"刚刚"
+    snprintf(out, cap, "%s", tr(Str::Never));
+    return;
+  }
   const uint64_t now = nowUnix();
-  if (ts == 0 || now <= ts) {
+  if (now <= ts) {
     snprintf(out, cap, "%s", tr(Str::AgeNow));
     return;
   }
@@ -1139,8 +1188,10 @@ void PanelApp::buildS2(S2Model& m) {
   m.muted = prefs_.isMuted(rec->fingerprint);
 
   char buf[40];
-  auto addMeta = [&m](Str label, const std::string& value) {
-    m.meta.emplace_back(tr(label), value);
+  // meta 值与 title/message 同为不可信字段（ack_by 来自 API 客户端），统一钳制
+  auto addMeta = [&m](Str label, std::string value) {
+    sanitizeClamped(value, 80);
+    m.meta.emplace_back(tr(label), std::move(value));
   };
   addMeta(Str::LblType, rec->type);
   addMeta(Str::LblSource, rec->source.id + "/" + rec->source.kind);

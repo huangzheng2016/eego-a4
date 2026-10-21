@@ -35,34 +35,14 @@
 #include "eego_ui.h"
 #include "net_stack/source_health.h"
 #include "panel_render.h"
+#include "panel_types.h"
 #include "ui_text.h"
 
 namespace panel {
 
-enum class Page : uint8_t {
-  Overview = 0,
-  Table,
-  Detail,
-  Status,
-  Settings,
-  Provision,
-};
-
-// 二次确认状态（5s 窗口内再次激活才执行；任何其他输入取消）。
-enum class ConfirmKind : uint8_t {
-  None = 0,
-  AckAll,
-  Mute,
-  Clear,
-  ClearMutes,
-};
-
-// 电池模式阶段机。
-enum class BattPhase : uint8_t {
-  Mains = 0,  // 非常供电模式（FSM 不动作）
-  Polling,    // 重连 + 等待连接/超时 → 触发全源轮询
-  Serving,    // 交互窗口（输入延长，到点休眠）
-};
+// 二次确认状态机契约：危险/批量动作（全部确认/静音/清除/清静音）首次激活
+// 布防（5s 窗口），同一控件的再次激活执行（按键 = 电源键；触控 = 同一软键/
+// 同一行，判定见 panel_types.h::confirmTargetMatches），任何其他输入取消。
 
 class PanelApp {
  public:
@@ -134,6 +114,7 @@ class PanelApp {
   void doMute(const alert_core::AlertRecord& rec);
   void doPollNow();
   void armConfirm(ConfirmKind kind);
+  void executeArmedConfirm();  // 执行当前布防动作并清除布防（按键/触控共用）
   void clearConfirm();
   void showBanner(const char* text, uint32_t ms);
   void showBannerFmt(uint32_t ms, const char* fmt, ...)
@@ -143,7 +124,9 @@ class PanelApp {
   bool computeMains();            // 依 prefs + 充电状态 + 电池读数
   void onModeChange(bool mains);
   void batteryFsm(int64_t nowMs);
-  void enterSleep(int64_t nowMs) __attribute__((noreturn));
+  // 安全深睡：waitIdle 超时重试一轮仍不静默则中止本次休眠（回 Serving 稍后
+  // 重试），绝不带在途传输断电 WiFi；成功路径 esp_deep_sleep_start() 不返回。
+  void enterSleep(int64_t nowMs);
 
   // ---- 渲染 ----
   void markDirty(bool forceFull = false) {
