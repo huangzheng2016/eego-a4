@@ -88,7 +88,6 @@ void PanelApp::begin(const Deps& deps) {
   lastBatMs_ = nowMs();
   lastChargeMs_ = lastBatMs_;
   lastInputMs_ = lastBatMs_;
-  lastDataRefreshMs_ = lastBatMs_;
   lastFullRenderMs_ = lastBatMs_;
 
   mains_ = computeMains();
@@ -138,9 +137,14 @@ void PanelApp::applySettings(uint32_t changed) {
                                    : 0);
     }
   }
-  if ((changed & eego::settings::kChangedRefresh) != 0) {
-    lastDataRefreshMs_ = nowMs();
-    lastFullRenderMs_ = lastDataRefreshMs_;
+  if ((changed & eego::settings::kChangedDataRefresh) != 0) {
+    const uint32_t interval_ms = settings_.data_refresh_s * 1000;
+    if (!NetStack::instance().setDataRefreshInterval(interval_ms)) {
+      ESP_LOGW(TAG, "data refresh scheduler unavailable");
+    }
+  }
+  if ((changed & eego::settings::kChangedEpdRefresh) != 0) {
+    lastFullRenderMs_ = nowMs();
   }
   if ((changed & eego::settings::kChangedSleep) != 0) {
     lastScheduleCheckMs_ = nowMs() - 1001;
@@ -268,12 +272,6 @@ void PanelApp::service() {
   if (wantMains != mains_) onModeChange(wantMains);
   dashboard_.service(mains_);
   if (page_ == Page::Dashboard && dashboard_.consumeExitRequest()) gotoPage(Page::Overview);
-
-  if (mains_ && settings_.data_refresh_s > 0 &&
-      now - lastDataRefreshMs_ >= static_cast<int64_t>(settings_.data_refresh_s) * 1000) {
-    NetStack::instance().pollNow("");
-    lastDataRefreshMs_ = now;
-  }
 
   if (now - lastScheduleCheckMs_ > 1000) {
     lastScheduleCheckMs_ = now;
@@ -966,14 +964,17 @@ void PanelApp::doWifiReset() {
 }
 
 void PanelApp::doFactoryReset() {
-  eego::FrontlightManager::instance().off();
   admin::AdminCommand cmd;
   cmd.type = admin::AdminCommandType::FactoryReset;
   cmd.delay_ms = 3000;
   admin::AdminResult result;
   admin::defaultCommandHandler(cmd, result, nullptr);
-  if (result.ok) showBanner(tr(Str::FactoryResetDone), 3000);
-  else showBannerFmt(5000, "%s: %s", tr(Str::ActionFailed), result.err.c_str());
+  if (result.ok) {
+    eego::FrontlightManager::instance().off();
+    showBanner(tr(Str::FactoryResetDone), 3000);
+  } else {
+    showBannerFmt(5000, "%s: %s", tr(Str::ActionFailed), result.err.c_str());
+  }
   markDirty(true);
 }
 

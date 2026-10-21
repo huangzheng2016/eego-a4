@@ -1005,6 +1005,7 @@ esp_err_t h_config_put(httpd_req_t* req) {
   }
 
   uint32_t mask = 0;
+  alert_core::JsonValue displayPatch;
   {
     alert_core::JsonValue patch;
     alert_core::JsonParseError perr;
@@ -1014,6 +1015,7 @@ esp_err_t h_config_put(httpd_req_t* req) {
       if (const alert_core::JsonValue* admin = patch.find("admin");
           admin != nullptr && admin->find("display") != nullptr) {
         mask |= AdminCommand::kChangedAdminDisplay;
+        displayPatch = *admin->find("display");
       }
       if (patch.find("sources") != nullptr) mask |= AdminCommand::kChangedSources;
       if (patch.find("alert_type_overrides") != nullptr) {
@@ -1022,10 +1024,15 @@ esp_err_t h_config_put(httpd_req_t* req) {
       if (patch.find("mute_rules") != nullptr) mask |= AdminCommand::kChangedMuteRules;
     }
   }
+  validateLegacyDisplayCapability(displayPatch, errs);
+  if (!errs.empty()) {
+    return sendError(req, 400, errc::kValidationFailed, "config validation failed", &errs);
+  }
 
   AdminCommand cmd;
   cmd.type = AdminCommandType::ApplyConfig;
   cmd.config = std::move(merged);
+  cmd.display_patch = displayPatch;
   cmd.changed_sections = mask;
   AdminResult res;
   if (!runCommand(req, cmd, res)) return ESP_OK;

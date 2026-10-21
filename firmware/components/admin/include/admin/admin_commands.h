@@ -38,6 +38,8 @@ struct AdminCommand {
 
   // ApplyConfig：校验合并后的完整 DOM。
   alert_core::JsonValue config;
+  // ApplyConfig：原始 admin.display patch（仅显示节；用于精确能力校验与迁移）。
+  alert_core::JsonValue display_patch;
 
   // ApplySettings：httpd 已预校验的 partial typed patch；执行时基于最新快照重验。
   alert_core::JsonValue settings_patch;

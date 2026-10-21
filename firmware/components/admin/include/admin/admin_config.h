@@ -37,6 +37,11 @@ struct FieldError {
 };
 using FieldErrors = std::vector<FieldError>;
 
+// Appends field errors only for actual legacy frontlight changes while the
+// hardware is unavailable. display_patch contains only the submitted section.
+void validateLegacyDisplayCapability(const alert_core::JsonValue& display_patch,
+                                     FieldErrors& errors);
+
 // admin 域强类型视图（M13 §3）。
 struct AdminDomainConfig {
   bool auto_ap_fallback = false;

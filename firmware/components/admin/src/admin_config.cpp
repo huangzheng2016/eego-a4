@@ -11,6 +11,7 @@
 
 #include "admin/admin_log.h"
 #include "alert_core/types.h"
+#include "device_settings/device_settings.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -652,6 +653,15 @@ bool validateLoadedDom(const alert_core::JsonValue& dom, FieldErrors& errs) {
 }
 
 }  // namespace
+
+void validateLegacyDisplayCapability(const alert_core::JsonValue& display_patch,
+                                     FieldErrors& errors) {
+  const settings::Snapshot snap = settings::DeviceSettings::instance().snapshot();
+  settings::FieldErrors capability_errors;
+  settings::validateLegacyDisplayCapability(display_patch, snap.values,
+                                            snap.capabilities.frontlight, capability_errors);
+  for (const auto& error : capability_errors) errors.push_back({error.field, error.message});
+}
 
 // ===========================================================================
 // ConfigStore

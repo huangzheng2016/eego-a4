@@ -205,9 +205,8 @@ uint32_t changedFields(const Settings& a, const Settings& b) {
       a.frontlight_warmth != b.frontlight_warmth) {
     changed |= kChangedFrontlight;
   }
-  if (a.data_refresh_s != b.data_refresh_s || a.epd_full_refresh_s != b.epd_full_refresh_s) {
-    changed |= kChangedRefresh;
-  }
+  if (a.data_refresh_s != b.data_refresh_s) changed |= kChangedDataRefresh;
+  if (a.epd_full_refresh_s != b.epd_full_refresh_s) changed |= kChangedEpdRefresh;
   if (a.idle_sleep_s != b.idle_sleep_s || a.sleep_start_min != b.sleep_start_min ||
       a.sleep_end_min != b.sleep_end_min) {
     changed |= kChangedSleep;
@@ -228,6 +227,20 @@ void applyLegacyDisplay(const JsonValue& display, Settings& settings) {
   if (const JsonValue* value = display.find("warmth");
       value != nullptr && isInt(*value) && value->intValue() >= 0 && value->intValue() <= 100) {
     settings.frontlight_warmth = static_cast<uint8_t>(value->intValue());
+  }
+}
+
+void validateLegacyDisplayCapability(const JsonValue& display_patch, const Settings& current,
+                                     bool frontlight_available, FieldErrors& errors) {
+  if (frontlight_available || display_patch.type() != JsonValue::Type::Object) return;
+  const int current_brightness = current.frontlight_enabled ? current.frontlight_brightness : 0;
+  if (const JsonValue* value = display_patch.find("brightness");
+      value != nullptr && isInt(*value) && value->intValue() != current_brightness) {
+    addError(errors, "admin.display.brightness", "frontlight hardware is unavailable");
+  }
+  if (const JsonValue* value = display_patch.find("warmth");
+      value != nullptr && isInt(*value) && value->intValue() != current.frontlight_warmth) {
+    addError(errors, "admin.display.warmth", "frontlight hardware is unavailable");
   }
 }
 

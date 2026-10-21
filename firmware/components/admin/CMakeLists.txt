@@ -22,6 +22,7 @@ idf_component_register(
         "src/admin_auth.cpp"
         "src/admin_config.cpp"
         "src/admin_commands.cpp"
+        "src/config_transaction.cpp"
         "src/admin_httpd.cpp"
         "src/admin_page.cpp"
         "src/dashboard_api.cpp"

@@ -205,7 +205,6 @@ class PanelApp {
   bool forceFull_ = true;
   int64_t lastRenderMs_ = -10000;
   int64_t lastFullRenderMs_ = 0;
-  int64_t lastDataRefreshMs_ = 0;
   int64_t lastScheduleCheckMs_ = -10000;
 
   // 电池/充电缓存

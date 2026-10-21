@@ -21,11 +21,13 @@ enum Change : uint32_t {
   kChangedLanguage = 1u << 0,
   kChangedPower = 1u << 1,
   kChangedFrontlight = 1u << 2,
-  kChangedRefresh = 1u << 3,
+  kChangedDataRefresh = 1u << 3,
   kChangedSleep = 1u << 4,
   kChangedTimezone = 1u << 5,
   kChangedDiagnostics = 1u << 6,
-  kChangedAll = (1u << 7) - 1,
+  kChangedEpdRefresh = 1u << 7,
+  kChangedRefresh = kChangedDataRefresh | kChangedEpdRefresh,
+  kChangedAll = (1u << 8) - 1,
 };
 
 struct Settings {
@@ -66,6 +68,9 @@ uint32_t changedFields(const Settings& before, const Settings& after);
 // One-way migration/legacy write path for admin.display. Brightness zero means
 // disabled; a nonzero legacy brightness preserves the old power-on behavior.
 void applyLegacyDisplay(const alert_core::JsonValue& display, Settings& settings);
+void validateLegacyDisplayCapability(const alert_core::JsonValue& display_patch,
+                                     const Settings& current, bool frontlight_available,
+                                     FieldErrors& errors);
 
 // Daily local-time deep-sleep window, including overnight windows. A disabled
 // schedule or invalid `now_unix` returns false. The wake timestamp is exact

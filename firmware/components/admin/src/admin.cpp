@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "admin_internal.h"
+#include "config_transaction.h"
 #include "device_settings/device_settings.h"
 #include "esp_timer.h"
 #include "net_stack/credentials.h"
@@ -66,43 +67,90 @@ bool removeFactoryConfigs() {
   return ok;
 }
 
-// sources 热生效（sources_changed 时调用；net_task 线程安全 API）。
-// v1 语义：全量替换——移除所有现存源，按配置重新 addSource。
-void syncSources(const std::vector<net::SourceConfig>& desired) {
+bool syncSources(const std::vector<net::SourceConfig>& desired, std::string& error) {
   net::NetStack& ns = net::NetStack::instance();
   if (!ns.running()) {
-    ADMIN_LOG_WARN("sources sync skipped: net_task not running");
-    return;
+    error = "net_task is unavailable";
+    return false;
   }
   net::NetStatusSnapshot snap;
-  if (ns.queryStatus(snap)) {
-    for (const auto& h : snap.sources) {
-      ns.removeSource(h.id);
+  if (!ns.queryStatus(snap)) {
+    error = "cannot query current sources";
+    return false;
+  }
+  for (const auto& health : snap.sources) {
+    if (!ns.removeSource(health.id)) {
+      error = "failed to remove existing source: " + health.id;
+      return false;
     }
   }
-  for (const auto& cfg : desired) {
-    std::string err;
-    if (!ns.addSource(cfg, err)) {
-      ADMIN_LOG_ERROR("source add failed: id=%s (%s)", cfg.id.c_str(), err.c_str());
+  for (const auto& config : desired) {
+    std::string detail;
+    if (!ns.addSource(config, detail)) {
+      error = "failed to add source " + config.id + ": " + detail;
+      return false;
     }
   }
-  ADMIN_LOG_INFO("sources synced: %u source(s)", static_cast<unsigned>(desired.size()));
+  return true;
 }
 
-// mute_rules 热生效（M21；net_task 线程安全 API，全量替换语义与 store 一致）。
-// net_task 未运行时跳过（规则已在 config.json，下次启动恢复，M21 组合根保证）。
-void syncMuteRules(const std::vector<alert_core::MuteRule>& rules) {
+bool syncMuteRules(const std::vector<alert_core::MuteRule>& rules, std::string& error) {
   net::NetStack& ns = net::NetStack::instance();
   if (!ns.running()) {
-    ADMIN_LOG_WARN("mute rules sync skipped: net_task not running");
-    return;
+    error = "net_task is unavailable";
+    return false;
   }
-  std::string err;
-  if (!ns.setMuteRules(rules, err)) {
-    ADMIN_LOG_ERROR("mute rules sync failed: %s", err.c_str());
-    return;
+  return ns.setMuteRules(rules, error);
+}
+
+struct RuntimeConfig {
+  AdminDomainConfig admin;
+  alert_core::JsonValue overrides = alert_core::JsonValue::makeObject({});
+  std::vector<net::SourceConfig> sources;
+  std::vector<alert_core::MuteRule> mute_rules;
+};
+
+RuntimeConfig captureRuntime(ConfigStore& store, const alert_core::JsonValue& dom) {
+  RuntimeConfig out;
+  out.admin = store.admin();
+  if (const alert_core::JsonValue* overrides = dom.find("alert_type_overrides")) {
+    out.overrides = *overrides;
   }
-  ADMIN_LOG_INFO("mute rules synced: %u rule(s)", static_cast<unsigned>(rules.size()));
+  out.sources = store.sources();
+  out.mute_rules = store.muteRules();
+  return out;
+}
+
+bool applyRuntime(const RuntimeConfig& config, uint32_t sections, std::string& error) {
+  if ((sections & AdminCommand::kChangedAdmin) != 0) {
+    AuthManager::instance().setSessionTtl(config.admin.session_ttl_s);
+    AuthManager::instance().setLockThreshold(config.admin.login_lock_threshold);
+    LogLevel level;
+    if (logLevelFromString(config.admin.log_level, level)) {
+      AdminLog::instance().setMinLevel(level);
+    }
+  }
+  if ((sections & AdminCommand::kChangedOverrides) != 0) {
+    if (g_registry == nullptr) {
+      error = "alert type registry is unavailable";
+      return false;
+    }
+    g_registry->clearOverrides();
+    alert_core::ValidationError detail;
+    if (!g_registry->applyOverridesJson(config.overrides, detail)) {
+      error = "type overrides apply failed: " + detail.field + "." + detail.message;
+      return false;
+    }
+  }
+  if ((sections & AdminCommand::kChangedSources) != 0 &&
+      !syncSources(config.sources, error)) {
+    return false;
+  }
+  if ((sections & AdminCommand::kChangedMuteRules) != 0 &&
+      !syncMuteRules(config.mute_rules, error)) {
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -144,63 +192,81 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
 
   switch (cmd.type) {
     case AdminCommandType::ApplyConfig: {
-      std::string err;
-      if (!store.commit(cmd.config, err)) {
+      FieldErrors capability_errors;
+      validateLegacyDisplayCapability(cmd.display_patch, capability_errors);
+      if (!capability_errors.empty()) {
         res.ok = false;
-        res.err = err;
+        res.err = capability_errors.front().field + ": " + capability_errors.front().message;
         return;
       }
-      if (cmd.changed_sections & AdminCommand::kChangedAdmin) {
-        const AdminDomainConfig admin = store.admin();
-        AuthManager::instance().setSessionTtl(admin.session_ttl_s);
-        AuthManager::instance().setLockThreshold(admin.login_lock_threshold);
-        LogLevel lv;
-        if (logLevelFromString(admin.log_level, lv)) AdminLog::instance().setMinLevel(lv);
-        ADMIN_LOG_INFO("config applied: admin");
+      if ((cmd.changed_sections & AdminCommand::kChangedOverrides) != 0 && g_registry == nullptr) {
+        res.ok = false;
+        res.err = "alert type registry is unavailable";
+        return;
       }
-      // Legacy admin.display writes use the same DeviceSettings validator and
-      // subscription path as typed settings. Other admin-only writes do not
-      // reapply a possibly stale legacy display mirror.
-      if (cmd.changed_sections & AdminCommand::kChangedAdminDisplay) {
-        const alert_core::JsonValue* admin = cmd.config.find("admin");
-        const alert_core::JsonValue* display = admin != nullptr ? admin->find("display") : nullptr;
-        if (display != nullptr) {
-          const settings::Snapshot snap = settings::DeviceSettings::instance().snapshot();
-          settings::Settings candidate = snap.values;
-          settings::applyLegacyDisplay(*display, candidate);
-          if ((settings::changedFields(snap.values, candidate) & settings::kChangedFrontlight) != 0) {
-            if (!snap.capabilities.frontlight) {
-              ADMIN_LOG_WARN("legacy display ignored: frontlight unavailable");
-            } else {
-              uint32_t changed = 0;
-              if (!settings::DeviceSettings::instance().update(candidate, &changed, err)) {
-                res.ok = false;
-                res.err = err;
-                return;
-              }
-            }
-          }
+      if ((cmd.changed_sections & (AdminCommand::kChangedSources |
+                                   AdminCommand::kChangedMuteRules)) != 0) {
+        net::NetStack& net = net::NetStack::instance();
+        net::NetStatusSnapshot status;
+        if (!net.running() ||
+            ((cmd.changed_sections & AdminCommand::kChangedSources) != 0 &&
+             !net.queryStatus(status))) {
+          res.ok = false;
+          res.err = "net_task is unavailable; config was not committed";
+          return;
         }
       }
-      if ((cmd.changed_sections & AdminCommand::kChangedOverrides) && g_registry != nullptr) {
-        g_registry->clearOverrides();
-        const alert_core::JsonValue* ov = cmd.config.find("alert_type_overrides");
-        alert_core::ValidationError verr;
-        if (ov != nullptr && !g_registry->applyOverridesJson(*ov, verr)) {
-          ADMIN_LOG_ERROR("type overrides apply failed: %s.%s", verr.field.c_str(),
-                          verr.message.c_str());
-        }
-        ADMIN_LOG_INFO("config applied: alert_type_overrides");
+
+      const alert_core::JsonValue previous_dom = store.rawDom();
+      const RuntimeConfig previous_runtime = captureRuntime(store, previous_dom);
+      const settings::Snapshot previous_settings =
+          settings::DeviceSettings::instance().snapshot();
+      settings::Settings desired_settings = previous_settings.values;
+      if ((cmd.changed_sections & AdminCommand::kChangedAdminDisplay) != 0) {
+        settings::applyLegacyDisplay(cmd.display_patch, desired_settings);
       }
-      if (cmd.changed_sections & AdminCommand::kChangedSources) {
-        syncSources(store.sources());
-        ADMIN_LOG_INFO("config applied: sources");
+      settings::FieldErrors validation;
+      settings::validate(desired_settings, validation);
+      if (!validation.empty()) {
+        res.ok = false;
+        res.err = validation.front().field + ": " + validation.front().message;
+        return;
       }
-      if (cmd.changed_sections & AdminCommand::kChangedMuteRules) {
-        syncMuteRules(store.muteRules());
-        ADMIN_LOG_INFO("config applied: mute_rules");
+      const bool settings_changed =
+          settings::changedFields(previous_settings.values, desired_settings) != 0;
+
+      internal::ConfigTransactionHooks hooks;
+      hooks.commit_config = [&](std::string& error) { return store.commit(cmd.config, error); };
+      hooks.apply_settings = [&](std::string& error) {
+        if (!settings_changed) return true;
+        uint32_t changed = 0;
+        return settings::DeviceSettings::instance().update(desired_settings, &changed, error);
+      };
+      hooks.apply_runtime = [&](std::string& error) {
+        const RuntimeConfig desired = captureRuntime(store, cmd.config);
+        return applyRuntime(desired, cmd.changed_sections, error);
+      };
+      hooks.rollback_config = [&](std::string& error) {
+        return store.commit(previous_dom, error);
+      };
+      hooks.rollback_settings = [&](std::string& error) {
+        if (!settings_changed) return true;
+        uint32_t changed = 0;
+        return settings::DeviceSettings::instance().update(previous_settings.values, &changed,
+                                                            error);
+      };
+      hooks.rollback_runtime = [&](std::string& error) {
+        return applyRuntime(previous_runtime, cmd.changed_sections, error);
+      };
+
+      std::string error;
+      res.ok = internal::runConfigTransaction(hooks, error);
+      res.err = error;
+      if (!res.ok) {
+        ADMIN_LOG_ERROR("config transaction failed: %s", error.c_str());
+        return;
       }
-      res.ok = true;
+      ADMIN_LOG_INFO("config transaction applied");
       return;
     }
 
@@ -322,6 +388,11 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
     }
 
     case AdminCommandType::FactoryReset: {
+      if (!::eego::SdCard::instance().ready()) {
+        res.ok = false;
+        res.err = "factory reset incomplete: SD unavailable; persistent state unchanged";
+        return;
+      }
       ADMIN_LOG_WARN("factory reset executing");
       net::NetStack::instance().stop();
       bool ok = true;
@@ -336,17 +407,17 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
         ok = false;
       }
       AuthManager::instance().revokeAllSessions();
-      if (::eego::SdCard::instance().ready() && !removeFactoryConfigs()) {
+      if (!removeFactoryConfigs()) {
         ADMIN_LOG_ERROR("factory reset: config file removal incomplete");
         ok = false;
       }
-      scheduleReboot(cmd.delay_ms > 0 ? cmd.delay_ms : 2000);
       if (!ok) {
         res.ok = false;
-        res.err = "factory reset incomplete; rebooting for recovery";
+        res.err = "factory reset incomplete; recovery required; reboot not scheduled";
         return;
       }
       res.ok = true;
+      scheduleReboot(cmd.delay_ms > 0 ? cmd.delay_ms : 2000);
       return;
     }
 
