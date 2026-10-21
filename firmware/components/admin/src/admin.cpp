@@ -186,6 +186,27 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       return;
     }
 
+    case AdminCommandType::ApplyDashboard: {
+      if (cmd.dashboard == nullptr) {
+        res.err = "missing dashboard candidate";
+        return;
+      }
+      bool conflict = false;
+      res.ok = DashboardStore::instance().commit(
+          *cmd.dashboard, cmd.dashboard_check_revision, cmd.dashboard_expected_revision,
+          res.err, conflict);
+      res.conflict = conflict;
+      return;
+    }
+
+    case AdminCommandType::DeleteDashboard: {
+      bool conflict = false;
+      res.ok = DashboardStore::instance().erase(
+          cmd.dashboard_check_revision, cmd.dashboard_expected_revision, res.err, conflict);
+      res.conflict = conflict;
+      return;
+    }
+
     case AdminCommandType::ApplyWifi: {
       // NVS 为密码权威（M13 §4）；config wifi_list 仅 ssid+pass_ref 展示引用。
       std::vector<net::WifiAccount> accounts;

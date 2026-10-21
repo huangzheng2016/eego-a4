@@ -12,8 +12,9 @@
 #   * 告警读取 → SnapshotPublisher 无锁快照（M20 接线后可用）；
 #   * 告警确认/清除 → AlertActionSink 注入点（M20 接线后可用）。
 #
-# 依赖方向：admin → {alert_core, net_stack, eego_hal} + ESP-IDF 系统组件；
-# 不得 include 任何 UI 头。首版无任何 /firmware/* 或远程 OTA 端点（M13 T7）。
+# 依赖方向：admin → {alert_core, dashboard_core, data_pipeline, net_stack, eego_hal}
+# + ESP-IDF 系统组件；不得 include 任何 UI 头。dashboard 配置复用 M23/M25 的
+# 声明式 schema/解析器，不引入脚本运行时。无任何 /firmware/* 或远程 OTA 端点。
 idf_component_register(
     SRCS
         "src/admin.cpp"
@@ -23,11 +24,16 @@ idf_component_register(
         "src/admin_commands.cpp"
         "src/admin_httpd.cpp"
         "src/admin_page.cpp"
+        "src/dashboard_api.cpp"
+        "src/dashboard_config.cpp"
+        "src/dashboard_page.cpp"
         "src/provision_portal.cpp"
         "src/portal_page.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
         alert_core
+        dashboard_core
+        data_pipeline
         net_stack
         eego_hal
         esp_http_server

@@ -14,9 +14,11 @@
 // httpd 侧：admin::enqueueAdminCommand(cmd, res, wait_ms) 入队并阻塞等结果。
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "alert_core/json.h"
+#include "admin/dashboard_config.h"
 
 namespace eego::admin {
 
@@ -25,6 +27,8 @@ enum class AdminCommandType : uint8_t {
   ApplyWifi,        // WiFi 账号变更（NVS 权威 + config wifi_list 同步 + 重连）
   FactoryReset,     // 清 NVS sec/wifi + 删 SD 配置目录 → 重启
   Reboot,           // delay_ms 后 esp_restart
+  ApplyDashboard,   // 完整 dashboard bundle：校验 + revision 检查 + 原子持久化
+  DeleteDashboard,  // 删除 dashboard；同样支持 revision 冲突检查
 };
 
 struct AdminCommand {
@@ -41,6 +45,11 @@ struct AdminCommand {
   static constexpr uint32_t kChangedMuteRules = 1u << 3;  // M21：静音规则热生效
   uint32_t changed_sections = 0;
 
+  // ApplyDashboard：不可变候选配置，默认处理器在 app_task 一次性提交。
+  std::shared_ptr<const DashboardDocument> dashboard;
+  bool dashboard_check_revision = false;
+  uint64_t dashboard_expected_revision = 0;
+
   // ApplyWifi：待写入/删除的账号（ssid + 明文密码，仅命令内存生命周期，
   // 绝不落日志/SD）；remove=true 时 password 忽略。
   std::string wifi_ssid;
@@ -53,7 +62,8 @@ struct AdminCommand {
 
 struct AdminResult {
   bool ok = false;
-  std::string err;  // 安全描述（不含 secrets）
+  bool conflict = false;  // dashboard revision 冲突；httpd 映射 409
+  std::string err;        // 安全描述（不含 secrets）
 };
 
 // 命令处理器：在 app_task 上下文执行（serviceCommands 调用栈）。
