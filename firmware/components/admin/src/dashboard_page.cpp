@@ -149,9 +149,9 @@ function formSource(parent){
  jsonArea(parent,tr('请求头（敏感值保持掩码；替换掩码即更新）','Headers (sensitive values stay masked; replace the mask to change)'),s.headers,function(v){s.headers=v;syncPlan(s);},'de-json',function(){return 'source:'+s.id+':headers';});
  var ps=section(parent,tr('查询与转换 SourcePlan（声明式，无脚本）','Query & transform SourcePlan (declarative, no scripts)'));var p=byId(plans(),'id',s.id);
  if(!p){button(ps,tr('添加 SourcePlan','Add SourcePlan'),function(){delete S.jsonBuffers['source:'+s.id+':plan'];plans().push(defaultPlan(s));dirty();render();},'sec');button(ps,tr('测试默认 Standard JSON','Test default Standard JSON'),function(){testSource(defaultPlan(s));},'sec');return;}
- jsonArea(ps,tr('response、JSONPath、metrics/events 映射、单位与安全表达式','response, JSONPath, metric/event mappings, units and safe expressions'),p,function(v){var i=plans().indexOf(p);if(i>=0)plans()[i]=v;syncPlan(s);},'de-plan',function(){return 'source:'+s.id+':plan';});
- button(ps,tr('测试并归一化预览','Test & normalized preview'),function(){testSource(p);},'');
- button(ps,tr('移除 SourcePlan（使用默认解析）','Remove SourcePlan (use default parser)'),function(){var i=plans().indexOf(p);if(i>=0)plans().splice(i,1);delete S.jsonBuffers['source:'+s.id+':plan'];dirty();render();},'danger');
+ jsonArea(ps,tr('response、JSONPath、metrics/events 映射、单位与安全表达式','response, JSONPath, metric/event mappings, units and safe expressions'),p,function(v){var current=byId(plans(),'id',s.id),i=plans().indexOf(current);if(i>=0)plans()[i]=v;syncPlan(s);},'de-plan',function(){return 'source:'+s.id+':plan';});
+ button(ps,tr('测试并归一化预览','Test & normalized preview'),function(){var current=byId(plans(),'id',s.id);if(current)testSource(current);},'');
+ button(ps,tr('移除 SourcePlan（使用默认解析）','Remove SourcePlan (use default parser)'),function(){var current=byId(plans(),'id',s.id),i=plans().indexOf(current);if(i>=0)plans().splice(i,1);delete S.jsonBuffers['source:'+s.id+':plan'];dirty();render();},'danger');
 }
 function formVariable(parent){
  var v=byId(dash().variables,'name',selected());if(!v){parent.textContent=tr('请先新建变量。','Create a variable first.');return;}v.options=v.options||[];var g=grid(parent);
