@@ -25,12 +25,15 @@ class SdCache {
   explicit SdCache(std::string directory, CacheLimits limits = {});
 
   bool appendHistory(const std::string& source_id, const std::vector<HistoryEntry>& entries,
-                     std::string& error);
+                     std::string& error, const std::string& generation = "");
   bool loadHistory(const std::string& source_id, std::vector<HistoryEntry>& out,
                    std::string& error) const;
 
-  bool writeSnapshot(const SourceResult& result, std::string& error);
+  bool writeSnapshot(const SourceResult& result, std::string& error,
+                     const std::string& generation = "");
   bool readSnapshot(const std::string& source_id, SourceResult& out, std::string& error) const;
+  bool clearSource(const std::string& source_id, std::string& error);
+  bool generationMatches(const std::string& source_id, const std::string& expected) const;
 
   const std::string& directory() const { return directory_; }
   const CacheLimits& limits() const { return limits_; }
@@ -39,6 +42,9 @@ class SdCache {
  private:
   std::string historyPath(const std::string& source_id) const;
   std::string snapshotPath(const std::string& source_id) const;
+  std::string generationPath(const std::string& source_id) const;
+  bool writeGeneration(const std::string& source_id, const std::string& generation,
+                       std::string& error);
   std::string imagePath(const std::string& source_id) const;
   std::string imageGenerationPath(const std::string& source_id,
                                   const std::string& generation) const;

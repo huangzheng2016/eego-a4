@@ -57,7 +57,8 @@ void printHelp() {
       "  smoke           - run self-check sequence\n"
       "  version         - firmware/chip/heap/framebuffer info\n"
       "  lang zh|en      - switch panel UI language\n"
-      "  page s0|s1|s2|s3|s4 - jump to screen (bench aid)\n");
+      "  page s0|s1|s2|s3|s4|dashboard - jump to screen (bench aid)\n"
+      "  dashboard <cmd> - status/vars/panels/refresh/inject/interval/smoke\n");
   fflush(stdout);
 }
 
@@ -109,6 +110,9 @@ void dispatch(char* line) {
     g_handlers.lang(arg);
   } else if (strcmp(verb, "page") == 0 && g_handlers.page) {
     g_handlers.page(arg);
+  } else if ((strcmp(verb, "dashboard") == 0 || strcmp(verb, "dash") == 0) &&
+             g_handlers.dashboard) {
+    g_handlers.dashboard(arg);
   } else {
     printf("ERR unknown cmd '%s', type help\n", verb);
   }

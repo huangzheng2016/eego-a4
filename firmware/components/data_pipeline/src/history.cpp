@@ -800,19 +800,58 @@ AggregationResult MetricHistory::aggregate(const std::string& source_id,
     }
     return aggregateHistoryEntries(selected, aggregation);
   }
+  return aggregate(source_id, metric, labels, resolved, aggregation);
+}
+
+AggregationResult MetricHistory::aggregate(const std::string& source_id,
+                                           const std::string& metric,
+                                           const std::vector<KeyValue>& labels,
+                                           const ResolvedWindow& window,
+                                           Aggregation aggregation) const {
+  return aggregate(source_id, metric, labels, window, aggregation, {});
+}
+
+AggregationResult MetricHistory::aggregate(const std::string& source_id,
+                                           const std::string& metric,
+                                           const std::vector<KeyValue>& labels,
+                                           const ResolvedWindow& window,
+                                           Aggregation aggregation,
+                                           const std::vector<MetricSample>& effective_samples) const {
   std::vector<MetricSample> selected;
   for (const auto& item : series_) {
     const Series& series = item.second;
     if (series.source_id != source_id || series.metric != metric ||
         !labelsMatch(series.labels, labels))
       continue;
-    if (series.raw_gap_before_ms > 0 && series.raw_gap_before_ms >= resolved.from_ms &&
-        series.raw_gap_before_ms <= resolved.to_ms) {
+    if (series.raw_gap_before_ms > 0 && series.raw_gap_before_ms >= window.from_ms &&
+        series.raw_gap_before_ms <= window.to_ms) {
       return incompleteAggregate();
     }
     for (const MetricSample& raw : series.raw_points) {
-      if (raw.timestamp_ms >= resolved.from_ms && raw.timestamp_ms <= resolved.to_ms)
+      if (raw.timestamp_ms >= window.from_ms && raw.timestamp_ms <= window.to_ms)
         selected.push_back(raw);
+    }
+  }
+  std::map<std::string, size_t> selected_indices;
+  auto sample_key = [](const MetricSample& sample) {
+    return keyFor(sample) + "\n" + std::to_string(sample.timestamp_ms);
+  };
+  for (size_t i = 0; i < selected.size(); ++i) selected_indices[sample_key(selected[i])] = i;
+  for (const MetricSample& sample : effective_samples) {
+    if (sample.source_id != source_id || sample.metric != metric ||
+        !labelsMatch(sample.labels, labels) || sample.timestamp_ms < window.from_ms ||
+        sample.timestamp_ms > window.to_ms) {
+      continue;
+    }
+    MetricSample effective = sample;
+    effective.labels = canonicalLabels(std::move(effective.labels));
+    const std::string key = sample_key(effective);
+    const auto existing = selected_indices.find(key);
+    if (existing == selected_indices.end()) {
+      selected_indices[key] = selected.size();
+      selected.push_back(std::move(effective));
+    } else {
+      selected[existing->second] = std::move(effective);
     }
   }
   return aggregateSamples(selected, aggregation);

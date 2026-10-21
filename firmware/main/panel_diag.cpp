@@ -33,6 +33,7 @@ const char* pageName(Page p) {
     case Page::Detail: return "s2-detail";
     case Page::Status: return "s3-status";
     case Page::Settings: return "s4-settings";
+    case Page::Dashboard: return "dashboard";
     default: return "provision";
   }
 }
@@ -239,6 +240,14 @@ void PanelApp::diagSmoke() {
          static_cast<unsigned>(mute_rules.size()));
   pass++;
 
+  if (dashboard_.available()) {
+    check(dashboard_.smoke(), "dashboard", "runtime checks complete");
+    dashboard_.invalidateAll();
+  } else {
+    printf("[WARN] dashboard: not configured; legacy alert UI active\n");
+    warn++;
+  }
+
   printf("smoke: pass=%d warn=%d fail=%d (output carries no secrets)\n", pass, warn, fail);
 }
 
@@ -291,12 +300,20 @@ void PanelApp::diagPage(const char* arg) {
     target = Page::Status;
   } else if (strcasecmp(arg, "s4") == 0) {
     target = Page::Settings;
+  } else if (strcasecmp(arg, "dashboard") == 0 || strcasecmp(arg, "dash") == 0) {
+    if (!dashboard_.available()) {
+      printf("ERR page dashboard: not loaded\n");
+      return;
+    }
+    target = Page::Dashboard;
   } else {
-    printf("ERR usage: page s0|s1|s2|s3|s4 (current=%s)\n", pageName(page_));
+    printf("ERR usage: page s0|s1|s2|s3|s4|dashboard (current=%s)\n", pageName(page_));
     return;
   }
   gotoPage(target);
   printf("page: -> %s\n", pageName(page_));
 }
+
+void PanelApp::diagDashboard(const char* arg) { dashboard_.diag(arg); }
 
 }  // namespace panel

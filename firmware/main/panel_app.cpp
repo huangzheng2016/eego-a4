@@ -42,6 +42,7 @@ constexpr uint32_t kNetBitSource = 1u << 1;
 // 电源/电池常量
 constexpr uint32_t kAwakeWindowMs = 90000;   // 电池模式交互窗口（输入可延长）
 constexpr uint32_t kPollWaitMs = 45000;      // 电池模式等 WiFi 上限
+constexpr uint32_t kDashboardPollWaitMs = 130000;  // 数据源 120s 超时 + 队列余量
 constexpr uint32_t kRenderThrottleMs = 250;  // 渲染最小间隔（e-ink 节奏）
 constexpr uint32_t kClockRenderMs = 30000;   // 状态栏时钟节奏
 constexpr uint32_t kConfirmWindowMs = 5000;  // 二次确认窗口
@@ -95,6 +96,13 @@ void PanelApp::begin(const Deps& deps) {
         static_cast<uint8_t>(ac.brightness > 100 ? 100 : ac.brightness));
     frontlightOn_ = true;
   }
+
+  DashboardRuntime::Deps dashboardDeps;
+  dashboardDeps.canvas = deps_.canvas;
+  dashboardDeps.net = &NetStack::instance();
+  dashboardDeps.alerts = deps_.publisher;
+  page_ = dashboardStartupPage(page_, dashboard_.begin(dashboardDeps));
+  dashboard_.setMains(mains_);
 
   ESP_LOGI(TAG, "panel begin: mains=%d lang=%s bat=%umV/%u%%", mains_ ? 1 : 0,
            langCode(prefs_.lang()), batCache_.millivolts, batCache_.percent);
@@ -196,8 +204,20 @@ void PanelApp::service() {
   // 模式切换（充电插拔/设置变更）
   const bool wantMains = computeMains();
   if (wantMains != mains_) onModeChange(wantMains);
+  dashboard_.service(mains_);
+  if (page_ == Page::Dashboard && dashboard_.consumeExitRequest()) gotoPage(Page::Overview);
 
   batteryFsm(now);
+
+  if (page_ == Page::Dashboard) {
+    if (dashboard_.needsRender()) {
+      dashboard_.render();
+      dirty_ = false;
+      forceFull_ = false;
+      lastRenderMs_ = now;
+    }
+    return;
+  }
 
   // 状态栏时钟节奏（页面停留时也保持时间新鲜）
   if (now - lastRenderMs_ > kClockRenderMs) markDirty();
@@ -261,6 +281,9 @@ void PanelApp::onButtonLong(eego::ButtonId id) {
   if (id == eego::ButtonId::Power) {
     clearConfirm();
     back();
+  } else if (page_ == Page::Dashboard) {
+    clearConfirm();
+    dashboard_.moveFocus(id == eego::ButtonId::Up ? -1 : 1, true);
   } else {
     onButtonShort(id);  // Up/Down 长按视同短按
   }
@@ -288,12 +311,13 @@ void PanelApp::onFrontKeyLong() {
 // ── 导航 ────────────────────────────────────────────────────────────────────
 
 void PanelApp::gotoPage(Page p) {
-  if (page_ == p) return;
+  if (page_ == p || (p == Page::Dashboard && !dashboard_.available())) return;
   page_ = p;
   focus_ = 0;
   provisionSucceeded_ = false;
   clearConfirm();
   if (p == Page::Settings) refreshMuteRuleCount();  // S4 静音规则数（M21）
+  if (p == Page::Dashboard) dashboard_.invalidateAll();
   markDirty(true);  // 切页 Full 刷新（避免跨页残影）
 }
 
@@ -320,6 +344,9 @@ void PanelApp::back() {
     case Page::Settings:
       gotoPage(Page::Overview);
       break;
+    case Page::Dashboard:
+      if (!dashboard_.back()) gotoPage(Page::Overview);
+      break;
     default:
       break;
   }
@@ -328,7 +355,7 @@ void PanelApp::back() {
 void PanelApp::moveFocus(int delta) {
   switch (page_) {
     case Page::Overview:
-      focus_ = (focus_ + delta + 3) % 3;
+      focus_ = (focus_ + delta + softKeyCount()) % softKeyCount();
       markDirty();
       break;
     case Page::Table: {
@@ -344,7 +371,7 @@ void PanelApp::moveFocus(int delta) {
       break;
     }
     case Page::Detail:
-      focus_ = (focus_ + delta + 4) % 4;
+      focus_ = (focus_ + delta + softKeyCount()) % softKeyCount();
       markDirty();
       break;
     case Page::Status:
@@ -357,6 +384,9 @@ void PanelApp::moveFocus(int delta) {
       markDirty();
       break;
     }
+    case Page::Dashboard:
+      dashboard_.moveFocus(delta, false);
+      break;
     default:
       break;
   }
@@ -382,6 +412,9 @@ void PanelApp::activateFocused() {
     case Page::Settings:
       activateSoftKey(focus_ + 1);  // 软键 0 = 返回；行聚焦从 1 起
       break;
+    case Page::Dashboard:
+      dashboard_.activate();
+      break;
     default:
       break;
   }
@@ -401,6 +434,8 @@ void PanelApp::activateSoftKey(size_t idx) {
         }
       } else if (idx == 2) {
         gotoPage(Page::Settings);
+      } else if (idx == 3) {
+        gotoPage(Page::Dashboard);
       }
       break;
     case Page::Table:
@@ -430,7 +465,11 @@ void PanelApp::activateSoftKey(size_t idx) {
         } else {
           armConfirm(ConfirmKind::Clear);
         }
-      } else if (idx == 3) {
+      } else if (idx == 3 && rec != nullptr &&
+                 !dashboard_.linkedPanelForAlert(*rec).empty()) {
+        const std::string linked = dashboard_.linkedPanelForAlert(*rec);
+        if (dashboard_.gotoPanel(linked)) gotoPage(Page::Dashboard);
+      } else if (idx == 3 || idx == 4) {
         back();
       }
       break;
@@ -457,6 +496,11 @@ void PanelApp::activateSoftKey(size_t idx) {
 // ── 触控 ────────────────────────────────────────────────────────────────────
 
 void PanelApp::onTouchTap(int16_t x, int16_t y) {
+  if (page_ == Page::Dashboard) {
+    clearConfirm();
+    dashboard_.touch(x, y);
+    return;
+  }
   // 1. 命中解析：软键下标（S4 软键 0=返回）或 S4 行（hitIdx=行下标+1, hitRow=true）；
   //    内容区命中保持 hitIdx=-1（永不匹配布防 → 取消）。
   int hitIdx = -1;
@@ -765,6 +809,10 @@ void PanelApp::clearConfirm() {
 }
 
 void PanelApp::showBanner(const char* text, uint32_t ms) {
+  if (dashboardUsesRuntimeStatus(page_)) {
+    dashboard_.showStatusMessage(text != nullptr ? text : "", ms);
+    return;
+  }
   banner_ = text != nullptr ? text : "";
   sanitizeClamped(banner_, 90);
   bannerDeadlineMs_ = nowMs() + ms;
@@ -797,13 +845,16 @@ bool PanelApp::computeMains() {
 
 void PanelApp::onModeChange(bool mains) {
   mains_ = mains;
+  dashboard_.setMains(mains);
   ESP_LOGI(TAG, "power mode -> %s", mains ? "mains" : "battery");
   NetStack::instance().wifi().setPowerSave(mains);  // 常供电 modem-sleep
   if (mains) {
     battPhase_ = BattPhase::Mains;
+    batteryPollStarted_ = false;
     NetStack::instance().reconnectNow();
   } else {
     battPhase_ = BattPhase::Polling;
+    batteryPollStarted_ = false;
     cycleStartMs_ = nowMs();
     pollDeadlineMs_ = cycleStartMs_ + kPollWaitMs;
     showBanner(tr(Str::Polling), 5000);
@@ -816,24 +867,37 @@ void PanelApp::batteryFsm(int64_t now) {
   switch (battPhase_) {
     case BattPhase::Mains:
       return;
-    case BattPhase::Polling:
-      // 等 WiFi 就绪或超时 → 全源轮询 → 静默 → 进入交互窗口
-      if (wifiState_.load() == 2 /*Connected*/ || now > pollDeadlineMs_) {
-        ESP_LOGI(TAG, "battery poll cycle: poll all sources");
-        NetStack::instance().pollNow("");
-        // 显式处理静默等待超时：记录并重试一轮；仍超时只影响本轮数据新鲜度，
-        // 下周期重试（不在此断电任何硬件）
+    case BattPhase::Polling: {
+      if (!batteryPollStarted_) {
+        if (wifiState_.load() == 2 /*Connected*/ || now > pollDeadlineMs_) {
+          ESP_LOGI(TAG, "battery poll cycle: poll all sources");
+          NetStack::instance().pollNow("");
+          dashboard_.pollBattery();
+          batteryPollStarted_ = true;
+          pollDeadlineMs_ = now + kDashboardPollWaitMs;
+          markDirty(true);
+        }
+        return;
+      }
+
+      const bool dashboard_idle = dashboard_.networkIdle();
+      if (!dashboard_idle && now <= pollDeadlineMs_) return;
+      if (!dashboard_idle) {
+        ESP_LOGW(TAG, "battery poll: dashboard still busy, serving cached data");
+      } else {
+        // Dashboard 已静默；保留原有 net_task 静默检查与超时重试合同。
         if (!NetStack::instance().waitIdle(30000)) {
           ESP_LOGW(TAG, "battery poll: waitIdle timeout, retrying once");
           if (!NetStack::instance().waitIdle(10000)) {
             ESP_LOGW(TAG, "battery poll: net still not idle, serving with current data");
           }
         }
-        battPhase_ = BattPhase::Serving;
-        awakeDeadlineMs_ = now + kAwakeWindowMs;
-        markDirty(true);
       }
+      battPhase_ = BattPhase::Serving;
+      awakeDeadlineMs_ = now + kAwakeWindowMs;
+      markDirty(true);
       return;
+    }
     case BattPhase::Serving: {
       // 交互窗口：近期输入延长 90s，但累计交互不超过周期起点后 10 分钟
       const int64_t hardCapMs = cycleStartMs_ + 600000;
@@ -852,6 +916,14 @@ void PanelApp::enterSleep(int64_t now) {
   // 实际睡眠时长 = 轮询周期剩余（不是完整周期），先算好供休眠画面与唤醒定时共用
   int64_t sleepMs = cycleStartMs_ + static_cast<int64_t>(prefs_.batteryPollS()) * 1000 - now;
   if (sleepMs < 10000) sleepMs = 10000;  // 防高频醒睡循环
+
+  if (!dashboard_.networkIdle()) {
+    ESP_LOGW(TAG, "battery: dashboard work pending, sleep deferred");
+    battPhase_ = BattPhase::Serving;
+    awakeDeadlineMs_ = now + 30000;
+    markDirty();
+    return;
+  }
 
   // 1. 网络静默（显式处理超时：重试一轮；仍超时则中止本次休眠回 Serving，
   //    30s 后重试——绝不带在途 HTTP 传输断电 WiFi）
@@ -1010,9 +1082,12 @@ const char* PanelApp::typeName(const std::string& typeId, std::string& buf) cons
 
 size_t PanelApp::softKeyCount() const {
   switch (page_) {
-    case Page::Overview: return 3;
+    case Page::Overview: return dashboard_.available() ? 4 : 3;
     case Page::Table: return 2;
-    case Page::Detail: return 4;
+    case Page::Detail: {
+      const alert_core::AlertRecord* rec = findRecord(detailId_);
+      return rec != nullptr && !dashboard_.linkedPanelForAlert(*rec).empty() ? 5 : 4;
+    }
     case Page::Status: return 2;
     case Page::Settings: return 1;
     default: return 0;
@@ -1027,6 +1102,7 @@ void PanelApp::softKeys(SoftKeyModel* out, size_t cap) const {
       out[0] = {tr(Str::List), true};
       out[1] = {tr(Str::AckAll), true};
       out[2] = {tr(Str::SettingsKey), true};
+      if (n == 4) out[3] = {currentLang() == Lang::Zh ? "面板" : "DASH", true};
       break;
     case Page::Table:
       out[0] = {tr(Str::Open), true};
@@ -1038,10 +1114,12 @@ void PanelApp::softKeys(SoftKeyModel* out, size_t cap) const {
       const bool clearable = rec != nullptr && (rec->state == alert_core::AlertState::Active ||
                                                 rec->state == alert_core::AlertState::Acked);
       const bool muted = rec != nullptr && rec->muted;  // store 级（M21）
+      const bool trend = rec != nullptr && !dashboard_.linkedPanelForAlert(*rec).empty();
       out[0] = {tr(Str::Ack), active};
       out[1] = {tr(Str::Mute), rec != nullptr && !muted};
       out[2] = {tr(Str::Clear), clearable};
-      out[3] = {tr(Str::Back), true};
+      out[3] = {trend ? (currentLang() == Lang::Zh ? "趋势" : "TREND") : tr(Str::Back), true};
+      if (trend) out[4] = {tr(Str::Back), true};
       break;
     }
     case Page::Status:
@@ -1059,6 +1137,13 @@ void PanelApp::softKeys(SoftKeyModel* out, size_t cap) const {
 // ── 渲染 ────────────────────────────────────────────────────────────────────
 
 void PanelApp::render(int64_t now) {
+  if (page_ == Page::Dashboard) {
+    dashboard_.render();
+    forceFull_ = false;
+    dirty_ = false;
+    lastRenderMs_ = now;
+    return;
+  }
   // 无锁取最新快照（发布方 net_task；代际变化即脏）
   if (deps_.publisher != nullptr) {
     auto snap = deps_.publisher->acquire();
@@ -1116,11 +1201,13 @@ void PanelApp::render(int64_t now) {
       drawProvision(c, m);
       break;
     }
+    case Page::Dashboard:
+      break;
   }
 
-  SoftKeyModel keys[4];
+  SoftKeyModel keys[5];
   const size_t n = softKeyCount();
-  softKeys(keys, 4);
+  softKeys(keys, 5);
   size_t focusIdx = static_cast<size_t>(-1);
   if (page_ == Page::Overview || page_ == Page::Detail || page_ == Page::Status) {
     focusIdx = focus_;

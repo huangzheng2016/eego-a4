@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// EEGO A4 告警/数据面板 —— FW5 组合根（M18）+ FW5B 静音规则/时间同步接线（M21）。
+// EEGO A4 告警/数据面板 —— FW5 组合根（M18）+ FW5B（M21）+ DP4 dashboard（M26）。
 //
 // 启动流程（顺序即接线合同，M12 架构）：
 //   1. board::beginStandardHardware() 板级启动合同（GPIO4 锁存 → 触控/按键 →
@@ -338,6 +338,7 @@ extern "C" void app_main(void) {
   hooks.version = [] { app.diagVersion(); };
   hooks.lang = [](const char* arg) { app.diagLang(arg); };
   hooks.page = [](const char* arg) { app.diagPage(arg); };
+  hooks.dashboard = [](const char* arg) { app.diagDashboard(arg); };
   if (!diag::start(hooks)) {
     ESP_LOGW(TAG, "diag start failed (serial diagnostics unavailable)");
   }

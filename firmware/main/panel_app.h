@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// panel_app —— 告警面板应用状态机（FW5/M18 组合根的 UI 属主部分）。
+// panel_app —— 告警/数据面板应用状态机（FW5/M18 + DP4/M26 组合根的 UI 属主）。
 //
 // 并发模型（M12 定稿，本类强制执行）：
 //   * 全部渲染/导航/本地动作只在 app_task 上下文（begin/service/handle* 由
@@ -32,6 +32,7 @@
 #include "alert_core/snapshot.h"
 #include "alert_core/type_registry.h"
 #include "board/board_boot.h"
+#include "dashboard_runtime.h"
 #include "device_prefs.h"
 #include "eego_hal.h"
 #include "eego_ui.h"
@@ -93,6 +94,7 @@ class PanelApp {
   void diagVersion();
   void diagLang(const char* arg);
   void diagPage(const char* arg);
+  void diagDashboard(const char* arg);
 
   // 组合根在 admin 模式判定后调用：进入/退出配网页。
   void enterProvision();
@@ -173,6 +175,7 @@ class PanelApp {
 
   Deps deps_;
   DevicePrefs& prefs_ = DevicePrefs::instance();
+  DashboardRuntime dashboard_;
 
   // 页面/导航状态（仅 app_task 上下文读写）
   Page page_ = Page::Overview;
@@ -223,6 +226,7 @@ class PanelApp {
   BattPhase battPhase_ = BattPhase::Mains;
   int64_t cycleStartMs_ = 0;
   int64_t pollDeadlineMs_ = 0;
+  bool batteryPollStarted_ = false;
   int64_t awakeDeadlineMs_ = 0;
   int64_t lastInputMs_ = 0;
   bool fallbackArmed_ = false;

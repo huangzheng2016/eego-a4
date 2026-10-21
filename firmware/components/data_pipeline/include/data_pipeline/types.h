@@ -142,10 +142,27 @@ struct HttpResponse {
   const std::string* header(std::string_view lower_name) const;
 };
 
+struct AsyncHttpResult {
+  uint64_t id = 0;
+  HttpResponse response;
+};
+
 class IHttpTransport {
  public:
   virtual ~IHttpTransport() = default;
   virtual bool execute(const net::NetRequest& request, HttpResponse& response) = 0;
+  virtual bool asyncSupported() const { return false; }
+  virtual bool executeAsync(uint64_t id, const net::NetRequest& request) {
+    (void)id;
+    (void)request;
+    return false;
+  }
+  virtual bool pollAsync(AsyncHttpResult& result) {
+    (void)result;
+    return false;
+  }
+  virtual bool asyncIdle() const { return true; }
+  virtual void cancelAsync() {}
 };
 
 using TokenResolver = std::function<std::string(const std::string& ref)>;

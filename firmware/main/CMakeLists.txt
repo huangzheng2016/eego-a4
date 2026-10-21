@@ -2,6 +2,7 @@
 # main 组件 — 告警面板组合根 + app_task（FW5/M18 + FW5B/M21 接线）
 #
 # app_main.cpp     组合根与 app_task 主循环（唯一 UI 属主）
+# dashboard_runtime.* dashboard 配置/缓存/调度/导航/动作/局部渲染（DP4/M26）
 # panel_app.*      应用状态机（页面/导航/动作/电源 FSM）
 # panel_render.*   S0–S4 纯绘制层（安全区内，灰阶严重度）
 # panel_diag.cpp   diag 串口命令钩子实现
@@ -11,6 +12,7 @@
 idf_component_register(
     SRCS
         "app_main.cpp"
+        "dashboard_runtime.cpp"
         "panel_app.cpp"
         "panel_diag.cpp"
         "panel_render.cpp"
@@ -24,6 +26,9 @@ idf_component_register(
         eego_ui
         admin
         alert_core
+        dashboard_core
+        dashboard_ui
+        data_pipeline
         net_stack
         diag
         nvs_flash
