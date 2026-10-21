@@ -436,8 +436,20 @@ std::string serializeHistory(std::vector<HistoryEntry> entries, size_t max_bytes
     }
     if (first == entries.size() && generated_tombstones) return {};
     entries.erase(entries.begin(), entries.begin() + first);
+    std::map<std::string, std::set<std::pair<int, int64_t>>> surviving;
     for (HistoryEntry& entry : entries) {
-      const auto it = dropped.find(seriesKey(entry.sample));
+      const std::string key = seriesKey(entry.sample);
+      auto& surviving_windows = surviving[key];
+      if (entry.window_state) {
+        if (entry.coverage_windows.empty()) {
+          surviving_windows.emplace(static_cast<int>(entry.window_kind), entry.window_from_ms);
+        } else {
+          for (const auto& window : entry.coverage_windows) {
+            surviving_windows.emplace(static_cast<int>(window.first), window.second);
+          }
+        }
+      }
+      const auto it = dropped.find(key);
       if (it == dropped.end()) continue;
       const DroppedSeries& series = it->second;
       entry.raw_gap_before_ms = std::max(entry.raw_gap_before_ms, series.raw_gap_before_ms);
@@ -457,15 +469,14 @@ std::string serializeHistory(std::vector<HistoryEntry> entries, size_t max_bytes
         }
       }
     }
-    const auto has_series = [&](const std::string& key) {
-      return std::any_of(entries.begin(), entries.end(), [&](const HistoryEntry& entry) {
-        return seriesKey(entry.sample) == key;
-      });
-    };
     for (const auto& item : dropped) {
       const std::string& key = item.first;
-      if (has_series(key)) continue;
       const DroppedSeries& series = item.second;
+      const auto surviving_it = surviving.find(key);
+      if (series.windows.empty()) {
+        if (surviving_it != surviving.end()) continue;
+        return {};
+      }
       HistoryEntry tombstone = series.representative;
       tombstone.window_state = true;
       tombstone.coverage_sample = false;
@@ -478,8 +489,8 @@ std::string serializeHistory(std::vector<HistoryEntry> entries, size_t max_bytes
       tombstone.first_timestamp_ms = tombstone.sample.timestamp_ms;
       tombstone.raw_gap_before_ms = series.raw_gap_before_ms;
       tombstone.coverage_windows.clear();
-      if (series.windows.empty()) return {};
       for (const auto& window : series.windows) {
+        if (surviving_it != surviving.end() && surviving_it->second.count(window) != 0) continue;
         tombstone.window_kind = static_cast<WindowKind>(window.first);
         tombstone.window_from_ms = window.second;
         entries.push_back(tombstone);
