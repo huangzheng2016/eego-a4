@@ -95,15 +95,16 @@ void migratePanel(JsonValue& panel, const std::string& path,
   if (panel.type() != JsonValue::Type::Object) return;
   rename(panel, "panel_type", "kind", path, errors);
   rename(panel, "type", "kind", path, errors);
+  int legacy_text_mode = -1;
   if (JsonValue* kind = panel.find("kind"); kind != nullptr && kind->type() == JsonValue::Type::String) {
     if (kind->stringValue() == "graph") *kind = JsonValue::makeString("chart");
     if (kind->stringValue() == "single_text" || kind->stringValue() == "multi_text") {
-      const bool multiline = kind->stringValue() == "multi_text";
+      legacy_text_mode = kind->stringValue() == "multi_text" ? 1 : 0;
       *kind = JsonValue::makeString("text");
       if (panel.find("text") == nullptr) {
         JsonValue::Object text;
         text.emplace_back("content", JsonValue::makeString(""));
-        text.emplace_back("multiline", JsonValue::makeBool(multiline));
+        text.emplace_back("multiline", JsonValue::makeBool(legacy_text_mode == 1));
         panel.objectItems().emplace_back("text", JsonValue::makeObject(std::move(text)));
       }
     }
@@ -185,10 +186,18 @@ void migratePanel(JsonValue& panel, const std::string& path,
 
   if (JsonValue* text = panel.find("text"); text != nullptr && text->type() == JsonValue::Type::String) {
     JsonValue::Object object;
-    const bool multiline = text->stringValue().find('\n') != std::string::npos;
+    const bool multiline = legacy_text_mode >= 0
+                               ? legacy_text_mode == 1
+                               : text->stringValue().find('\n') != std::string::npos;
     object.emplace_back("content", *text);
     object.emplace_back("multiline", JsonValue::makeBool(multiline));
     *text = JsonValue::makeObject(std::move(object));
+  }
+  if (legacy_text_mode >= 0) {
+    JsonValue* text = panel.find("text");
+    if (text != nullptr && text->type() == JsonValue::Type::Object &&
+        text->find("multiline") == nullptr)
+      text->objectItems().emplace_back("multiline", JsonValue::makeBool(legacy_text_mode == 1));
   }
   if (JsonValue* image = panel.find("image"); image != nullptr && image->type() == JsonValue::Type::String) {
     JsonValue::Object object;

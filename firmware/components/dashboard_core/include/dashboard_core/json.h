@@ -62,6 +62,7 @@ struct JsonParseError {
 // trailing content, and nesting beyond max_depth are rejected.
 bool jsonParse(std::string_view text, JsonValue& out, JsonParseError& err,
                size_t max_depth = 16);
+bool jsonIsValidUtf8(std::string_view text);
 std::string jsonEscape(std::string_view text);
 
 }  // namespace eego::dashboard

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 
 #include "dashboard_core/model.h"
 
@@ -33,19 +34,21 @@ class DashboardSnapshot {
 class SnapshotPublisher {
  public:
   // Deep-owns the moved model. Readers holding an older generation are not
-  // disturbed, and acquire() never exposes mutable snapshot state.
+  // disturbed, and acquire() never exposes mutable snapshot state. Concurrent
+  // publishers are serialized so generation and pointer publication cannot regress.
   std::shared_ptr<const DashboardSnapshot> publish(Dashboard dashboard,
                                                    uint64_t generated_at);
   std::shared_ptr<const DashboardSnapshot> acquire() const;
-  uint64_t publishedGeneration() const { return generation_.load(std::memory_order_relaxed); }
+  uint64_t publishedGeneration() const;
 
  private:
+  std::mutex publish_mutex_;
+  uint64_t next_generation_ = 0;
 #ifdef DASHBOARD_CORE_HAS_ATOMIC_SHARED_PTR
   mutable std::atomic<std::shared_ptr<const DashboardSnapshot>> current_;
 #else
   mutable std::shared_ptr<const DashboardSnapshot> current_;
 #endif
-  mutable std::atomic<uint64_t> generation_{0};
 };
 
 }  // namespace eego::dashboard

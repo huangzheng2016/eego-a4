@@ -6,6 +6,7 @@
 #include <initializer_list>
 #include <limits>
 
+#include "config_internal.h"
 #include "migration.h"
 
 namespace eego::dashboard {
@@ -52,6 +53,10 @@ class Reader {
     }
     if (value->type() != JsonValue::Type::String) {
       error(fieldPath(path, key), "must be a string");
+      return false;
+    }
+    if (!jsonIsValidUtf8(value->stringValue())) {
+      error(fieldPath(path, key), "must contain valid UTF-8");
       return false;
     }
     if (value->stringValue().size() > maximum) {
@@ -177,6 +182,8 @@ class Reader {
           [&](const JsonValue& item, const std::string& item_path) {
             if (item.type() != JsonValue::Type::String) {
               error(item_path, "must be a string");
+            } else if (!jsonIsValidUtf8(item.stringValue())) {
+              error(item_path, "must contain valid UTF-8");
             } else if (item.stringValue().size() > max_bytes) {
               error(item_path, "string exceeds size limit");
             } else {
@@ -199,8 +206,12 @@ class Reader {
       const auto& member = value->objectItems()[i];
       if (member.first.empty() || member.first.size() > 64) {
         error(fieldPath(field, member.first.c_str()), "key must contain 1..64 bytes");
+      } else if (!jsonIsValidUtf8(member.first)) {
+        error(field, "map key must contain valid UTF-8");
       } else if (member.second.type() != JsonValue::Type::String) {
         error(fieldPath(field, member.first.c_str()), "value must be a string");
+      } else if (!jsonIsValidUtf8(member.second.stringValue())) {
+        error(fieldPath(field, member.first.c_str()), "value must contain valid UTF-8");
       } else if (member.second.stringValue().size() > 512) {
         error(fieldPath(field, member.first.c_str()), "value exceeds 512 bytes");
       } else {
@@ -698,6 +709,14 @@ ParseResult dashboardFromJson(const JsonValue& root, const ParseOptions& options
     result.errors.push_back({"schema_version", "missing dashboard schema version"});
     return result;
   }
+  if (version == kSchemaVersion && root.find("schema") == nullptr) {
+    result.errors.push_back({"schema", "missing required canonical schema"});
+    return result;
+  }
+  if (version == kSchemaVersion && root.find("schema_version") == nullptr) {
+    result.errors.push_back({"schema_version", "missing required canonical schema_version"});
+    return result;
+  }
   result.source_version = version;
   JsonValue migrated;
   const JsonValue* effective = &root;
@@ -708,8 +727,26 @@ ParseResult dashboardFromJson(const JsonValue& root, const ParseOptions& options
   }
   parseV2(*effective, result.dashboard, options, result.errors);
   if (result.errors.empty())
-    validateDashboard(result.dashboard, options.limits, result.errors);
+    validateDashboardSemantics(result.dashboard, options.limits, result.errors);
   return result;
+}
+
+bool parseCanonicalFields(const JsonValue& root, Dashboard& out, const ParseOptions& options,
+                          std::vector<ValidationError>& errors) {
+  if (!domDepthWithin(root, 0, options.limits.max_depth)) {
+    errors.push_back({"", "configuration exceeds max_depth"});
+    return false;
+  }
+  if (!domKeysUnique(root)) {
+    errors.push_back({"", "configuration contains duplicate object keys"});
+    return false;
+  }
+  if (root.toString().size() > options.limits.max_json_bytes) {
+    errors.push_back({"", "configuration exceeds max_json_bytes"});
+    return false;
+  }
+  parseV2(root, out, options, errors);
+  return errors.empty();
 }
 
 }  // namespace eego::dashboard

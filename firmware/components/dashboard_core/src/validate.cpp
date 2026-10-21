@@ -7,6 +7,8 @@
 #include "dashboard_core/config.h"
 #include "dashboard_core/expression.h"
 
+#include "config_internal.h"
+
 namespace eego::dashboard {
 namespace {
 
@@ -52,15 +54,28 @@ bool validHttpUrl(std::string_view url) {
   return true;
 }
 
+bool hasParentPathSegment(std::string_view path) {
+  size_t start = 0;
+  while (start <= path.size()) {
+    const size_t end = path.find_first_of("/\\", start);
+    const std::string_view segment = path.substr(start, end - start);
+    if (segment == "..") return true;
+    if (end == std::string_view::npos) break;
+    start = end + 1;
+  }
+  return false;
+}
+
 bool validAssetUri(std::string_view uri) {
   if (uri.empty()) return false;
   if (validHttpUrl(uri)) return true;
-  if (uri.substr(0, 3) != "sd:" && uri.front() != '/') return false;
-  if ((uri.substr(0, 3) == "sd:" && uri.size() == 3) || uri.size() < 2 ||
-      uri.find('\0') != std::string_view::npos)
-    return false;
-  return uri.substr(0, 3) != "../" && uri.find("/../") == std::string_view::npos &&
-         !(uri.size() >= 3 && uri.substr(uri.size() - 3) == "/..");
+  const bool sd_uri = uri.substr(0, 3) == "sd:";
+  if (!sd_uri && uri.front() != '/') return false;
+  if ((sd_uri && uri.size() == 3) || uri.size() < 2) return false;
+  for (const unsigned char c : uri) {
+    if (c <= 0x20 || c == 0x7f) return false;
+  }
+  return !hasParentPathSegment(sd_uri ? uri.substr(3) : uri);
 }
 
 bool asciiEqual(std::string_view left, std::string_view right) {
@@ -76,10 +91,19 @@ bool asciiEqual(std::string_view left, std::string_view right) {
 bool validHeaderName(std::string_view name) {
   if (name.empty()) return false;
   for (const unsigned char c : name) {
-    if (!(std::isalnum(c) || c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
+    const bool ascii_alnum = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+                             (c >= 'a' && c <= 'z');
+    if (!(ascii_alnum || c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
           c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' ||
           c == '`' || c == '|' || c == '~'))
       return false;
+  }
+  return true;
+}
+
+bool validHeaderValue(std::string_view value) {
+  for (const unsigned char c : value) {
+    if ((c <= 0x1f && c != '\t') || c == 0x7f) return false;
   }
   return true;
 }
@@ -180,7 +204,12 @@ class Validator {
   bool containsSource(const std::string& id) const { return contains(ids(sources_), id); }
   bool containsPage(const std::string& id) const { return contains(ids(dashboard_.pages), id); }
   bool containsAlert(const std::string& id) const { return contains(ids(dashboard_.alert_rules), id); }
-  bool containsAsset(const std::string& id) const { return contains(ids(dashboard_.assets), id); }
+  bool isImageAsset(const std::string& id) const {
+    for (const auto& asset : dashboard_.assets) {
+      if (asset.id == id) return asset.kind == AssetKind::Image;
+    }
+    return false;
+  }
   bool containsPanel(const std::string& id) const {
     for (const auto& location : panels_) {
       if (location.panel->id == id) return true;
@@ -202,8 +231,8 @@ class Validator {
       check(!asciiEqual(values[i].key, "authorization") && !asciiEqual(values[i].key, "host") &&
                 !asciiEqual(values[i].key, "content-length"),
             field, "header is managed by the runtime and cannot be configured");
-      check(values[i].value.find_first_of("\r\n") == std::string::npos, field,
-            "HTTP header value cannot contain a newline");
+      check(validHeaderValue(values[i].value), field,
+            "HTTP header value contains a forbidden control character");
       check(values[i].value.size() <= 512, field, "exceeds 512 bytes");
       for (size_t j = 0; j < i; ++j)
         check(!asciiEqual(values[i].key, values[j].key), field, "duplicate HTTP header");
@@ -400,13 +429,31 @@ class Validator {
       }
       check(panel.style.precision <= 8 && panel.style.line_width >= 1 && panel.style.line_width <= 8,
             child(path, "style"), "invalid style values");
+      const bool text_kind = panel.kind == PanelKind::Text || panel.kind == PanelKind::Card ||
+                             panel.kind == PanelKind::Alert;
+      if (!text_kind)
+        check(panel.text.content.empty() && !panel.text.multiline && panel.text.max_lines == 1,
+              child(path, "text"), "text spec is not valid for this panel kind");
+      if (panel.kind != PanelKind::Image)
+        check(panel.image.asset_id.empty() && panel.image.alt_text.empty() &&
+                  panel.image.fit == ImageFit::Contain,
+              child(path, "image"), "image spec is only valid for image panels");
+      if (panel.kind != PanelKind::Chart)
+        check(panel.chart.kind == ChartKind::Line && !panel.chart.show_points &&
+                  !panel.chart.fill && !panel.chart.has_y_min && !panel.chart.has_y_max &&
+                  panel.chart.y_min == 0.0 && panel.chart.y_max == 0.0,
+              child(path, "chart"), "chart spec is only valid for chart panels");
+      if (panel.kind != PanelKind::Table)
+        check(panel.columns.empty(), child(path, "columns"),
+              "columns are only valid for table panels");
       if (!panel.text.multiline)
         check(panel.text.max_lines == 1, child(path, "text.max_lines"),
               "single-line text must have max_lines=1");
       check(panel.text.max_lines >= 1 && panel.text.max_lines <= 64, child(path, "text.max_lines"),
             "must be in 1..64");
       if (panel.kind == PanelKind::Image) {
-        check(containsAsset(panel.image.asset_id), child(path, "image.asset_id"), "unknown asset ID");
+        check(isImageAsset(panel.image.asset_id), child(path, "image.asset_id"),
+              "asset ID must reference an image asset");
         check(std::string_view(imageFitName(panel.image.fit)) != "unknown", child(path, "image.fit"),
               "invalid image fit");
       }
@@ -553,11 +600,20 @@ class Validator {
 
 }  // namespace
 
-bool validateDashboard(const Dashboard& dashboard, const Limits& limits,
-                       std::vector<ValidationError>& errors) {
+bool validateDashboardSemantics(const Dashboard& dashboard, const Limits& limits,
+                                std::vector<ValidationError>& errors) {
   Validator validator(dashboard, limits, errors);
   validator.run();
   return errors.empty();
+}
+
+bool validateDashboard(const Dashboard& dashboard, const Limits& limits,
+                       std::vector<ValidationError>& errors) {
+  ParseOptions options;
+  options.limits = limits;
+  Dashboard normalized;
+  parseCanonicalFields(dashboardToJson(dashboard), normalized, options, errors);
+  return validateDashboardSemantics(dashboard, limits, errors);
 }
 
 bool exportDashboard(const Dashboard& dashboard, std::string& out,

@@ -488,6 +488,44 @@ bool jsonParse(std::string_view text, JsonValue& out, JsonParseError& err, size_
   return false;
 }
 
+bool jsonIsValidUtf8(std::string_view text) {
+  size_t position = 0;
+  while (position < text.size()) {
+    const unsigned char first = static_cast<unsigned char>(text[position]);
+    if (first <= 0x7f) {
+      ++position;
+      continue;
+    }
+    size_t length = 0;
+    uint32_t cp = 0;
+    uint32_t minimum = 0;
+    if (first >= 0xc2 && first <= 0xdf) {
+      length = 2;
+      cp = first & 0x1f;
+      minimum = 0x80;
+    } else if (first >= 0xe0 && first <= 0xef) {
+      length = 3;
+      cp = first & 0x0f;
+      minimum = 0x800;
+    } else if (first >= 0xf0 && first <= 0xf4) {
+      length = 4;
+      cp = first & 0x07;
+      minimum = 0x10000;
+    } else {
+      return false;
+    }
+    if (length > text.size() - position) return false;
+    ++position;
+    for (size_t i = 1; i < length; ++i, ++position) {
+      const unsigned char next = static_cast<unsigned char>(text[position]);
+      if ((next & 0xc0) != 0x80) return false;
+      cp = (cp << 6) | (next & 0x3f);
+    }
+    if (cp < minimum || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return false;
+  }
+  return true;
+}
+
 std::string jsonEscape(std::string_view text) {
   std::string out;
   out.reserve(text.size() + 2);

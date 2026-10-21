@@ -56,7 +56,11 @@
         "maxLength": 64,
         "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
       },
-      "additionalProperties": {"type": "string", "maxLength": 512, "pattern": "^[^\\r\\n]*$"},
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 512,
+        "pattern": "^[^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*$"
+      },
       "default": {},
       "description": "Authorization, Host, and Content-Length are reserved and rejected by semantic validation."
     },
@@ -113,7 +117,7 @@
         "label": {"type": "string", "maxLength": 160, "default": ""},
         "target": {"type": "string", "maxLength": 64, "default": ""},
         "value": {"type": "string", "maxLength": 512, "default": ""},
-        "confirm": {"type": "boolean", "default": false}
+        "confirm": {"type": "boolean"}
       },
       "allOf": [
         {
@@ -124,8 +128,13 @@
           "if": {"properties": {"kind": {"const": "ack_alert"}}},
           "then": {
             "required": ["target"],
-            "properties": {"target": {"enum": ["current", "focused"]}, "value": {"maxLength": 0}}
-          }
+            "properties": {
+              "target": {"enum": ["current", "focused"]},
+              "value": {"maxLength": 0},
+              "confirm": {"default": true}
+            }
+          },
+          "else": {"properties": {"confirm": {"default": false}}}
         },
         {
           "if": {"properties": {"kind": {"enum": ["goto_page", "goto_panel", "set_variable", "refresh"]}}},
@@ -144,12 +153,13 @@
       "properties": {
         "content": {"type": "string", "maxLength": 4096, "default": ""},
         "multiline": {"type": "boolean", "default": false},
-        "max_lines": {"type": "integer", "minimum": 1, "maximum": 64, "default": 1}
+        "max_lines": {"type": "integer", "minimum": 1, "maximum": 64}
       },
       "allOf": [
         {
-          "if": {"properties": {"multiline": {"const": false}}},
-          "then": {"properties": {"max_lines": {"maximum": 1}}}
+          "if": {"required": ["multiline"], "properties": {"multiline": {"const": true}}},
+          "then": {"properties": {"max_lines": {"default": 8}}},
+          "else": {"properties": {"max_lines": {"default": 1, "maximum": 1}}}
         }
       ],
       "default": {}
@@ -162,7 +172,8 @@
         "asset_id": {"$ref": "#/$defs/id"},
         "alt_text": {"type": "string", "maxLength": 160, "default": ""},
         "fit": {"enum": ["contain", "cover", "stretch"], "default": "contain"}
-      }
+      },
+      "description": "asset_id must reference an asset whose kind is image."
     },
     "chartSpec": {
       "type": "object",
@@ -355,7 +366,13 @@
         "sha256": {"type": "string", "pattern": "^([0-9A-Fa-f]{64})?$", "default": ""},
         "size_bytes": {"type": "integer", "minimum": 0, "maximum": 67108864, "default": 0},
         "cache_seconds": {"type": "integer", "minimum": 0, "maximum": 31536000, "default": 3600}
-      }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"uri": {"pattern": "^sd:"}}},
+          "then": {"properties": {"uri": {"not": {"pattern": "(^|[/:])\\.\\.(/|$)"}}}}
+        }
+      ]
     },
     "metricSample": {
       "type": "object",
