@@ -43,7 +43,7 @@ constexpr int16_t kRowH = 92;
 // ── 模型（panel_app 构建；render 只读）──────────────────────────────────────
 
 struct StatusBarModel {
-  char timeText[24] = "--:--";  // "MM-DD HH:MM"（RTC 有效）或 "--:--"
+  char timeText[24] = "--:--";  // "MM-DD HH:MM"（统一时间源可信）或「时间不可用」
   uint8_t batPercent = 0;
   uint16_t batMv = 0;
   bool charging = false;
@@ -51,7 +51,7 @@ struct StatusBarModel {
   bool mains = true;  // true=常供电 false=电池
   bool portalOpen = false;
   bool apFallback = false;
-  size_t mutedCount = 0;
+  size_t mutedCount = 0;  // store 静音记录数（快照内 muted 计数）
   char banner[96] = "";  // 操作结果/二次确认提示（空 = 无）
 };
 
@@ -64,9 +64,9 @@ struct S0Model {
   size_t critical = 0;
   size_t warning = 0;
   size_t info = 0;
-  size_t activeTotal = 0;  // Active+Acked（已按 UI 静音过滤）
+  size_t activeTotal = 0;  // Active+Acked（已排除 store 静音记录）
   size_t acked = 0;
-  size_t muted = 0;        // 库内静音 + UI 静音合计（仅展示）
+  size_t muted = 0;        // store 静音记录数（仅展示）
   size_t sourcesOk = 0;
   size_t sourcesTotal = 0;
   char updatedText[24] = "";
@@ -99,7 +99,7 @@ struct S2Model {
   std::vector<std::pair<std::string, std::string>> fields;
   bool canAck = false;
   bool canClear = false;
-  bool muted = false;  // UI 静音表中
+  bool muted = false;  // store 级静音（M21：规则命中，记录留库但不进总览/列表）
 };
 
 struct S3Model {

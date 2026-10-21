@@ -12,11 +12,11 @@
 //   lang   u8   0=zh 1=en（默认 zh）
 //   pmode  u8   0=auto 1=mains 2=battery（默认 auto）
 //   bpoll  u32  电池模式轮询周期秒（默认 900，钳 60..21600）
-//   mute   str  逗号分隔的告警指纹（40-hex）列表，≤32 条；UI 级静音
+//   mute   str  逗号分隔的告警指纹（40-hex）列表，≤32 条
 //
-// UI 级静音语义（M11「muted 记录留在库但不出现在总览/列表」的本机实现）：
-// store 级静音需要 net_task 上下文写 AlertStore，而 NetStack 暂未暴露静音
-// 命令入口（已记 finding 建议后续补）；首版在渲染层按指纹过滤，效果等同。
+// mute 键（FW5 UI 级静音）已被 M21 取代：静音是 store 级规则（net_task 执行、
+// config.json mute_rules 持久化）。该键仅为一次性迁移保留——app_main 启动时
+// 把旧指纹并入 store 规则后立即清空；面板渲染不再读本表。
 
 #include <cstdint>
 #include <string>
@@ -50,10 +50,9 @@ class DevicePrefs {
   uint32_t batteryPollS() const { return bpoll_s_; }
   void setBatteryPollS(uint32_t s);
 
-  // UI 级静音指纹表。
+  // 旧版 UI 级静音指纹表（M21 一次性迁移专用：app_main 读取并入 store 规则
+  // 后 clearMutes + save 清空 NVS 键）。面板业务代码不得再用于过滤/新增。
   const std::vector<std::string>& mutes() const { return mutes_; }
-  bool isMuted(const std::string& fingerprint) const;
-  bool addMute(const std::string& fingerprint);  // 已存在/超上限返回 false
   void clearMutes() { mutes_.clear(); }
 
  private:

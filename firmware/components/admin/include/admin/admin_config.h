@@ -4,12 +4,13 @@
 // 配置存储 —— config.json 白名单校验、未知字段保留、原子持久化、secrets 掩码
 // （M13 F6/T4 + M12「config 读改写互斥锁」定稿）。
 //
-// 模型（M13 §3 schema v1，顶层键）：
+// 模型（M13 §3 schema v1 + M21 mute_rules，顶层键）：
 //   schema_version        int，必须 1
 //   admin                 admin 域（本组件强校验；wifi_list 只能经
 //                         POST/DELETE /api/v1/config/wifi 变更，PUT 携带即 400）
 //   sources               告警源数组（net::SourceConfig::fromJson 校验）
 //   alert_type_overrides  类型覆盖表（形状校验；应用在 app_task 上下文）
+//   mute_rules            静音规则数组（M21；热生效同步到 NetStack，重启后恢复）
 //   * 文件内未知顶层键      读取时保留（前向兼容），PUT body 内出现即 400
 //
 // 持久化（M13 F6 持久化层）：校验 → 应用 RAM → tmp 文件 + rename 原子写 →
@@ -24,6 +25,7 @@
 #include <vector>
 
 #include "alert_core/json.h"
+#include "alert_core/store.h"
 #include "esp_err.h"
 #include "net_stack/source_config.h"
 
@@ -81,6 +83,10 @@ class ConfigStore {
   // 当前 sources 数组（已校验形状；空数组 = 无源）。
   std::vector<net::SourceConfig> sources() const;
 
+  // 当前静音规则表（M21；已校验形状，直接可喂 NetStack::setMuteRules）。
+  // expires_at 为绝对 unix 秒（0 = 永不过期）——重启恢复后 TTL 语义不变。
+  std::vector<alert_core::MuteRule> muteRules() const;
+
   // GET /config/schema 静态响应（JSON 字符串，static 存储）。
   static const char* schemaJson();
 
@@ -89,6 +95,10 @@ class ConfigStore {
   bool setWifiListInDom(alert_core::JsonValue& dom,
                         const std::vector<std::pair<std::string, std::string>>& ssid_ref_list)
       const;
+  // 整体替换 DOM 的 mute_rules 节（M21；面板静音/清静音持久化用，app_task
+  // 上下文读改写后经 commit 原子落盘）。
+  bool setMuteRulesInDom(alert_core::JsonValue& dom,
+                         const std::vector<alert_core::MuteRule>& rules) const;
 
  private:
   ConfigStore() = default;

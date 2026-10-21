@@ -65,7 +65,8 @@ void DevicePrefs::save() {
   nvs_set_u8(h, kKeyLang, static_cast<uint8_t>(lang_));
   nvs_set_u8(h, kKeyPmode, static_cast<uint8_t>(pmode_));
   nvs_set_u32(h, kKeyBPoll, bpoll_s_);
-  // 指纹表序列化为逗号分隔串（40hex×32 + 逗号 ≈ 1311B，NVS str 上限内）
+  // 旧 UI 静音键：M21 迁移后恒为空串。必须保留写入——否则旧 NVS 值清不掉，
+  // 每次启动都会被当成"待迁移指纹"再次并入 store 规则。
   std::string joined;
   for (size_t i = 0; i < mutes_.size(); i++) {
     if (i != 0) joined += ',';
@@ -80,21 +81,6 @@ void DevicePrefs::setBatteryPollS(uint32_t s) {
   if (s < kBPollMinS) s = kBPollMinS;
   if (s > kBPollMaxS) s = kBPollMaxS;
   bpoll_s_ = s;
-}
-
-bool DevicePrefs::isMuted(const std::string& fingerprint) const {
-  for (const std::string& fp : mutes_) {
-    if (fp == fingerprint) return true;
-  }
-  return false;
-}
-
-bool DevicePrefs::addMute(const std::string& fingerprint) {
-  if (fingerprint.size() != kFingerprintLen) return false;
-  if (isMuted(fingerprint)) return false;
-  if (mutes_.size() >= kMaxMutes) return false;
-  mutes_.push_back(fingerprint);
-  return true;
 }
 
 }  // namespace panel

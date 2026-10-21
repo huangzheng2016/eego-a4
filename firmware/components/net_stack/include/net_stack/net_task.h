@@ -6,11 +6,13 @@
 // net_task 是：
 //   * 一切 esp_http_client 的唯一属主（HttpPool 只能在本任务上下文调用）；
 //   * 一切 AlertStore 写入的唯一执行方（适配器产 AlertEvent，本任务 ingest；
-//     告警动作 ack/ackAll/clear 与 expire 过期同样只在这里落地）；
+//     告警动作 ack/ackAll/clear、expire 过期与静音规则 set/clear 同样只在
+//     这里落地）；
 //   * 快照发布方（注入 SnapshotPublisher 后，任何 store 变更——摄入/动作/过期/
-//     加载——都由本任务 buildSnapshot + publish；UI/API 无锁 acquire 读）；
+//     加载/静音规则——都由本任务 buildSnapshot + publish；UI/API 无锁 acquire 读）；
 //   * 轮询调度器（每源 interval，vTaskDelay 级节拍，指数退避）；
-//   * WiFi 重连状态机（指数退避 30s→60s→120s…封顶 5min，M13 F3）。
+//   * WiFi 重连状态机（指数退避 30s→60s→120s…封顶 5min，M13 F3）；
+//   * 时间同步驱动（M21：WiFi 连上触发 SNTP，同步结果由本任务回写 RTC）。
 //
 // 其他任务（app_task/httpd/serial）不直接触碰本组件内部对象：
 //   * 配置/查询/摄入/告警动作 → 命令队列（线程安全，调用方阻塞等结果，有超时）；
@@ -37,6 +39,7 @@
 #include "net_stack/source_cache.h"
 #include "net_stack/source_config.h"
 #include "net_stack/source_health.h"
+#include "net_stack/time_sync.h"
 #include "net_stack/wifi_manager.h"
 
 namespace eego::net {
@@ -56,6 +59,7 @@ struct NetEvent {
 
 using NetEventCallback = void (*)(const NetEvent& ev, void* ctx);
 using TimeFn = std::function<uint64_t()>;  // unix 秒（默认 time(nullptr)）
+using TimeValidFn = std::function<bool()>;  // 统一时间源是否可信（M21）
 
 struct NetStackConfig {
   std::string cache_dir = "/sdcard/alertpanel/cache";
@@ -67,12 +71,22 @@ struct NetStackConfig {
   uint16_t task_stack_bytes = 16384;
   int8_t task_core = 0;                     // M12：net_task 固定 CPU0
   // 快照发布接线（M12：UI/API 无锁读快照，store 只能 net_task 写）。
-  // 注入后，net_task 在任何 store 变更（摄入/ack/clear/过期/加载）后
+  // 注入后，net_task 在任何 store 变更（摄入/ack/clear/过期/加载/静音规则）后
   // buildSnapshot + publish；nullptr = 不发布（alertSnapshotSource 恒返回
   // nullptr，动作不受影响）。必须 outlive NetStack（同 store/registry）。
   alert_core::SnapshotPublisher* snapshot_publisher = nullptr;
   // expire 过期巡检节拍（秒级 TTL 精度足够；0 = 关闭巡检）
   uint32_t alert_expire_interval_ms = 15000;
+  // SNTP 服务器（空 = cn.pool.ntp.org 优先，按 CONFIG_LWIP_SNTP_MAX_SERVERS
+  // 截断）；WiFi 连上即（重）同步。
+  std::vector<std::string> sntp_servers;
+  // RTC 回写钩子（M21：SNTP 同步成功后 net_task 把系统时间写进 PCF8563，
+  // 电池唤醒/重启后离线时间保持可信）。可空 = 无 RTC，纯 SNTP。
+  TimeSync::RtcWriteFn rtc_write_fn;
+  // 统一时间源可信判定（M21：组合根注入 RTC 有效 || 系统时间可信的合并判定；
+  // 空 = time_fn() > 0）。net_task 填 NetStatusSnapshot.time.valid，展示层
+  // 据此如实显示「时间不可用」。
+  TimeValidFn time_valid_fn;
 };
 
 class NetStack {
@@ -106,6 +120,16 @@ class NetStack {
   // 线程安全：httpd/UI 线程经此入口提交，命令队列串行化，阻塞等结果（有超时）；
   // 绝不直写 store。结果语义见 alert_actions.h。
   AlertActionResult alertAction(const AlertAction& action, uint32_t wait_ms = 5000);
+
+  // ---- 静音规则（M21；net_task 在 AlertStore 上下文执行并触发快照发布）----
+  // set = 全量替换（store.setMuteRules 同语义：重估全部记录的 muted 标志）；
+  // clear = 清空规则；query = 回当前规则表副本。支持 type/source/fingerprint
+  // 三级匹配与 expires_at TTL（绝对 unix 秒，0 = 永不过期，重启后语义不变）。
+  // 线程安全同告警动作：调用方阻塞等结果（有超时），绝不直写 store。
+  bool setMuteRules(const std::vector<alert_core::MuteRule>& rules, std::string& err,
+                    uint32_t wait_ms = 5000);
+  bool clearMuteRules(std::string& err, uint32_t wait_ms = 5000);
+  bool queryMuteRules(std::vector<alert_core::MuteRule>& out, uint32_t wait_ms = 1000);
 
   // ---- 快照发布与 admin 注入点（M12/M17）----
   // 注入的 publisher（可能 nullptr = 未接线；admin 据此 503，不崩溃）。
@@ -173,6 +197,8 @@ class NetStack {
     HttpSubmit,
     Ingest,
     AlertActionCmd,
+    SetMuteRules,
+    QueryMuteRules,
     RepublishSnapshot,
     QueryStatus,
     WaitIdle,
@@ -189,6 +215,7 @@ class NetStack {
   alert_core::AlertStore* store_ = nullptr;
   const alert_core::TypeRegistry* registry_ = nullptr;
   TimeFn time_fn_;
+  TimeSync time_sync_;  // net_task 上下文驱动（M21：WiFi 连上 SNTP 同步 + RTC 回写）
   NetEventCallback event_cb_ = nullptr;
   void* event_ctx_ = nullptr;
   bool running_ = false;

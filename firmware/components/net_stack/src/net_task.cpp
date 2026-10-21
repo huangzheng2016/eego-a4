@@ -75,6 +75,10 @@ struct NetStack::Impl {
     AlertActionResult result;  // net_task 回填
     PendingOp op;
   };
+  struct MuteRulesPayload {
+    std::vector<alert_core::MuteRule> rules;  // Set 输入 / Query 输出
+    PendingOp op;
+  };
   struct StatusPayload {
     NetStatusSnapshot snapshot;  // net_task 写入；take 成功后调用方 move 出
     PendingOp op;
@@ -110,8 +114,13 @@ struct NetStack::Impl {
   uint64_t nowUnix() const {
     return self->time_fn_ ? self->time_fn_() : (uint64_t)time(nullptr);
   }
+  // 统一时间源可信判定（M21）：组合根 time_valid_fn 优先，退化 time_fn()>0
+  bool timeValid() const {
+    if (self->cfg_.time_valid_fn) return self->cfg_.time_valid_fn();
+    return nowUnix() > 0;
+  }
 
-  // 任何 store 变更点（摄入/告警动作/适配器 runCycle/过期）之后调用：
+  // 任何 store 变更点（摄入/告警动作/适配器 runCycle/过期/静音规则）之后调用：
   // 摘要变了才 buildSnapshot + publish；force = 跳过比较（启动首帧/加载后）。
   void publishSnapshotIfChanged(bool force) {
     if (!self->store_ || !self->cfg_.snapshot_publisher) return;
@@ -124,17 +133,22 @@ struct NetStack::Impl {
     have_digest_ = true;
   }
 
-  // expire 巡检（TTL 到期 → Expired）：按 alert_expire_interval_ms 节拍；
-  // 有记录过期即发布快照（digest 判定会确认变化）。
+  // expire 巡检（TTL 到期 → Expired）+ 静音规则 TTL 落地（M21）：按
+  // alert_expire_interval_ms 节拍；有记录过期或静音标志翻转即发布快照
+  // （digest 判定会确认变化）。
   void expireDue(int64_t now) {
     if (!self->store_ || self->cfg_.alert_expire_interval_ms == 0) return;
     if (now < next_expire_ms_) return;
     next_expire_ms_ = now + self->cfg_.alert_expire_interval_ms;
-    const size_t n = self->store_->expire(nowUnix());
+    const uint64_t unix_now = nowUnix();
+    const size_t n = self->store_->expire(unix_now);
     if (n > 0) {
       ESP_LOGI(TAG, "alert expire: %u record(s) expired", (unsigned)n);
-      publishSnapshotIfChanged(false);
     }
+    // 以当前时间重估规则表：带 TTL 的规则到期后记录自动解除静音（store 语义
+    // 保证仅标志翻转的记录才 touch/落库，无变化时零 db 写、digest 不变不发布）
+    self->store_->setMuteRules(self->store_->muteRules(), unix_now);
+    publishSnapshotIfChanged(false);
   }
 
   SourceRuntime* findSource(const std::string& id) {
@@ -300,6 +314,30 @@ struct NetStack::Impl {
         p->op.give();
         break;
       }
+      case CmdType::SetMuteRules: {
+        auto p = std::static_pointer_cast<MuteRulesPayload>(cmd->payload);
+        if (!self->store_) {
+          p->op.ok = false;
+          p->op.err = "alert store not attached";
+        } else {
+          // 全量替换 + 重估全部记录 muted 标志（store 语义）；规则变化即 store
+          // 变更 → 快照发布（digest 判定，规则未命中任何记录时不重复发布）
+          self->store_->setMuteRules(p->rules, nowUnix());
+          publishSnapshotIfChanged(false);
+          p->op.ok = true;
+        }
+        p->op.give();
+        break;
+      }
+      case CmdType::QueryMuteRules: {
+        auto p = std::static_pointer_cast<MuteRulesPayload>(cmd->payload);
+        p->rules.clear();
+        if (self->store_) p->rules = self->store_->muteRules();
+        p->op.ok = (self->store_ != nullptr);
+        if (!p->op.ok) p->op.err = "alert store not attached";
+        p->op.give();
+        break;
+      }
       case CmdType::RepublishSnapshot: {
         auto p = std::static_pointer_cast<SemPayload>(cmd->payload);
         publishSnapshotIfChanged(true);  // 强制重建（store 可能在 net_task 外被加载）
@@ -319,6 +357,12 @@ struct NetStack::Impl {
         p->snapshot.pool_sessions = self->pool_ ? self->pool_->sessionCount() : 0;
         p->snapshot.running = true;
         for (const auto& s : sources_) p->snapshot.sources.push_back(s->health);
+        // 统一时间源状态（M21）：time_valid_fn 判定可信性 + TimeSync SNTP 状态
+        p->snapshot.time.valid = timeValid();
+        p->snapshot.time.now = nowUnix();
+        const TimeSyncStatus ts = self->time_sync_.status();
+        p->snapshot.time.sntp_synced = ts.sntp_synced;
+        p->snapshot.time.last_sync_at = ts.last_sync_at;
         p->op.ok = true;
         p->op.give();
         break;
@@ -346,12 +390,13 @@ struct NetStack::Impl {
     WifiState st = self->wifi_.state();
     if (st == WifiState::Connected) {
       if (last_wifi_state_ != WifiState::Connected) {
-        // 刚连上：退避复位 + 全部源立即重轮
+        // 刚连上：退避复位 + 全部源立即重轮 + SNTP（重）同步（M21）
         wifi_backoff_ms_ = kWifiBackoffStartMs;
         next_wifi_retry_ms_ = 0;
         for (auto& s : sources_) {
           if (s->cfg.enabled && s->next_due_ms > now) s->next_due_ms = now;
         }
+        self->time_sync_.onWifiConnected();
       }
     } else if (st != WifiState::Connecting && now >= next_wifi_retry_ms_) {
       std::vector<WifiAccount> accounts;
@@ -438,6 +483,7 @@ struct NetStack::Impl {
       pumpWifi(now);
       pumpSources(now);
       expireDue(now);
+      self->time_sync_.service();  // SNTP 同步结果的 RTC 回写（net_task 上下文 I2C）
       if (self->pool_) self->pool_->housekeeping(now);
       // 阻塞等命令/到期（上限 1s 保 housekeeping 与事件及时性）
       TickType_t wait = pdMS_TO_TICKS((uint32_t)nextWakeMs(now));
@@ -502,6 +548,7 @@ esp_err_t NetStack::start(const NetStackConfig& cfg, alert_core::AlertStore* sto
   impl_->last_digest_ = 0;
   impl_->have_digest_ = false;
   impl_->next_expire_ms_ = 0;
+  time_sync_.configure(cfg.sntp_servers, cfg.rtc_write_fn);  // M21：SNTP + RTC 回写
   if (!impl_->queue) impl_->queue = xQueueCreate(16, sizeof(Impl::Command*));
   if (!impl_->queue) return ESP_ERR_NO_MEM;
 
@@ -636,6 +683,32 @@ bool NetStack::republishSnapshot(uint32_t wait_ms) {
   if (!sendCmdAndWait(CmdType::RepublishSnapshot, p, wait_ms) ||
       xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
     return false;
+  return p->op.ok;
+}
+
+bool NetStack::setMuteRules(const std::vector<alert_core::MuteRule>& rules, std::string& err,
+                            uint32_t wait_ms) {
+  auto p = std::make_shared<Impl::MuteRulesPayload>();
+  p->rules = rules;
+  if (!sendCmdAndWait(CmdType::SetMuteRules, p, wait_ms) ||
+      xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE) {
+    err = "net_task busy/unavailable";
+    return false;
+  }
+  err = p->op.err;
+  return p->op.ok;
+}
+
+bool NetStack::clearMuteRules(std::string& err, uint32_t wait_ms) {
+  return setMuteRules({}, err, wait_ms);
+}
+
+bool NetStack::queryMuteRules(std::vector<alert_core::MuteRule>& out, uint32_t wait_ms) {
+  auto p = std::make_shared<Impl::MuteRulesPayload>();
+  if (!sendCmdAndWait(CmdType::QueryMuteRules, p, wait_ms) ||
+      xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
+    return false;
+  out = std::move(p->rules);  // take 成功后移出负载（shared_ptr 保活，无悬垂）
   return p->op.ok;
 }
 

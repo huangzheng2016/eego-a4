@@ -46,11 +46,22 @@ struct WifiStatus {
   uint32_t reconnect_backoff_ms = 0;  // 当前 WiFi 重连退避（指数退避档位）
 };
 
+// 统一时间源状态（M21：net_task 用 time_fn/time_valid_fn 填充；SNTP 状态由
+// TimeSync 提供）。valid=false 时 now 可能退化为 0 —— 展示层必须如实显示
+// 「时间不可用」，不得把 0 时间伪装成有效告警时间。
+struct TimeStatus {
+  bool valid = false;        // 时间可信（组合根 time_valid_fn 判定）
+  uint64_t now = 0;          // net_task 视角的统一 unix 秒（0 = 不可用）
+  bool sntp_synced = false;  // 本次运行至少 SNTP 同步成功过一次
+  uint64_t last_sync_at = 0; // 最近一次 SNTP 同步 unix 秒（0 = 从未）
+};
+
 struct NetStatusSnapshot {
   WifiStatus wifi;
   std::vector<SourceHealth> sources;
   uint32_t pool_sessions = 0;
   bool running = false;
+  TimeStatus time;
 };
 
 }  // namespace eego::net

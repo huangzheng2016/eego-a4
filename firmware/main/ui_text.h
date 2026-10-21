@@ -86,6 +86,9 @@ enum class Lang : uint8_t {
   X(LastOk, "上次成功", "LAST OK") \
   X(StoreStats, "存储", "STORE") \
   X(SysStatus, "系统", "SYSTEM") \
+  X(TimeLabel, "时间", "TIME") \
+  X(TimeRtc, "RTC", "RTC") \
+  X(TimeUnavailable, "时间不可用", "NO CLOCK") \
   X(ConfigOk, "配置有效", "CONFIG OK") \
   X(ConfigBad, "配置无效", "CONFIG INVALID") \
   X(Uptime, "运行", "UPTIME") \

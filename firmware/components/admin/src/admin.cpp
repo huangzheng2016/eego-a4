@@ -90,6 +90,22 @@ void syncSources(const std::vector<net::SourceConfig>& desired) {
   ADMIN_LOG_INFO("sources synced: %u source(s)", static_cast<unsigned>(desired.size()));
 }
 
+// mute_rules 热生效（M21；net_task 线程安全 API，全量替换语义与 store 一致）。
+// net_task 未运行时跳过（规则已在 config.json，下次启动恢复，M21 组合根保证）。
+void syncMuteRules(const std::vector<alert_core::MuteRule>& rules) {
+  net::NetStack& ns = net::NetStack::instance();
+  if (!ns.running()) {
+    ADMIN_LOG_WARN("mute rules sync skipped: net_task not running");
+    return;
+  }
+  std::string err;
+  if (!ns.setMuteRules(rules, err)) {
+    ADMIN_LOG_ERROR("mute rules sync failed: %s", err.c_str());
+    return;
+  }
+  ADMIN_LOG_INFO("mute rules synced: %u rule(s)", static_cast<unsigned>(rules.size()));
+}
+
 }  // namespace
 
 // ===========================================================================
@@ -160,6 +176,11 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       if (cmd.changed_sections & AdminCommand::kChangedSources) {
         syncSources(store.sources());
         ADMIN_LOG_INFO("config applied: sources");
+      }
+      // 5. mute_rules 热生效（整段替换；M21）
+      if (cmd.changed_sections & AdminCommand::kChangedMuteRules) {
+        syncMuteRules(store.muteRules());
+        ADMIN_LOG_INFO("config applied: mute_rules");
       }
       res.ok = true;
       return;
