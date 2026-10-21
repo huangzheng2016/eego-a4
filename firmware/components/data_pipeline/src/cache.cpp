@@ -152,9 +152,10 @@ bool validLabels(const std::vector<KeyValue>& labels) {
 }
 
 bool validMetricSample(const MetricSample& sample) {
-  return validId(sample.source_id) && !sample.metric.empty() && sample.metric.size() <= 128 &&
-         sample.timestamp_ms >= 0 && std::isfinite(sample.value) && sample.unit.size() <= 32 &&
-         validLabels(sample.labels);
+  return validId(sample.source_id) && !sample.metric.empty() && jsonIsValidUtf8(sample.metric) &&
+         jsonCodePointCount(sample.metric) <= 128 && sample.timestamp_ms >= 0 &&
+         std::isfinite(sample.value) && jsonIsValidUtf8(sample.unit) &&
+         jsonCodePointCount(sample.unit) <= 32 && validLabels(sample.labels);
 }
 
 bool readLabels(const JsonValue& value, std::vector<KeyValue>& out) {

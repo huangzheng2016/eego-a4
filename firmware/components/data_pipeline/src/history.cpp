@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "data_pipeline/history.h"
 
+#include "dashboard_core/json.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -85,9 +87,10 @@ void initializeStats(HistoryEntry& entry) {
 }
 
 bool validSample(const MetricSample& sample) {
-  return !sample.source_id.empty() && !sample.metric.empty() && sample.metric.size() <= 128 &&
-         sample.timestamp_ms >= 0 && std::isfinite(sample.value) &&
-         sample.labels.size() <= kMaxLabels;
+  return !sample.source_id.empty() && !sample.metric.empty() && jsonIsValidUtf8(sample.metric) &&
+         jsonCodePointCount(sample.metric) <= 128 && jsonIsValidUtf8(sample.unit) &&
+         jsonCodePointCount(sample.unit) <= 32 && sample.timestamp_ms >= 0 &&
+         std::isfinite(sample.value) && sample.labels.size() <= kMaxLabels;
 }
 
 HistoryLimits sanitize(HistoryLimits limits) {

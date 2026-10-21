@@ -261,7 +261,9 @@ bool validateMetric(const MetricMapping& mapping, std::string& error) {
       !checkPath(mapping.reset_at_path, false, error)) {
     return false;
   }
-  if (mapping.name.size() > 128 || mapping.unit.size() > 32 || mapping.target_unit.size() > 32) {
+  if (!jsonIsValidUtf8(mapping.name) || jsonCodePointCount(mapping.name) > 128 ||
+      !jsonIsValidUtf8(mapping.unit) || jsonCodePointCount(mapping.unit) > 32 ||
+      !jsonIsValidUtf8(mapping.target_unit) || jsonCodePointCount(mapping.target_unit) > 32) {
     error = "metric name or unit exceeds its budget";
     return false;
   }

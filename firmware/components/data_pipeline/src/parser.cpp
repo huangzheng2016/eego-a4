@@ -224,7 +224,7 @@ bool mapMetric(const SourcePlan& plan, const MetricMapping& mapping, const JsonV
                            : name_value != nullptr && name_value->isScalar()
                                ? name_value->scalarText()
                                : std::string();
-  if (name.empty() || name.size() > 128 || !jsonIsValidUtf8(name)) {
+  if (name.empty() || !jsonIsValidUtf8(name) || jsonCodePointCount(name) > 128) {
     error = "mapped metric name is missing, invalid, or too long";
     return false;
   }
@@ -269,7 +269,7 @@ bool mapMetric(const SourcePlan& plan, const MetricMapping& mapping, const JsonV
                                       ? unit_node->scalarText()
                                       : mapping.unit;
   sample.unit = mapping.target_unit.empty() ? source_unit : mapping.target_unit;
-  if (sample.unit.size() > 32) {
+  if (!jsonIsValidUtf8(sample.unit) || jsonCodePointCount(sample.unit) > 32) {
     error = "metric unit exceeds its budget: " + name;
     return false;
   }
@@ -545,7 +545,8 @@ bool promLabels(const JsonValue& item, const MetricMapping& mapping, MetricSampl
     }
   }
   if (sample.metric.empty()) sample.metric = "prometheus.value";
-  if (sample.metric.size() > 128 || sample.labels.size() > kMaxLabels) {
+  if (!jsonIsValidUtf8(sample.metric) || jsonCodePointCount(sample.metric) > 128 ||
+      sample.labels.size() > kMaxLabels) {
     error = "Prometheus metric exceeds name/label budget";
     return false;
   }
@@ -563,6 +564,10 @@ bool appendPromSample(const SourcePlan& plan, const MetricMapping& mapping,
   }
   sample.source_id = plan.source.id;
   sample.unit = mapping.target_unit.empty() ? mapping.unit : mapping.target_unit;
+  if (!jsonIsValidUtf8(sample.unit) || jsonCodePointCount(sample.unit) > 32) {
+    error = "Prometheus metric exceeds unit budget";
+    return false;
+  }
   const int64_t reset_at_ms = out.resetAtFor(sample.metric);
   if (!transformValue(sample.value, mapping, record, sample.timestamp_ms, reset_at_ms, variables,
                       error) ||
