@@ -87,6 +87,7 @@ HistoryLimits sanitize(HistoryLimits limits) {
       limits.downsample_points >= limits.max_points_per_series) {
     limits.downsample_points = limits.max_points_per_series / 2;
   }
+  limits.max_raw_points_per_series = std::max<size_t>(limits.max_raw_points_per_series, 1);
   limits.max_total_points = std::max<size_t>(limits.max_total_points, 1);
   limits.retention_ms = std::max<int64_t>(limits.retention_ms, 60000);
   return limits;
@@ -254,7 +255,127 @@ void downsampleEntries(std::vector<HistoryEntry>& entries, size_t target_points)
   entries = std::move(reduced);
 }
 
-MetricHistory::MetricHistory(HistoryLimits limits) : limits_(sanitize(limits)) {}
+AggregationResult incompleteAggregate() {
+  AggregationResult result;
+  result.complete = false;
+  return result;
+}
+
+MetricHistory::MetricHistory(HistoryLimits limits, int32_t timezone_offset_minutes)
+    : limits_(sanitize(limits)), timezone_offset_minutes_(timezone_offset_minutes) {}
+
+void MetricHistory::addFixed(Series& series, const MetricSample& sample) {
+  const auto add = [&](WindowKind kind) {
+    const int64_t duration = kind == WindowKind::Fixed5h ? 5 * kHourMs
+                             : kind == WindowKind::Fixed7d ? 7 * kDayMs
+                                                           : kDayMs;
+    const int64_t from = kind != WindowKind::Today && series.reset_at_ms > 0
+                             ? series.reset_at_ms - duration
+                             : resolveWindow(kind, sample.timestamp_ms, 0,
+                                             timezone_offset_minutes_)
+                                   .from_ms;
+    if (kind != WindowKind::Today && series.reset_at_ms > 0 &&
+        (sample.timestamp_ms < from || sample.timestamp_ms > series.reset_at_ms)) {
+      return;
+    }
+    WindowAccumulator& state = series.windows[{kind, from}];
+    if (state.count == 0) {
+      state.sum = sample.value;
+      state.min = sample.value;
+      state.max = sample.value;
+      state.first_value = sample.value;
+      state.last_value = sample.value;
+      state.first_timestamp_ms = sample.timestamp_ms;
+      state.last_timestamp_ms = sample.timestamp_ms;
+      state.count = 1;
+      return;
+    }
+    state.count += 1;
+    state.sum += sample.value;
+    state.min = std::min(state.min, sample.value);
+    state.max = std::max(state.max, sample.value);
+    if (sample.timestamp_ms < state.first_timestamp_ms) {
+      state.first_timestamp_ms = sample.timestamp_ms;
+      state.first_value = sample.value;
+    }
+    if (sample.timestamp_ms >= state.last_timestamp_ms) {
+      state.last_timestamp_ms = sample.timestamp_ms;
+      state.last_value = sample.value;
+    }
+    if (!std::isfinite(state.sum)) state.coverage_lost = true;
+  };
+  add(WindowKind::Today);
+  add(WindowKind::Fixed5h);
+  add(WindowKind::Fixed7d);
+}
+
+void MetricHistory::markFixedIncomplete(Series& series, const MetricSample& sample) {
+  const auto mark = [&](WindowKind kind) {
+    const int64_t duration = kind == WindowKind::Fixed5h ? 5 * kHourMs
+                             : kind == WindowKind::Fixed7d ? 7 * kDayMs
+                                                           : kDayMs;
+    const int64_t from = kind != WindowKind::Today && series.reset_at_ms > 0
+                             ? series.reset_at_ms - duration
+                             : resolveWindow(kind, sample.timestamp_ms, 0,
+                                             timezone_offset_minutes_)
+                                   .from_ms;
+    if (kind != WindowKind::Today && series.reset_at_ms > 0 &&
+        (sample.timestamp_ms < from || sample.timestamp_ms > series.reset_at_ms)) {
+      return;
+    }
+    const auto state = series.windows.find({kind, from});
+    if (state != series.windows.end()) state->second.coverage_lost = true;
+  };
+  mark(WindowKind::Today);
+  mark(WindowKind::Fixed5h);
+  mark(WindowKind::Fixed7d);
+}
+
+void MetricHistory::pruneFixed(Series& series, int64_t cutoff_ms) {
+  for (auto it = series.windows.begin(); it != series.windows.end();) {
+    if (it->second.last_timestamp_ms < cutoff_ms) {
+      series.fixed_gap = true;
+      it = series.windows.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+AggregationResult MetricHistory::aggregateFixed(const Series& series, WindowKind kind,
+                                                const ResolvedWindow& window,
+                                                Aggregation aggregation) const {
+  const auto state = series.windows.find({kind, window.from_ms});
+  if (state == series.windows.end()) {
+    return series.fixed_gap ? incompleteAggregate() : AggregationResult{};
+  }
+  const WindowAccumulator& aggregate = state->second;
+  if (aggregate.coverage_lost) return incompleteAggregate();
+  AggregationResult result;
+  result.sample_count = aggregate.count;
+  result.first_timestamp_ms = aggregate.first_timestamp_ms;
+  result.last_timestamp_ms = aggregate.last_timestamp_ms;
+  if (aggregate.count == 0) return result;
+  if (aggregation == Aggregation::Sum || aggregation == Aggregation::Avg) {
+    result.value = aggregate.sum;
+    if (aggregation == Aggregation::Avg)
+      result.value /= static_cast<double>(aggregate.count);
+  } else if (aggregation == Aggregation::Min) {
+    result.value = aggregate.min;
+  } else if (aggregation == Aggregation::Max) {
+    result.value = aggregate.max;
+  } else {
+    result.value = aggregate.last_value - aggregate.first_value;
+    if (aggregation == Aggregation::Rate) {
+      const int64_t elapsed = aggregate.last_timestamp_ms - aggregate.first_timestamp_ms;
+      if (elapsed <= 0) return result;
+      result.value /= static_cast<double>(elapsed) / 1000.0;
+    }
+  }
+  if (!std::isfinite(result.value)) return result;
+  result.valid = true;
+  return result;
+}
 
 std::string MetricHistory::keyFor(const MetricSample& sample) {
   std::string key;
@@ -277,6 +398,10 @@ bool MetricHistory::appendEntry(HistoryEntry entry, std::string& error) {
   const std::string key = keyFor(entry.sample);
   auto it = series_.find(key);
   if (it == series_.end()) {
+    if (series_.size() >= limits_.max_series) {
+      error = "history series limit exceeded";
+      return false;
+    }
     Series series;
     series.source_id = entry.sample.source_id;
     series.metric = entry.sample.metric;
@@ -285,6 +410,7 @@ bool MetricHistory::appendEntry(HistoryEntry entry, std::string& error) {
   }
   Series& series = it->second;
   series.reset_at_ms = entry.reset_at_ms;
+  if (series.unit.empty()) series.unit = entry.sample.unit;
   auto position = std::lower_bound(series.raw_points.begin(), series.raw_points.end(),
                                    entry.sample.timestamp_ms,
                                    [](const MetricSample& point, int64_t timestamp) {
@@ -292,25 +418,36 @@ bool MetricHistory::appendEntry(HistoryEntry entry, std::string& error) {
                                    });
   if (position != series.raw_points.end() &&
       position->timestamp_ms == entry.sample.timestamp_ms) {
+    if (position->value != entry.sample.value) markFixedIncomplete(series, *position);
     *position = std::move(entry.sample);
   } else {
-    series.raw_points.insert(position, std::move(entry.sample));
+    position = series.raw_points.insert(position, std::move(entry.sample));
+    addFixed(series, *position);
+  }
+  HistoryEntry display;
+  display.sample = *position;
+  display.reset_at_ms = series.reset_at_ms;
+  auto display_position = std::lower_bound(series.points.begin(), series.points.end(),
+                                           display.sample.timestamp_ms,
+                                           [](const HistoryEntry& point, int64_t timestamp) {
+                                             return point.sample.timestamp_ms < timestamp;
+                                           });
+  if (display_position != series.points.end() &&
+      display_position->sample.timestamp_ms == display.sample.timestamp_ms) {
+    if (!display_position->aggregated) *display_position = std::move(display);
+  } else {
+    series.points.insert(display_position, std::move(display));
   }
   downsample(series);
   return true;
 }
 
 void MetricHistory::downsample(Series& series) {
+  if (series.points.size() <= limits_.max_points_per_series) return;
   std::vector<HistoryEntry> points;
-  points.reserve(series.raw_points.size());
-  for (const MetricSample& raw : series.raw_points) {
-    HistoryEntry entry;
-    entry.sample = raw;
-    entry.reset_at_ms = series.reset_at_ms;
-    points.push_back(std::move(entry));
-  }
-  if (points.size() > limits_.max_points_per_series)
-    downsampleEntries(points, limits_.downsample_points);
+  points.reserve(series.points.size());
+  for (const HistoryEntry& entry : series.points) points.push_back(entry);
+  downsampleEntries(points, limits_.downsample_points);
   series.points.clear();
   for (HistoryEntry& point : points) series.points.push_back(std::move(point));
 }
@@ -325,31 +462,29 @@ void MetricHistory::recomputeCounts() {
 }
 
 void MetricHistory::enforceLimits() {
-  recomputeCounts();
-  while (series_.size() > limits_.max_series) {
-    auto oldest = series_.begin();
-    for (auto it = std::next(series_.begin()); it != series_.end(); ++it) {
-      if (it->second.raw_points.back().timestamp_ms <
-          oldest->second.raw_points.back().timestamp_ms) {
-        oldest = it;
-      }
+  for (auto& item : series_) {
+    Series& series = item.second;
+    while (series.raw_points.size() > limits_.max_raw_points_per_series) {
+      series.raw_gap_before_ms =
+          std::max(series.raw_gap_before_ms, series.raw_points.front().timestamp_ms);
+      series.raw_points.pop_front();
     }
-    series_.erase(oldest);
-    recomputeCounts();
   }
+  recomputeCounts();
   while (raw_point_count_ > limits_.max_total_points && !series_.empty()) {
-    auto oldest = series_.begin();
-    for (auto it = std::next(series_.begin()); it != series_.end(); ++it) {
-      if (it->second.raw_points.front().timestamp_ms <
-          oldest->second.raw_points.front().timestamp_ms) {
+    auto oldest = series_.end();
+    for (auto it = series_.begin(); it != series_.end(); ++it) {
+      if (it->second.raw_points.empty()) continue;
+      if (oldest == series_.end() ||
+          it->second.raw_points.front().timestamp_ms <
+              oldest->second.raw_points.front().timestamp_ms) {
         oldest = it;
       }
     }
+    if (oldest == series_.end()) break;
+    oldest->second.raw_gap_before_ms = std::max(
+        oldest->second.raw_gap_before_ms, oldest->second.raw_points.front().timestamp_ms);
     oldest->second.raw_points.pop_front();
-    if (oldest->second.raw_points.empty())
-      series_.erase(oldest);
-    else
-      downsample(oldest->second);
     recomputeCounts();
   }
 }
@@ -382,12 +517,69 @@ bool MetricHistory::replaceSource(const std::string& source_id,
     return left.sample.timestamp_ms < right.sample.timestamp_ms;
   });
   for (HistoryEntry& entry : ordered) {
+    if (entry.window_state) continue;
     if (entry.sample.source_id.empty()) entry.sample.source_id = source_id;
-    if (entry.sample.source_id != source_id || !appendEntry(std::move(entry), error)) {
-      if (error.empty()) error = "history rejected a cross-source cache entry";
+    if (entry.sample.source_id != source_id) {
+      error = "history rejected a cross-source cache entry";
       clearSource(source_id);
       return false;
     }
+    MetricSample canonical = entry.sample;
+    canonical.labels = canonicalLabels(std::move(canonical.labels));
+    const std::string key = keyFor(canonical);
+    const int64_t raw_gap = entry.raw_gap_before_ms;
+    const bool fixed_gap = entry.fixed_gap;
+    if (!appendEntry(std::move(entry), error)) {
+      clearSource(source_id);
+      return false;
+    }
+    Series& series = series_.at(key);
+    series.raw_gap_before_ms = std::max(series.raw_gap_before_ms, raw_gap);
+    series.fixed_gap = series.fixed_gap || fixed_gap;
+  }
+  for (const HistoryEntry& entry : ordered) {
+    if (!entry.window_state) continue;
+    if (entry.sample.source_id != source_id || entry.window_kind == WindowKind::Rolling24h ||
+        entry.window_from_ms < 0 || entry.count == 0 || !std::isfinite(entry.sum) ||
+        !std::isfinite(entry.min) || !std::isfinite(entry.max) ||
+        !std::isfinite(entry.first_value) || !std::isfinite(entry.last_value) ||
+        entry.first_timestamp_ms < 0 ||
+        entry.first_timestamp_ms > entry.sample.timestamp_ms) {
+      error = "history rejected an invalid window cache entry";
+      clearSource(source_id);
+      return false;
+    }
+    MetricSample canonical = entry.sample;
+    canonical.labels = canonicalLabels(std::move(canonical.labels));
+    const std::string key = keyFor(canonical);
+    auto it = series_.find(key);
+    if (it == series_.end()) {
+      if (series_.size() >= limits_.max_series) {
+        error = "history series limit exceeded";
+        clearSource(source_id);
+        return false;
+      }
+      Series series;
+      series.source_id = canonical.source_id;
+      series.metric = canonical.metric;
+      series.labels = canonical.labels;
+      it = series_.emplace(key, std::move(series)).first;
+    }
+    Series& series = it->second;
+    series.reset_at_ms = entry.reset_at_ms;
+    if (series.unit.empty()) series.unit = canonical.unit;
+    WindowAccumulator state;
+    state.count = entry.count;
+    state.sum = entry.sum;
+    state.min = entry.min;
+    state.max = entry.max;
+    state.first_value = entry.first_value;
+    state.last_value = entry.last_value;
+    state.first_timestamp_ms = entry.first_timestamp_ms;
+    state.last_timestamp_ms = entry.sample.timestamp_ms;
+    state.coverage_lost = entry.coverage_lost;
+    series.windows[{entry.window_kind, entry.window_from_ms}] = state;
+    series.fixed_gap = series.fixed_gap || entry.fixed_gap;
   }
   prune(now_ms);
   enforceLimits();
@@ -407,18 +599,21 @@ void MetricHistory::clearSource(const std::string& source_id) {
 void MetricHistory::prune(int64_t now_ms) {
   const int64_t cutoff = now_ms > limits_.retention_ms ? now_ms - limits_.retention_ms : 0;
   for (auto it = series_.begin(); it != series_.end();) {
-    bool changed = false;
-    auto& points = it->second.raw_points;
+    Series& series = it->second;
+    auto& points = series.raw_points;
     while (!points.empty() && points.front().timestamp_ms < cutoff) {
+      series.raw_gap_before_ms =
+          std::max(series.raw_gap_before_ms, points.front().timestamp_ms);
       points.pop_front();
-      changed = true;
     }
-    if (points.empty()) {
+    auto& display = series.points;
+    while (!display.empty() && display.front().sample.timestamp_ms < cutoff)
+      display.pop_front();
+    pruneFixed(series, cutoff);
+    if (points.empty() && display.empty() && series.windows.empty())
       it = series_.erase(it);
-    } else {
-      if (changed) downsample(it->second);
+    else
       ++it;
-    }
   }
   recomputeCounts();
 }
@@ -455,12 +650,46 @@ AggregationResult MetricHistory::aggregate(const std::string& source_id,
                                            int32_t timezone_offset_minutes) const {
   const ResolvedWindow resolved = resolveWindow(window, now_ms, resetAt(source_id, metric),
                                                 timezone_offset_minutes);
+  if (window != WindowKind::Rolling24h) {
+    std::vector<HistoryEntry> selected;
+    for (const auto& item : series_) {
+      const Series& series = item.second;
+      if (series.source_id != source_id || series.metric != metric ||
+          !labelsMatch(series.labels, labels))
+        continue;
+      const AggregationResult check = aggregateFixed(series, window, resolved, aggregation);
+      if (!check.complete) return incompleteAggregate();
+      if (check.sample_count == 0) continue;
+      const WindowAccumulator& state = series.windows.at({window, resolved.from_ms});
+      HistoryEntry entry;
+      entry.sample.source_id = series.source_id;
+      entry.sample.metric = series.metric;
+      entry.sample.unit = series.unit;
+      entry.sample.labels = series.labels;
+      entry.sample.timestamp_ms = state.last_timestamp_ms;
+      entry.sample.value = state.last_value;
+      entry.count = state.count;
+      entry.sum = state.sum;
+      entry.min = state.min;
+      entry.max = state.max;
+      entry.first_value = state.first_value;
+      entry.last_value = state.last_value;
+      entry.first_timestamp_ms = state.first_timestamp_ms;
+      entry.aggregated = true;
+      selected.push_back(std::move(entry));
+    }
+    return aggregateHistoryEntries(selected, aggregation);
+  }
   std::vector<MetricSample> selected;
   for (const auto& item : series_) {
     const Series& series = item.second;
     if (series.source_id != source_id || series.metric != metric ||
         !labelsMatch(series.labels, labels))
       continue;
+    if (series.raw_gap_before_ms > 0 && series.raw_gap_before_ms >= resolved.from_ms &&
+        series.raw_gap_before_ms <= resolved.to_ms) {
+      return incompleteAggregate();
+    }
     for (const MetricSample& raw : series.raw_points) {
       if (raw.timestamp_ms >= resolved.from_ms && raw.timestamp_ms <= resolved.to_ms)
         selected.push_back(raw);
@@ -479,6 +708,33 @@ std::vector<HistoryEntry> MetricHistory::entries(const std::string& source_id) c
       HistoryEntry entry;
       entry.sample = raw;
       entry.reset_at_ms = series.reset_at_ms;
+      entry.raw_gap_before_ms = series.raw_gap_before_ms;
+      entry.fixed_gap = series.fixed_gap;
+      out.push_back(std::move(entry));
+    }
+    for (const auto& window : series.windows) {
+      const WindowAccumulator& state = window.second;
+      HistoryEntry entry;
+      entry.sample.source_id = series.source_id;
+      entry.sample.metric = series.metric;
+      entry.sample.unit = series.unit;
+      entry.sample.labels = series.labels;
+      entry.sample.timestamp_ms = state.last_timestamp_ms;
+      entry.sample.value = state.last_value;
+      entry.reset_at_ms = series.reset_at_ms;
+      entry.count = state.count;
+      entry.sum = state.sum;
+      entry.min = state.min;
+      entry.max = state.max;
+      entry.first_value = state.first_value;
+      entry.last_value = state.last_value;
+      entry.first_timestamp_ms = state.first_timestamp_ms;
+      entry.aggregated = true;
+      entry.window_state = true;
+      entry.window_kind = window.first.kind;
+      entry.window_from_ms = window.first.from_ms;
+      entry.fixed_gap = series.fixed_gap;
+      entry.coverage_lost = state.coverage_lost;
       out.push_back(std::move(entry));
     }
   }

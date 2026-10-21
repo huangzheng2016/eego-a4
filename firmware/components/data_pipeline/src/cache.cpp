@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <set>
 
@@ -211,6 +212,7 @@ bool readEvent(const JsonValue& value, Event& out) {
 }
 
 bool historyEntryFromJson(const JsonValue& root, HistoryEntry& out) {
+  out = HistoryEntry{};
   const JsonValue* sample = root.find("sample");
   const JsonValue* reset = root.find("reset_at");
   if (sample == nullptr || reset == nullptr || reset->type() != JsonValue::Type::Int ||
@@ -218,63 +220,99 @@ bool historyEntryFromJson(const JsonValue& root, HistoryEntry& out) {
     return false;
   out.reset_at_ms = reset->intValue();
   const JsonValue* bucket = root.find("bucket");
-  if (bucket == nullptr) return true;
-  if (bucket->type() != JsonValue::Type::Object) return false;
-  const JsonValue* count = bucket->find("count");
-  const JsonValue* sum = bucket->find("sum");
-  const JsonValue* min = bucket->find("min");
-  const JsonValue* max = bucket->find("max");
-  const JsonValue* first = bucket->find("first_value");
-  const JsonValue* last = bucket->find("last_value");
-  const JsonValue* first_timestamp = bucket->find("first_timestamp_ms");
-  const JsonValue* aggregated = bucket->find("aggregated");
-  const auto number = [](const JsonValue* value) {
-    return value != nullptr &&
-           (value->type() == JsonValue::Type::Int || value->type() == JsonValue::Type::Double) &&
-           std::isfinite(value->doubleValue());
-  };
-  if (count == nullptr || count->type() != JsonValue::Type::Int || count->intValue() <= 0 ||
-      static_cast<uint64_t>(count->intValue()) > std::numeric_limits<size_t>::max() ||
-      !number(sum) || !number(min) || !number(max) || !number(first) || !number(last) ||
-      first_timestamp == nullptr || first_timestamp->type() != JsonValue::Type::Int ||
-      first_timestamp->intValue() < 0 ||
-      first_timestamp->intValue() > out.sample.timestamp_ms || aggregated == nullptr ||
-      aggregated->type() != JsonValue::Type::Bool) {
+  if (bucket != nullptr) {
+    if (bucket->type() != JsonValue::Type::Object) return false;
+    const JsonValue* count = bucket->find("count");
+    const JsonValue* sum = bucket->find("sum");
+    const JsonValue* min = bucket->find("min");
+    const JsonValue* max = bucket->find("max");
+    const JsonValue* first = bucket->find("first_value");
+    const JsonValue* last = bucket->find("last_value");
+    const JsonValue* first_timestamp = bucket->find("first_timestamp_ms");
+    const JsonValue* aggregated = bucket->find("aggregated");
+    const auto number = [](const JsonValue* value) {
+      return value != nullptr &&
+             (value->type() == JsonValue::Type::Int || value->type() == JsonValue::Type::Double) &&
+             std::isfinite(value->doubleValue());
+    };
+    if (count == nullptr || count->type() != JsonValue::Type::Int || count->intValue() <= 0 ||
+        static_cast<uint64_t>(count->intValue()) > std::numeric_limits<size_t>::max() ||
+        !number(sum) || !number(min) || !number(max) || !number(first) || !number(last) ||
+        first_timestamp == nullptr || first_timestamp->type() != JsonValue::Type::Int ||
+        first_timestamp->intValue() < 0 ||
+        first_timestamp->intValue() > out.sample.timestamp_ms || aggregated == nullptr ||
+        aggregated->type() != JsonValue::Type::Bool) {
+      return false;
+    }
+    out.count = static_cast<size_t>(count->intValue());
+    out.sum = sum->doubleValue();
+    out.min = min->doubleValue();
+    out.max = max->doubleValue();
+    out.first_value = first->doubleValue();
+    out.last_value = last->doubleValue();
+    out.first_timestamp_ms = first_timestamp->intValue();
+    out.aggregated = aggregated->boolValue();
+  }
+  const JsonValue* window_state = root.find("window_state");
+  const JsonValue* window_kind = root.find("window_kind");
+  const JsonValue* window_from = root.find("window_from_ms");
+  const JsonValue* raw_gap = root.find("raw_gap_before_ms");
+  const JsonValue* fixed_gap = root.find("fixed_gap");
+  const JsonValue* coverage_lost = root.find("coverage_lost");
+  if ((window_state != nullptr && window_state->type() != JsonValue::Type::Bool) ||
+      (window_kind != nullptr && window_kind->type() != JsonValue::Type::String) ||
+      (window_from != nullptr &&
+       (window_from->type() != JsonValue::Type::Int || window_from->intValue() < 0)) ||
+      (raw_gap != nullptr &&
+       (raw_gap->type() != JsonValue::Type::Int || raw_gap->intValue() < 0)) ||
+      (fixed_gap != nullptr && fixed_gap->type() != JsonValue::Type::Bool) ||
+      (coverage_lost != nullptr && coverage_lost->type() != JsonValue::Type::Bool)) {
     return false;
   }
-  out.count = static_cast<size_t>(count->intValue());
-  out.sum = sum->doubleValue();
-  out.min = min->doubleValue();
-  out.max = max->doubleValue();
-  out.first_value = first->doubleValue();
-  out.last_value = last->doubleValue();
-  out.first_timestamp_ms = first_timestamp->intValue();
-  out.aggregated = aggregated->boolValue();
-  return out.min <= out.max;
+  if (window_state != nullptr) out.window_state = window_state->boolValue();
+  if (window_kind != nullptr && !windowKindFromString(window_kind->stringValue(), out.window_kind))
+    return false;
+  if (window_from != nullptr) out.window_from_ms = window_from->intValue();
+  if (raw_gap != nullptr) out.raw_gap_before_ms = raw_gap->intValue();
+  if (fixed_gap != nullptr) out.fixed_gap = fixed_gap->boolValue();
+  if (coverage_lost != nullptr) out.coverage_lost = coverage_lost->boolValue();
+  return (bucket == nullptr || out.min <= out.max) &&
+         (!out.window_state || (window_kind != nullptr && bucket != nullptr));
 }
 
 std::string historyEntryToJson(const HistoryEntry& entry) {
-  const size_t count = entry.count == 0 ? 1 : entry.count;
-  const double sum = entry.count == 0 ? entry.sample.value : entry.sum;
-  const double min = entry.count == 0 ? entry.sample.value : entry.min;
-  const double max = entry.count == 0 ? entry.sample.value : entry.max;
-  const double first = entry.count == 0 ? entry.sample.value : entry.first_value;
-  const double last = entry.count == 0 ? entry.sample.value : entry.last_value;
-  const int64_t first_timestamp =
-      entry.count == 0 ? entry.sample.timestamp_ms : entry.first_timestamp_ms;
-  JsonValue::Object bucket;
-  bucket.emplace_back("count", integer(static_cast<int64_t>(count)));
-  bucket.emplace_back("sum", JsonValue::makeDouble(sum));
-  bucket.emplace_back("min", JsonValue::makeDouble(min));
-  bucket.emplace_back("max", JsonValue::makeDouble(max));
-  bucket.emplace_back("first_value", JsonValue::makeDouble(first));
-  bucket.emplace_back("last_value", JsonValue::makeDouble(last));
-  bucket.emplace_back("first_timestamp_ms", integer(first_timestamp));
-  bucket.emplace_back("aggregated", JsonValue::makeBool(entry.aggregated));
   JsonValue::Object object;
   object.emplace_back("sample", sampleToJson(entry.sample));
   object.emplace_back("reset_at", integer(entry.reset_at_ms));
-  object.emplace_back("bucket", JsonValue::makeObject(std::move(bucket)));
+  if (entry.aggregated || entry.window_state) {
+    const size_t count = entry.count == 0 ? 1 : entry.count;
+    const double sum = entry.count == 0 ? entry.sample.value : entry.sum;
+    const double min = entry.count == 0 ? entry.sample.value : entry.min;
+    const double max = entry.count == 0 ? entry.sample.value : entry.max;
+    const double first = entry.count == 0 ? entry.sample.value : entry.first_value;
+    const double last = entry.count == 0 ? entry.sample.value : entry.last_value;
+    const int64_t first_timestamp =
+        entry.count == 0 ? entry.sample.timestamp_ms : entry.first_timestamp_ms;
+    JsonValue::Object bucket;
+    bucket.emplace_back("count", integer(static_cast<int64_t>(count)));
+    bucket.emplace_back("sum", JsonValue::makeDouble(sum));
+    bucket.emplace_back("min", JsonValue::makeDouble(min));
+    bucket.emplace_back("max", JsonValue::makeDouble(max));
+    bucket.emplace_back("first_value", JsonValue::makeDouble(first));
+    bucket.emplace_back("last_value", JsonValue::makeDouble(last));
+    bucket.emplace_back("first_timestamp_ms", integer(first_timestamp));
+    bucket.emplace_back("aggregated", JsonValue::makeBool(entry.aggregated));
+    object.emplace_back("bucket", JsonValue::makeObject(std::move(bucket)));
+  }
+  if (entry.window_state) {
+    object.emplace_back("window_state", JsonValue::makeBool(true));
+    object.emplace_back("window_kind", string(windowKindName(entry.window_kind)));
+    object.emplace_back("window_from_ms", integer(entry.window_from_ms));
+  }
+  if (entry.raw_gap_before_ms > 0)
+    object.emplace_back("raw_gap_before_ms", integer(entry.raw_gap_before_ms));
+  if (entry.fixed_gap) object.emplace_back("fixed_gap", JsonValue::makeBool(true));
+  if (entry.coverage_lost) object.emplace_back("coverage_lost", JsonValue::makeBool(true));
   return JsonValue::makeObject(std::move(object)).toString();
 }
 
@@ -305,13 +343,28 @@ std::string serializeHistory(std::vector<HistoryEntry> entries, size_t max_bytes
     total += lines.back().size();
   }
   size_t first = 0;
+  int64_t dropped_raw = 0;
+  bool dropped_fixed = false;
   while (total > max_bytes && first < lines.size()) {
     total -= lines[first].size();
+    if (entries[first].window_state)
+      dropped_fixed = true;
+    else
+      dropped_raw = std::max(dropped_raw, entries[first].sample.timestamp_ms);
     ++first;
+  }
+  if (first == entries.size()) return {};
+  if (dropped_fixed) {
+    for (size_t i = first; i < entries.size(); ++i) entries[i].fixed_gap = true;
+  }
+  if (dropped_raw > 0) {
+    for (size_t i = first; i < entries.size(); ++i) {
+      entries[i].raw_gap_before_ms = std::max(entries[i].raw_gap_before_ms, dropped_raw);
+    }
   }
   std::string out;
   out.reserve(total);
-  for (size_t i = first; i < lines.size(); ++i) out += lines[i];
+  for (size_t i = first; i < entries.size(); ++i) out += historyEntryToJson(entries[i]) + "\n";
   return out;
 }
 
@@ -377,7 +430,12 @@ bool SdCache::appendHistory(const std::string& source_id,
   combined.insert(combined.end(), entries.begin(), entries.end());
   combined = boundHistory(combined, limits_, error);
   if (!error.empty()) return false;
+  const bool had_entries = !combined.empty();
   const std::string data = serializeHistory(std::move(combined), limits_.max_history_bytes);
+  if (had_entries && data.empty()) {
+    error = "history byte budget cannot preserve coverage";
+    return false;
+  }
   return writeAtomic(historyPath(source_id), data, error);
 }
 
@@ -389,32 +447,57 @@ bool SdCache::loadHistory(const std::string& source_id, std::vector<HistoryEntry
     error = "invalid cache source id";
     return false;
   }
-  std::string data;
-  if (!readFile(historyPath(source_id), limits_.max_history_bytes, data, error)) return false;
-  size_t position = 0;
+  struct stat info;
+  const std::string path = historyPath(source_id);
+  if (::stat(path.c_str(), &info) != 0 || info.st_size < 0) {
+    error = "cache file is unavailable";
+    return false;
+  }
+  if (static_cast<uint64_t>(info.st_size) > limits_.max_history_bytes) {
+    error = "cache file exceeds configured byte budget";
+    return false;
+  }
+  FILE* file = std::fopen(path.c_str(), "rb");
+  if (file == nullptr) {
+    error = "cache file open failed";
+    return false;
+  }
   size_t valid_records = 0;
-  while (position < data.size()) {
-    size_t end = data.find('\n', position);
-    const bool complete = end != std::string::npos;
-    if (!complete) end = data.size();
-    const std::string_view line(data.data() + position, end - position);
-    position = end + 1;
+  std::vector<char> buffer(16384);
+  while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), file) != nullptr) {
+    const size_t length = std::strlen(buffer.data());
+    const bool complete = length > 0 && buffer[length - 1] == '\n';
+    if (!complete) {
+      int c = 0;
+      while ((c = std::fgetc(file)) != EOF && c != '\n') {
+      }
+      continue;
+    }
+    const std::string_view line(buffer.data(), length - 1);
     if (line.empty()) continue;
     JsonValue root;
     JsonParseError parse_error;
     HistoryEntry entry;
-    if (!complete || !jsonParse(line, root, parse_error) ||
-        !historyEntryFromJson(root, entry) || entry.sample.source_id != source_id) {
+    if (!jsonParse(line, root, parse_error) || !historyEntryFromJson(root, entry) ||
+        entry.sample.source_id != source_id) {
       continue;
     }
     out.push_back(std::move(entry));
     if (++valid_records > limits_.max_history_points * 2) {
-      error = "history record count exceeds load budget";
+      std::fclose(file);
       out.clear();
+      error = "history record count exceeds load budget";
       return false;
     }
   }
-  if (out.empty() && !data.empty()) {
+  const bool read_failed = std::ferror(file) != 0;
+  std::fclose(file);
+  if (read_failed) {
+    out.clear();
+    error = "cache file read failed";
+    return false;
+  }
+  if (out.empty() && info.st_size > 0) {
     error = "history contains no valid records";
     return false;
   }

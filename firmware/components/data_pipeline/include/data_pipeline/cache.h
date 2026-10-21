@@ -10,9 +10,9 @@
 namespace eego::dashboard::pipeline {
 
 struct CacheLimits {
-  size_t max_history_points = 4096;
+  size_t max_history_points = 8192;
   size_t downsample_points = 2048;
-  size_t max_history_bytes = 512 * 1024;
+  size_t max_history_bytes = 4 * 1024 * 1024;  // matches the rolling 1m envelope
   size_t max_snapshot_bytes = 512 * 1024;
   size_t max_image_bytes = kMaxImageBytes;
 };

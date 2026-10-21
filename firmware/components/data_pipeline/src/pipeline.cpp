@@ -129,7 +129,9 @@ struct DataPipeline::SourceRuntime {
 DataPipeline::~DataPipeline() = default;
 
 DataPipeline::DataPipeline(IHttpTransport& transport, PipelineConfig config)
-    : transport_(transport), config_(std::move(config)), history_(config_.history) {}
+    : transport_(transport),
+      config_(std::move(config)),
+      history_(config_.history, config_.timezone_offset_minutes) {}
 
 bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<SourcePlan>& plans,
                              SdCache* cache, std::string& error) {
@@ -141,7 +143,7 @@ bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<Sourc
   dashboard_ = dashboard;
   cache_ = cache;
   variables_ = std::move(variables);
-  history_ = MetricHistory(config_.history);
+  history_ = MetricHistory(config_.history, config_.timezone_offset_minutes);
   sources_.clear();
   panels_.clear();
   updates_.clear();
