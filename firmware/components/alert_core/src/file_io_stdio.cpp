@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "alert_core/file_io_stdio.h"
 
 #include <sys/stat.h>

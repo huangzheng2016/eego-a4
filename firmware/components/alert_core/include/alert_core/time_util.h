@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 // UTC ISO8601 timestamps over pure civil-calendar arithmetic — no libc

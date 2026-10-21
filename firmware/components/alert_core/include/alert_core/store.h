@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 // AlertStore: the single-writer alert store (M11 §4 semantics, M12 ownership

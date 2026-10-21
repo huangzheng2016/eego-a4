@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 // Crockford-base32 ULIDs: 48-bit unix-ms timestamp + 80-bit randomness,

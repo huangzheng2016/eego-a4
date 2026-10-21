@@ -55,6 +55,13 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
       <th id="th_src_id">ID</th><th id="th_src_url">URL</th><th id="th_src_op">操作</th>
     </tr></thead><tbody id="src_rows"></tbody></table>
     <div id="test_result" class="dim"></div>
+    <h3 id="t_presets">来源预设</h3>
+    <div class="presetbox">
+      <select id="preset_sel"></select>
+      <div id="preset_meta" class="dim"></div>
+      <pre id="preset_notes" style="display:none"></pre>
+      <button id="btn_preset_fill">填入配置草稿</button>
+    </div>
   </section>
   <section id="pane_config" style="display:none">
     <textarea id="cfg_text" spellcheck="false"></textarea>
@@ -105,6 +112,8 @@ pre{background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px;font-si
 .sev-critical{font-weight:bold}
 tr.st-cleared td,tr.st-expired td{opacity:.55}
 .danger{background:#fff;border:1px solid #c00;border-radius:8px;padding:12px}
+.presetbox{background:#fff;border:1px solid #ddd;border-radius:8px;padding:12px;margin-top:10px}
+button:disabled{background:#999}
 #rotate_result:empty{display:none})CSS";
 
 const char kAdminJs[] = R"JS(function T(zh,en){return (navigator.language||'zh').toLowerCase().indexOf('zh')===0?zh:en;}
@@ -122,7 +131,11 @@ var L={
   st_active:'活动',st_acked:'已确认',st_cleared:'已清除',st_expired:'已过期',
   sev_critical:'严重',sev_warning:'警告',sev_info:'信息',
   summary:function(a){return '活动 '+a.active_total+'（严重 '+a.critical+' / 警告 '+a.warning+' / 信息 '+a.info+'）';},
-  no_alerts:'（无告警）',unsynced:'（时间未同步）'},
+  no_alerts:'（无告警）',unsynced:'（时间未同步）',
+  presets:'来源预设',preset_pick:'选择预设…',preset_fill:'填入配置草稿',
+  preset_kind_push:'接入方式：http_push（推送桥接）',preset_kind_poll:'接入方式：http_poll（轮询）',
+  preset_cap_native:'设备原生解析',preset_cap_script:'需自定义脚本桥接',
+  preset_filled:'已填入配置草稿（未保存）；检查 url/凭据后保存，校验规则不变'},
  en:{login:'EEGO A4 Admin Sign-in',login_btn:'Sign in',pw_ph:'Admin password',badpw:'Sign-in failed (wrong password or device not provisioned)',
   tab_alerts:'Alerts',tab_status:'Status',tab_sources:'Sources',tab_config:'Config',tab_system:'System',logout:'Sign out',
   sev:'Severity',title:'Title',type:'Type',state:'State',seen:'Last seen',ops:'Actions',ack:'Ack',clear:'Clear',refresh:'Refresh',
@@ -135,7 +148,11 @@ var L={
   st_active:'active',st_acked:'acked',st_cleared:'cleared',st_expired:'expired',
   sev_critical:'critical',sev_warning:'warning',sev_info:'info',
   summary:function(a){return a.active_total+' active (critical '+a.critical+' / warning '+a.warning+' / info '+a.info+')';},
-  no_alerts:'(no alerts)',unsynced:'(time unsynced)'}
+  no_alerts:'(no alerts)',unsynced:'(time unsynced)',
+  presets:'Source presets',preset_pick:'Choose a preset…',preset_fill:'Fill into config draft',
+  preset_kind_push:'Access: http_push (push bridge)',preset_kind_poll:'Access: http_poll (polling)',
+  preset_cap_native:'device-native parsing',preset_cap_script:'custom script bridge required',
+  preset_filled:'Draft filled into config (not saved); review url/credentials, then save — validation unchanged'}
 };
 function t(k){return L[LANG][k];}
 function $(id){return document.getElementById(id);}
@@ -152,6 +169,7 @@ function applyI18n(){
  $('th_src_id').textContent=t('src_id');$('th_src_url').textContent=t('src_url');$('th_src_op').textContent=t('src_op');
  $('btn_cfg_save').textContent=t('cfg_save');$('btn_cfg_reload').textContent=t('cfg_reload');
  $('btn_cfg_schema').textContent=t('cfg_schema');
+ $('t_presets').textContent=t('presets');$('btn_preset_fill').textContent=t('preset_fill');
  $('t_danger').textContent=t('danger');$('btn_reboot').textContent=t('reboot');
  $('btn_reset').textContent=t('reset');$('btn_rotate').textContent=t('rotate');
  $('btn_logout').textContent=t('logout');
@@ -258,6 +276,47 @@ function loadSources(){
   });
  }).catch(function(e){if(e.message!=='401')msg(e.message,'err');});
 }
+// ---------- presets ----------
+var PRESETS=[];
+function presetById(id){var hit=null;PRESETS.forEach(function(p){if(p.id===id)hit=p;});return hit;}
+function loadPresets(){
+ api('/sources/presets').then(function(j){
+  PRESETS=(j&&j.presets)||[];
+  var sel=$('preset_sel');sel.textContent='';
+  var ph=document.createElement('option');ph.value='';ph.textContent=t('preset_pick');sel.appendChild(ph);
+  PRESETS.forEach(function(p){
+   var o=document.createElement('option');o.value=p.id;o.textContent=p.label_zh;sel.appendChild(o);
+  });
+  showPreset();
+ }).catch(function(e){if(e.message!=='401')msg(e.message,'err');});
+}
+function showPreset(){
+ var p=presetById($('preset_sel').value);
+ var notes=$('preset_notes'),meta=$('preset_meta'),btn=$('btn_preset_fill');
+ if(!p){meta.textContent='';notes.style.display='none';btn.disabled=true;return;}
+ meta.textContent=(p.kind_hint==='http_push'?t('preset_kind_push'):t('preset_kind_poll'))+' · '+(p.builtin_poll?t('preset_cap_native'):t('preset_cap_script'));
+ notes.style.display='block';
+ notes.textContent=p.notes+(p.config_template?('\n\n'+JSON.stringify(p.config_template,null,2)):'');
+ btn.disabled=!p.config_template;
+}
+function fillPreset(){
+ var p=presetById($('preset_sel').value);
+ if(!p||!p.config_template)return;
+ api('/config').then(function(cfg){
+  cfg=cfg||{};
+  var srcs=cfg.sources||[];
+  var draft=JSON.parse(JSON.stringify(p.config_template));
+  var base=(draft.id||('src-'+p.id)).slice(0,50),nid=base,n=2;
+  while(srcs.some(function(s){return s&&s.id===nid;})){nid=base+'-'+(n++);}
+  draft.id=nid;
+  srcs.push(draft);
+  cfg.sources=srcs;
+  $('cfg_text').textContent=JSON.stringify(cfg,null,2);
+  cfgDraftPending=true;  // 草稿已在文本框中，跳过切页时的 loadConfig 覆盖
+  switchTab('config');
+  msg(t('preset_filled'),'ok');
+ }).catch(function(e){if(e.message!=='401')msg(e.message,'err');});
+}
 // ---------- config ----------
 function loadConfig(){
  api('/config').then(function(cfg){$('cfg_text').textContent=JSON.stringify(cfg,null,2);})
@@ -297,6 +356,7 @@ function doRotateKey(){
  }).catch(function(e){if(e.message!=='401')msg(e.message,'err');});
 }
 // ---------- tabs ----------
+var cfgDraftPending=false;
 function switchTab(name){
  ['alerts','status','sources','config','system'].forEach(function(n){
   $('pane_'+n).style.display=(n===name)?'block':'none';
@@ -305,8 +365,8 @@ function switchTab(name){
  for(var i=0;i<links.length;i++){links[i].className='tab'+(links[i].getAttribute('data-tab')===name?' on':'');}
  if(name==='alerts')loadAlerts();
  if(name==='status')loadStatus();
- if(name==='sources')loadSources();
- if(name==='config')loadConfig();
+ if(name==='sources'){loadSources();loadPresets();}
+ if(name==='config'){if(cfgDraftPending){cfgDraftPending=false;}else{loadConfig();}}
 }
 // ---------- init ----------
 document.querySelectorAll('nav a.tab').forEach(function(a){
@@ -323,6 +383,8 @@ $('btn_refresh_status').onclick=loadStatus;
 $('btn_cfg_save').onclick=saveConfig;
 $('btn_cfg_reload').onclick=loadConfig;
 $('btn_cfg_schema').onclick=showSchema;
+$('preset_sel').onchange=showPreset;
+$('btn_preset_fill').onclick=fillPreset;
 $('btn_reboot').onclick=doReboot;
 $('btn_reset').onclick=doFactoryReset;
 $('btn_rotate').onclick=doRotateKey;

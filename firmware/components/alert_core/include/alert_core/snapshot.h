@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 // Immutable alert snapshots + double-buffered publishing (M12: "alert_core

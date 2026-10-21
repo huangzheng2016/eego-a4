@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 // SHA-1 over arbitrary bytes, returned as 40 lowercase hex chars.

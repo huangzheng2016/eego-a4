@@ -503,8 +503,8 @@ def check_admin_schema(root: Path, rep: Report) -> None:
     rep.ok("admin_schema", "schemaJson() 解析成功")
 
     top = set(schema.get("top_level", {}).keys())
-    rep.check(top == {"schema_version", "admin", "sources", "alert_type_overrides"},
-              "admin_schema", "顶层键与 M13 §3 一致",
+    rep.check(top == {"schema_version", "admin", "sources", "alert_type_overrides", "mute_rules"},
+              "admin_schema", "顶层键与 M13 §3 + M21 mute_rules 一致",
               f"顶层键异常: {sorted(top)}")
 
     k_ver = extract_const_int(cpp_text, "kSchemaVersion")

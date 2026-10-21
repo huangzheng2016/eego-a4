@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # alert_core — pure C++ alert domain core (M12 architecture).
 #
 # Deliberately has NO REQUIRES and no ESP-IDF/UI/network includes: the

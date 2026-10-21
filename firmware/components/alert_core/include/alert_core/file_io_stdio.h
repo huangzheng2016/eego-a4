@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 // Stdio-backed IAlertFileIo for host tools and on-device diagnostics.

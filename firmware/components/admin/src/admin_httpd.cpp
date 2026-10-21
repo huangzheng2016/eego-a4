@@ -40,6 +40,7 @@
 #include "lwip/sockets.h"
 #include "net_stack/http_push_bridge.h"
 #include "net_stack/net_task.h"
+#include "net_stack/source_presets.h"
 #include "net_stack/wifi_manager.h"
 #include "admin/provision_portal.h"
 #include "sd_card.h"
@@ -1077,6 +1078,52 @@ esp_err_t h_wifi_remove(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
+// sources/presets（Bearer，只读；静态预设数据，无出网无 secrets）
+//
+// M22 任务 2：把 net_stack sourcePresets()/findSourcePreset()（M16 任务 4，
+// 此前全树无调用方）暴露给管理 API/UI。预设只是 SourceConfig 起点：用户改
+// url/token/interval 后经 PUT /config 生效，校验链路与手写配置完全一致。
+// http_push 预设无 config_template（null）——面板侧无需 sources[] 项。
+// ---------------------------------------------------------------------------
+alert_core::JsonValue presetToJson(const net::SourcePreset& p) {
+  using alert_core::JsonValue;
+  return JsonValue::makeObject({
+      {"id", JsonValue::makeString(p.id)},
+      {"label_zh", JsonValue::makeString(p.label_zh)},
+      {"kind_hint", JsonValue::makeString(p.kind_hint)},
+      {"builtin_poll", JsonValue::makeBool(p.builtin_poll)},
+      {"config_template", p.config_template},
+      {"notes", JsonValue::makeString(p.notes)},
+  });
+}
+
+esp_err_t h_source_presets(httpd_req_t* req) {
+  using alert_core::JsonValue;
+  JsonValue::Array arr;
+  for (const auto& p : net::sourcePresets()) arr.push_back(presetToJson(p));
+  return sendJson(req, 200,
+                  JsonValue::makeObject({{"presets", JsonValue::makeArray(std::move(arr))}})
+                      .toString());
+}
+
+esp_err_t h_source_preset_get(httpd_req_t* req, const std::string& id) {
+  const net::SourcePreset* p = net::findSourcePreset(id);
+  if (p == nullptr) {
+    return sendError(req, 404, errc::kNotFound, "unknown source preset");
+  }
+  return sendJson(req, 200, presetToJson(*p).toString());
+}
+
+// 路径段提取：/sources/presets/<id>（id 非空且不含 '/'）。
+bool presetIdFromPath(const char* path, std::string& id) {
+  if (strncmp(path, "sources/presets/", 16) != 0) return false;
+  const char* seg = path + 16;
+  if (seg[0] == '\0' || strchr(seg, '/') != nullptr) return false;
+  id = seg;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // sources/test（Bearer，每令牌 5 次/分钟；出网 10s；不回显目标 body）
 // ---------------------------------------------------------------------------
 esp_err_t h_source_test(httpd_req_t* req) {
@@ -1353,6 +1400,18 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     if (strcmp(path, "config/schema") == 0) {
       if (!bearer()) return ESP_OK;
       return h_config_schema(req);
+    }
+    if (strcmp(path, "sources/presets") == 0) {
+      if (!bearer()) return ESP_OK;
+      return h_source_presets(req);
+    }
+    // GET /sources/presets/{id}
+    {
+      std::string pid;
+      if (presetIdFromPath(path, pid)) {
+        if (!bearer()) return ESP_OK;
+        return h_source_preset_get(req, pid);
+      }
     }
     if (strcmp(path, "alerts") == 0) {
       if (!bearer()) return ESP_OK;
