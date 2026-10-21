@@ -299,6 +299,7 @@ struct DashboardRuntime::Impl {
   int64_t last_rule_eval_ms = -100000;
   int64_t last_carousel_ms = 0;
   uint64_t alert_sequence = 0;
+  std::set<std::string> alert_core_links;
   dp::TickResult last_tick;
   ui::RenderResult last_render;
   std::string message;
@@ -551,6 +552,7 @@ struct DashboardRuntime::Impl {
     raw_samples.clear();
     rule_samples.clear();
     banner_signature.clear();
+    alert_core_links.clear();
     rule_states.clear();
     event_tracker.reset();
     navigation.clear();
@@ -781,6 +783,29 @@ struct DashboardRuntime::Impl {
     return local != injected.end() ? local->second : pipeline->sourceResult(source_id);
   }
 
+  bool clearInjectedSource(const std::string& source_id) {
+    if (injected.erase(source_id) == 0) return false;
+    for (const dash::Page& current : view.pages) {
+      for (const dash::PanelSpec& panel : current.panels) {
+        if (panel.source_id == source_id) published_panels.erase(panel.id);
+      }
+    }
+    return true;
+  }
+
+  bool reconcileInjections() {
+    bool changed = false;
+    for (const dash::Source& source : config.sources) {
+      const auto known = source_pointers.find(source.id);
+      const auto previous = known == source_pointers.end()
+                                ? std::shared_ptr<const dp::SourceResult>()
+                                : known->second;
+      if (dashboardInjectionOutdated(previous, pipeline->sourceResult(source.id)))
+        changed = clearInjectedSource(source.id) || changed;
+    }
+    return changed;
+  }
+
   std::vector<dash::MetricSample> computePanelSamples(const dash::PanelSpec& panel) {
     std::vector<dash::MetricSample> out;
     if (panel.source_id.empty() || panel.metric.empty()) return out;
@@ -907,7 +932,7 @@ struct DashboardRuntime::Impl {
       const std::shared_ptr<const dp::SourceResult> current = pipeline->sourceResult(source.id);
       const auto known = source_pointers.find(source.id);
       if (known == source_pointers.end() || known->second != current) {
-        injected.erase(source.id);
+        clearInjectedSource(source.id);
         source_pointers[source.id] = current;
       }
       const std::shared_ptr<const dp::SourceResult> effective = currentResult(source.id);
@@ -956,6 +981,7 @@ struct DashboardRuntime::Impl {
       const auto snapshot = deps.alerts->acquire();
       if (snapshot != nullptr) {
         for (const alert_core::AlertRecord& record : snapshot->records) {
+          if (!dashboardAlertRecordVisible(record)) continue;
           appendEvent(dashboardEventFromAlert(record, linkedForRecord(record)), seen_events);
         }
       }
@@ -985,6 +1011,7 @@ struct DashboardRuntime::Impl {
       appendEvent(event, seen_events);
     }
     rebuildLayout();
+    event_tracker.reconcile(view.events);
     updateBannerDirty();
   }
 
@@ -1463,6 +1490,7 @@ struct DashboardRuntime::Impl {
 
     last_tick = pipeline->tick(pipelineMs());
     last_tick_ms = monotonicMs();
+    const bool injections_reconciled = reconcileInjections();
     const std::vector<dp::PanelUpdate> updates = pipeline->updates();
     const std::vector<std::string> dirty_panels = pipeline->takeDirtyPanels();
     pipeline->clearUpdates();
@@ -1497,8 +1525,8 @@ struct DashboardRuntime::Impl {
                          signal.status_changed, signal.events_changed});
     }
 
-    if (!dirty_panels.empty() || !changes.empty()) {
-      bool rebuild_model = !dirty_panels.empty();
+    if (injections_reconciled || !dirty_panels.empty() || !changes.empty()) {
+      bool rebuild_model = injections_reconciled || !dirty_panels.empty();
       bool status_changed = false;
       for (const SourceChange& change : changes) {
         rebuild_model = rebuild_model || change.content_changed || change.events_changed;
@@ -1549,10 +1577,15 @@ struct DashboardRuntime::Impl {
             if (panel.kind == dash::PanelKind::Alert) renderer.invalidatePanel(panel.id);
           }
         }
+        std::set<std::string> current_links;
         for (const alert_core::AlertRecord& record : snapshot->records) {
+          if (!dashboardAlertRecordVisible(record)) continue;
           const std::string linked = linkedForRecord(record);
-          if (!linked.empty()) renderer.invalidatePanel(linked);
+          if (!linked.empty()) current_links.insert(linked);
         }
+        for (const std::string& linked : dashboardAlertLinkUnion(alert_core_links, current_links))
+          renderer.invalidatePanel(linked);
+        alert_core_links = std::move(current_links);
         dirty = true;
         status_dirty = true;
       }

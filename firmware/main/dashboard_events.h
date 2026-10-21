@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -37,6 +39,10 @@ inline eego::dashboard::Event dashboardEventFromAlert(const alert_core::AlertRec
   return event;
 }
 
+inline bool dashboardAlertRecordVisible(const alert_core::AlertRecord& record) {
+  return !record.muted;
+}
+
 inline std::string dashboardCoreRecordId(const eego::dashboard::Event& event) {
   const std::string prefix(kDashboardAlertCorePrefix);
   return event.id.rfind(prefix, 0) == 0 ? event.id.substr(prefix.size()) : std::string();
@@ -49,6 +55,19 @@ inline std::string dashboardEventIdentity(const std::string& source_id,
 
 inline std::string dashboardEventIdentity(const eego::dashboard::Event& event) {
   return dashboardEventIdentity(event.source_id, event.id);
+}
+
+inline std::set<std::string> dashboardAlertLinkUnion(const std::set<std::string>& previous,
+                                                     const std::set<std::string>& current) {
+  std::set<std::string> out = previous;
+  out.insert(current.begin(), current.end());
+  return out;
+}
+
+inline bool dashboardInjectionOutdated(
+    const std::shared_ptr<const eego::dashboard::pipeline::SourceResult>& previous,
+    const std::shared_ptr<const eego::dashboard::pipeline::SourceResult>& current) {
+  return previous != current;
 }
 
 inline bool dashboardSourceEventsEqual(const eego::dashboard::pipeline::SourceResult* left,
@@ -219,6 +238,29 @@ class DashboardEventTracker {
     return event.state == eego::dashboard::EventState::Active && found != acknowledged_.end() &&
            found->second == generation;
   }
+
+  void reconcile(const std::vector<eego::dashboard::Event>& current_events) {
+    std::set<std::string> live;
+    for (const eego::dashboard::Event& event : current_events)
+      live.insert(dashboardEventIdentity(event));
+    for (auto it = generations_.begin(); it != generations_.end();) {
+      if (live.count(it->first) == 0) {
+        it = generations_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    for (auto it = acknowledged_.begin(); it != acknowledged_.end();) {
+      if (live.count(it->first) == 0) {
+        it = acknowledged_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  size_t generationCount() const { return generations_.size(); }
+  size_t acknowledgementCount() const { return acknowledged_.size(); }
 
   void reset() {
     generations_.clear();
