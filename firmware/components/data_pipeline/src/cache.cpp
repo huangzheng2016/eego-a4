@@ -258,8 +258,11 @@ bool historyEntryFromJson(const JsonValue& root, HistoryEntry& out) {
   const JsonValue* window_from = root.find("window_from_ms");
   const JsonValue* raw_gap = root.find("raw_gap_before_ms");
   const JsonValue* fixed_gap = root.find("fixed_gap");
+  const JsonValue* coverage_sample = root.find("coverage_sample");
+  const JsonValue* coverage_windows = root.find("coverage_windows");
   const JsonValue* coverage_lost = root.find("coverage_lost");
   if ((window_state != nullptr && window_state->type() != JsonValue::Type::Bool) ||
+      (coverage_sample != nullptr && coverage_sample->type() != JsonValue::Type::Bool) ||
       (window_kind != nullptr && window_kind->type() != JsonValue::Type::String) ||
       (window_from != nullptr &&
        (window_from->type() != JsonValue::Type::Int || window_from->intValue() < 0)) ||
@@ -270,21 +273,37 @@ bool historyEntryFromJson(const JsonValue& root, HistoryEntry& out) {
     return false;
   }
   if (window_state != nullptr) out.window_state = window_state->boolValue();
+  if (coverage_sample != nullptr) out.coverage_sample = coverage_sample->boolValue();
   if (window_kind != nullptr && !windowKindFromString(window_kind->stringValue(), out.window_kind))
     return false;
+  if (coverage_windows != nullptr) {
+    if (coverage_windows->type() != JsonValue::Type::Array) return false;
+    for (const JsonValue& item : coverage_windows->arrayItems()) {
+      const JsonValue* kind = item.find("kind");
+      const JsonValue* from = item.find("from_ms");
+      if (kind == nullptr || kind->type() != JsonValue::Type::String || from == nullptr ||
+          from->type() != JsonValue::Type::Int || from->intValue() < 0) {
+        return false;
+      }
+      WindowKind parsed = WindowKind::Rolling24h;
+      if (!windowKindFromString(kind->stringValue(), parsed)) return false;
+      out.coverage_windows.emplace_back(parsed, from->intValue());
+    }
+  }
   if (window_from != nullptr) out.window_from_ms = window_from->intValue();
   if (raw_gap != nullptr) out.raw_gap_before_ms = raw_gap->intValue();
   if (fixed_gap != nullptr) out.fixed_gap = fixed_gap->boolValue();
   if (coverage_lost != nullptr) out.coverage_lost = coverage_lost->boolValue();
   return (bucket == nullptr || out.min <= out.max) &&
-         (!out.window_state || (window_kind != nullptr && bucket != nullptr));
+         (!out.window_state ||
+          (window_kind != nullptr && (out.coverage_sample || bucket != nullptr)));
 }
 
 std::string historyEntryToJson(const HistoryEntry& entry) {
   JsonValue::Object object;
   object.emplace_back("sample", sampleToJson(entry.sample));
   object.emplace_back("reset_at", integer(entry.reset_at_ms));
-  if (entry.aggregated || entry.window_state) {
+  if ((entry.aggregated || entry.window_state) && !entry.coverage_sample) {
     const size_t count = entry.count == 0 ? 1 : entry.count;
     const double sum = entry.count == 0 ? entry.sample.value : entry.sum;
     const double min = entry.count == 0 ? entry.sample.value : entry.min;
@@ -306,8 +325,19 @@ std::string historyEntryToJson(const HistoryEntry& entry) {
   }
   if (entry.window_state) {
     object.emplace_back("window_state", JsonValue::makeBool(true));
+    object.emplace_back("coverage_sample", JsonValue::makeBool(entry.coverage_sample));
     object.emplace_back("window_kind", string(windowKindName(entry.window_kind)));
     object.emplace_back("window_from_ms", integer(entry.window_from_ms));
+    if (entry.coverage_sample) {
+      JsonValue::Array windows;
+      for (const auto& window : entry.coverage_windows) {
+        JsonValue::Object item;
+        item.emplace_back("kind", string(windowKindName(window.first)));
+        item.emplace_back("from_ms", integer(window.second));
+        windows.push_back(JsonValue::makeObject(std::move(item)));
+      }
+      object.emplace_back("coverage_windows", JsonValue::makeArray(std::move(windows)));
+    }
   }
   if (entry.raw_gap_before_ms > 0)
     object.emplace_back("raw_gap_before_ms", integer(entry.raw_gap_before_ms));
@@ -324,7 +354,7 @@ std::vector<HistoryEntry> boundHistory(const std::vector<HistoryEntry>& input,
   history_limits.downsample_points = std::max<size_t>(limits.downsample_points, 1);
   history_limits.max_total_points = std::max<size_t>(limits.max_history_points, 1);
   history_limits.retention_ms = std::numeric_limits<int64_t>::max();
-  MetricHistory history(history_limits);
+  MetricHistory history(history_limits, limits.timezone_offset_minutes);
   const std::string source_id = input.empty() ? "cache" : input.front().sample.source_id;
   if (!input.empty() && !history.replaceSource(source_id, input, 0, error)) return {};
   return history.entries();
@@ -471,7 +501,10 @@ bool SdCache::loadHistory(const std::string& source_id, std::vector<HistoryEntry
       int c = 0;
       while ((c = std::fgetc(file)) != EOF && c != '\n') {
       }
-      continue;
+      std::fclose(file);
+      out.clear();
+      error = "oversized or torn history record";
+      return false;
     }
     const std::string_view line(buffer.data(), length - 1);
     if (line.empty()) continue;
@@ -480,10 +513,13 @@ bool SdCache::loadHistory(const std::string& source_id, std::vector<HistoryEntry
     HistoryEntry entry;
     if (!jsonParse(line, root, parse_error) || !historyEntryFromJson(root, entry) ||
         entry.sample.source_id != source_id) {
-      continue;
+      std::fclose(file);
+      out.clear();
+      error = "invalid history record";
+      return false;
     }
     out.push_back(std::move(entry));
-    if (++valid_records > limits_.max_history_points * 2) {
+    if (++valid_records > limits_.max_history_points * 16) {
       std::fclose(file);
       out.clear();
       error = "history record count exceeds load budget";

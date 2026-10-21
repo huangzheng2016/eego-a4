@@ -15,6 +15,7 @@ struct CacheLimits {
   size_t max_history_bytes = 4 * 1024 * 1024;  // matches the rolling 1m envelope
   size_t max_snapshot_bytes = 512 * 1024;
   size_t max_image_bytes = kMaxImageBytes;
+  int32_t timezone_offset_minutes = 0;
 };
 
 // stdio maps to VFS on-device and ordinary files in host fixtures. Every
@@ -33,6 +34,7 @@ class SdCache {
 
   const std::string& directory() const { return directory_; }
   const CacheLimits& limits() const { return limits_; }
+  void setTimezoneOffset(int32_t minutes) { limits_.timezone_offset_minutes = minutes; }
 
  private:
   std::string historyPath(const std::string& source_id) const;

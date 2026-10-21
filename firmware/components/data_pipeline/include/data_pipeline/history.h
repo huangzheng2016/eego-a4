@@ -6,6 +6,7 @@
 #include <deque>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "data_pipeline/types.h"
@@ -50,6 +51,8 @@ struct HistoryEntry {
   int64_t first_timestamp_ms = 0;
   bool aggregated = false;
   bool window_state = false;
+  bool coverage_sample = false;
+  std::vector<std::pair<WindowKind, int64_t>> coverage_windows;
   WindowKind window_kind = WindowKind::Rolling24h;
   int64_t window_from_ms = 0;
   int64_t raw_gap_before_ms = 0;
@@ -113,6 +116,7 @@ class MetricHistory {
     int64_t first_timestamp_ms = 0;
     int64_t last_timestamp_ms = 0;
     bool coverage_lost = false;
+    std::vector<std::pair<int64_t, double>> samples;
   };
 
   struct Series {
@@ -131,7 +135,8 @@ class MetricHistory {
   static std::string keyFor(const MetricSample& sample);
   bool appendEntry(HistoryEntry entry, std::string& error);
   void addFixed(Series& series, const MetricSample& sample);
-  void markFixedIncomplete(Series& series, const MetricSample& sample);
+  void addWindowSample(Series& series, WindowKind kind, int64_t from_ms,
+                       const MetricSample& sample);
   void pruneFixed(Series& series, int64_t cutoff_ms);
   AggregationResult aggregateFixed(const Series& series, WindowKind kind,
                                    const ResolvedWindow& window, Aggregation aggregation) const;

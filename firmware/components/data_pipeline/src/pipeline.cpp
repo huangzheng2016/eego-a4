@@ -142,6 +142,7 @@ bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<Sourc
 
   dashboard_ = dashboard;
   cache_ = cache;
+  if (cache_ != nullptr) cache_->setTimezoneOffset(config_.timezone_offset_minutes);
   variables_ = std::move(variables);
   history_ = MetricHistory(config_.history, config_.timezone_offset_minutes);
   sources_.clear();
@@ -457,8 +458,12 @@ TickResult DataPipeline::tick(int64_t now_ms) {
       if (cache_ != nullptr) {
         std::vector<HistoryEntry> entries;
         entries.reserve(current->metrics.size());
-        for (const MetricSample& sample : current->metrics)
-          entries.push_back({sample, current->resetAtFor(sample.metric)});
+        for (const MetricSample& sample : current->metrics) {
+          HistoryEntry entry;
+          entry.sample = sample;
+          entry.reset_at_ms = current->resetAtFor(sample.metric);
+          entries.push_back(std::move(entry));
+        }
         std::string cache_error;
         if (!entries.empty() && !cache_->appendHistory(current->source_id, entries, cache_error))
           status.cache_error = cache_error;
