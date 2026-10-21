@@ -21,6 +21,7 @@ namespace eego::net {
 struct SourcePreset {
   std::string id;        // "home_assistant" / "prometheus" / ...
   std::string label_zh;  // 中文名（管理 UI 展示）
+  std::string label_en;  // English name (admin UI, M22 bilingual follow-up)
   // 推荐接入方式："http_poll"（轮询模板）或 "http_push"（推送桥接，无 sources[] 项）
   std::string kind_hint;
   // http_poll 模板的 SourceConfig JSON（kind_hint=="http_poll" 时有效）；
@@ -28,7 +29,8 @@ struct SourcePreset {
   alert_core::JsonValue config_template;
   // true = 该模板开箱即可安全解析；false = 必须配合自定义脚本（见 notes）
   bool builtin_poll = true;
-  std::string notes;  // 中文说明：覆盖能力、脚本输出契约、不伪装支持的边界
+  std::string notes;     // 中文说明：覆盖能力、脚本输出契约、不伪装支持的边界
+  std::string notes_en;  // English notes (same contract; M22 bilingual follow-up)
 };
 
 // 全部预设（静态存储，进程级有效）。找不到返回 nullptr。

@@ -1090,10 +1090,12 @@ alert_core::JsonValue presetToJson(const net::SourcePreset& p) {
   return JsonValue::makeObject({
       {"id", JsonValue::makeString(p.id)},
       {"label_zh", JsonValue::makeString(p.label_zh)},
+      {"label_en", JsonValue::makeString(p.label_en)},
       {"kind_hint", JsonValue::makeString(p.kind_hint)},
       {"builtin_poll", JsonValue::makeBool(p.builtin_poll)},
       {"config_template", p.config_template},
       {"notes", JsonValue::makeString(p.notes)},
+      {"notes_en", JsonValue::makeString(p.notes_en)},
   });
 }
 

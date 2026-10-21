@@ -81,7 +81,7 @@ idf.py -p /dev/cu.usbmodem* flash monitor     # Linux 为 /dev/ttyACM*
 | `POST /api/v1/alerts/{id}/ack` `/clear`、`POST /alerts/ack-all` | 确认 / 清除 |
 | `GET /api/v1/types` / `PUT /api/v1/types/{id}` | 告警类型注册表查询 / 覆盖 |
 | `POST /api/v1/sources/test` | 出网测试源（限速，不回显目标 body） |
-| `GET /api/v1/sources/presets` / `GET /sources/presets/{id}` | 来源预设查询（id/名称/接入方式/字段映射模板/能力说明；未知 id 404） |
+| `GET /api/v1/sources/presets` / `GET /sources/presets/{id}` | 来源预设查询（id/中英名称/接入方式/字段映射模板/中英能力说明；未知 id 404） |
 | `POST /api/v1/config/wifi` / `DELETE` | WiFi 账号增删（密码只入 NVS） |
 | `POST /api/v1/system/reboot` `/factory-reset` | 重启（`confirm:"REBOOT"`）/ 恢复出厂（双确认） |
 | `GET /api/v1/system/logs` | RAM 环形日志（安全事件，无 secrets） |
@@ -115,11 +115,12 @@ net_stack 内置 7 个来源预设（`net_stack/source_presets.cpp`）。管理 
 「配置」页继续编辑，保存仍走 `PUT /api/v1/config` 原有校验，不绕过任何配置
 检查。API 侧经 `GET /api/v1/sources/presets`（列表）与
 `GET /api/v1/sources/presets/{id}`（单个，未知 id 404）查询，返回字段：
-`id`、`label_zh`（名称）、`kind_hint`（推荐接入方式 http_poll/http_push）、
-`builtin_poll`（设备原生解析=true / 脚本桥接=false）、`config_template`
-（SourceConfig 起点模板，http_push 预设为 null）、`notes`（中文能力说明与
-脚本输出契约）。预设只是 `SourceConfig` 起点，改 url/token/interval 后校验
-规则与手写配置完全一致。
+`id`、`label_zh`/`label_en`（中/英文名称）、`kind_hint`（推荐接入方式
+http_poll/http_push）、`builtin_poll`（设备原生解析=true / 脚本桥接=false）、
+`config_template`（SourceConfig 起点模板，http_push 预设为 null）、
+`notes`/`notes_en`（中/英文能力说明与脚本输出契约）。管理 UI 按当前
+zh/en 语言环境渲染预设名称与说明。预设只是 `SourceConfig` 起点，
+改 url/token/interval 后校验规则与手写配置完全一致。
 
 能力边界（不伪装支持）：
 
