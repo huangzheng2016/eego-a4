@@ -34,6 +34,7 @@ const char* pageName(Page p) {
     case Page::Status: return "s3-status";
     case Page::Settings: return "s4-settings";
     case Page::Dashboard: return "dashboard";
+    case Page::Help: return "help";
     default: return "provision";
   }
 }

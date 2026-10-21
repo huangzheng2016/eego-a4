@@ -40,6 +40,9 @@
 #include "panel_render.h"
 #include "panel_types.h"
 #include "ui_text.h"
+#include "admin/input_binding_model.h"
+#include "input_confirm.h"
+#include "input_navigation.h"
 
 // 仅声明引用所需（定义见 alert_core/store.h，panel_app.cpp 经 net_stack 获得）
 namespace alert_core {
@@ -48,8 +51,8 @@ struct MuteRule;
 
 namespace panel {
 
-// 二次确认状态机契约：普通动作接受同控件再次激活；网络恢复、WiFi 重置和
-// 恢复出厂只接受实体电源键的第二次确认。任何其他输入取消，窗口为 5s。
+// 危险确认契约：布防后必须由同一控件重新持续按住；网络恢复、WiFi 重置和
+// 恢复出厂只接受实体 Power fresh hold。其他输入、目标/快照变化取消，窗口为 5s。
 
 class PanelApp {
  public:
@@ -102,18 +105,28 @@ class PanelApp {
  private:
   // ---- 事件处理（按页面分发）----
   void onTouchTap(int16_t x, int16_t y);
-  void onButtonShort(eego::ButtonId id);
-  void onButtonLong(eego::ButtonId id);
   void onFrontKeyShort();
-  void onFrontKeyLong();
+  void dispatchTrigger(eego::admin::InputTrigger trigger, int64_t now_us);
+  void executeBinding(const eego::admin::InputBinding& binding, int64_t now_us);
+  void executeBuiltin(const std::string& name, int64_t now_us);
 
   // ---- 导航 ----
   void gotoPage(Page p);          // 切页（下一帧强制 Full）
   void back();                    // 电源键长按/返回软键
   void moveFocus(int delta);      // S0/S2/S3 软键聚焦、S1 行选择、S4 行聚焦
+  void movePage(int delta);
+  void requestNavigation(NavigationKind kind, int delta, int64_t now_us);
+  void flushNavigation(int64_t now_us);
+  bool inputBusy() const;
+  uint64_t inputEpoch() const;
+  std::string pageContext() const;
   void activateFocused();         // 电源键短按
   void activateSoftKey(size_t idx);
   void activateSettingRow(size_t row);  // S4 全局行号，按 8 行分页显示
+  void resolveTouchHit(int16_t x, int16_t y, int& hit_idx, bool& hit_row) const;
+  std::string controlForHit(int hit_idx, bool hit_row) const;
+  std::string focusedControl() const;
+  std::string touchControl(int16_t x, int16_t y) const;
 
   // ---- 动作（NetStack / DeviceSettings / recovery）----
   void doAck(const std::string& id);
@@ -127,12 +140,16 @@ class PanelApp {
   void doOpenRecovery();
   void doWifiReset();
   void doFactoryReset();
+  void resetInputBindings();
   bool updateSettings(const eego::settings::Settings& candidate);
   void applySettings(uint32_t changed);
   static void onSettingsChanged(const eego::settings::Settings& values, uint32_t changed,
                                 void* ctx);
   uint64_t nextWakeAt(int64_t nowMs) const;
+  uint64_t currentSnapshotEpoch() const;
   void armConfirm(ConfirmKind kind);
+  void armDashboardConfirm(const DashboardConfirmRequest& request);
+  bool confirmTargetCurrent() const;
   void executeArmedConfirm();
   void clearConfirm();
   void showBanner(const char* text, uint32_t ms);
@@ -158,6 +175,7 @@ class PanelApp {
   void buildS2(S2Model& m);
   void buildS3(S3Model& m);
   void buildS4(S4Model& m);
+  void buildHelp(S3Model& m);
 
   // ---- 数据辅助 ----
   uint64_t nowUnix();             // 统一时间源（TimeSource：SNTP 系统时间 > RTC > 0）
@@ -185,14 +203,24 @@ class PanelApp {
 
   // 页面/导航状态（仅 app_task 上下文读写）
   Page page_ = Page::Overview;
+  Page helpReturn_ = Page::Overview;
   size_t focus_ = 0;
   size_t tablePage_ = 0;
   std::string detailId_;
   bool provisionSucceeded_ = false;
+  uint64_t pageEpoch_ = 1;
+  NavigationCoalescer navigation_;
 
   // 确认与横幅
   ConfirmKind confirm_ = ConfirmKind::None;
-  int64_t confirmDeadlineMs_ = 0;
+  FreshHoldConfirm confirmState_;
+  DashboardConfirmRequest confirmDashboard_;
+  std::string activeInputControl_;
+  bool suppressButtonShort_[3] = {false, false, false};
+  bool suppressButtonLong_[3] = {false, false, false};
+  bool suppressTouchTap_ = false;
+  bool suppressTouchHold_ = false;
+  bool suppressFrontShort_ = false;
   std::string banner_;
   int64_t bannerDeadlineMs_ = 0;
 

@@ -471,6 +471,25 @@ void drawS3(PortraitCanvas& c, const S3Model& m) {
   }
 }
 
+void drawHelp(PortraitCanvas& c, const S3Model& m) {
+  drawPageTitle(c, Str::PageHelp);
+  const int16_t x = geom::kContentX;
+  const int16_t w = geom::kContentW;
+  int16_t y = static_cast<int16_t>(geom::kContentTop + 58);
+  for (const auto& row : m.rows) {
+    if (y + 20 > geom::kContentBottom) break;
+    if (row.second.empty()) {
+      textGray(c, static_cast<int16_t>(x + 8), y, row.first.c_str(), 1, 0, true);
+      y = static_cast<int16_t>(y + 26);
+    } else {
+      drawTextFit(c, static_cast<int16_t>(x + 12), y, 142, row.first.c_str(), 1, false, 6);
+      drawTextFit(c, static_cast<int16_t>(x + 158), y, static_cast<int16_t>(w - 170),
+                  row.second.c_str(), 1, false, 0);
+      y = static_cast<int16_t>(y + 24);
+    }
+  }
+}
+
 // ── S4 设置 ─────────────────────────────────────────────────────────────────
 
 void drawS4(PortraitCanvas& c, const S4Model& m) {

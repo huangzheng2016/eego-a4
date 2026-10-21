@@ -223,6 +223,11 @@ extern "C" void app_main(void) {
   capabilities.sd = bootStatus.sdReady;
   capabilities.rtc = bootStatus.rtcReady;
   deviceSettings.setCapabilities(capabilities);
+  const esp_err_t inputErr = admin::InputBindings::instance().init();
+  if (inputErr != ESP_OK) {
+    ESP_LOGE(TAG, "input bindings init failed: %s; using safe defaults",
+             esp_err_to_name(inputErr));
+  }
 
   // 4. 字体
   tryLoadUiFont();

@@ -19,6 +19,7 @@
 
 #include "alert_core/json.h"
 #include "admin/dashboard_config.h"
+#include "admin/input_binding_model.h"
 
 namespace eego::admin {
 
@@ -31,6 +32,7 @@ enum class AdminCommandType : uint8_t {
   Reboot,           // delay_ms 后 esp_restart
   ApplyDashboard,   // 完整 dashboard bundle：校验 + revision 检查 + 原子持久化
   DeleteDashboard,  // 删除 dashboard；同样支持 revision 冲突检查
+  ApplyInputBindings,  // 稀疏输入覆盖或本地/远程 reset；app_task 重验并原子写 NVS
 };
 
 struct AdminCommand {
@@ -58,6 +60,10 @@ struct AdminCommand {
   bool dashboard_check_revision = false;
   uint64_t dashboard_expected_revision = 0;
 
+  // ApplyInputBindings：revision 为期望值；reset 时忽略 bindings 并写入空覆盖表。
+  std::shared_ptr<const InputBindingSet> input_bindings;
+  bool input_reset = false;
+
   // ApplyWifi：待写入/删除的账号（ssid + 明文密码，仅命令内存生命周期，
   // 绝不落日志/SD）；remove=true 时 password 忽略。
   std::string wifi_ssid;
@@ -70,7 +76,7 @@ struct AdminCommand {
 
 struct AdminResult {
   bool ok = false;
-  bool conflict = false;  // dashboard revision 冲突；httpd 映射 409
+  bool conflict = false;  // dashboard/input revision 冲突；httpd 映射 409
   std::string err;        // 安全描述（不含 secrets）
 };
 

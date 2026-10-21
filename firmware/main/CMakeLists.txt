@@ -19,6 +19,8 @@ idf_component_register(
         "ui_text.cpp"
         "device_prefs.cpp"
         "time_source.cpp"
+        "input_confirm.cpp"
+        "input_navigation.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         board

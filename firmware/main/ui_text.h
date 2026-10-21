@@ -65,7 +65,7 @@ enum class Lang : uint8_t {
   X(LblType, "类型", "TYPE") \
   X(Never, "从未", "NEVER") \
   X(None, "无", "NONE") \
-  X(ConfirmHint, "再次按下以确认", "PRESS AGAIN TO CONFIRM") \
+  X(ConfirmHold, "重新按住同一控件确认", "HOLD SAME CONTROL TO CONFIRM") \
   X(DoneAck, "已确认", "ACKNOWLEDGED") \
   X(DoneClear, "已清除", "CLEARED") \
   X(DoneMute, "已静音", "MUTED") \
@@ -115,7 +115,7 @@ enum class Lang : uint8_t {
   X(ProvWindowFmt, "窗口剩余 %u 秒", "WINDOW %us LEFT") \
   X(ProvDone, "配网成功，即将重启", "PROVISIONED, REBOOTING") \
   X(ProvClosed, "配网窗口已关闭", "PORTAL CLOSED") \
-  X(ConfirmAckAll, "再次按下：全部确认", "AGAIN: ACK ALL") \
+  X(Busy, "忙，请稍后重试", "BUSY; TRY AGAIN") \
   X(Sleeping, "电池模式：休眠中", "BATTERY: SLEEPING") \
   X(WakeHint, "按电源键唤醒", "PRESS POWER TO WAKE") \
   X(Polling, "轮询中...", "POLLING...") \
@@ -147,7 +147,7 @@ enum class Lang : uint8_t {
   X(ManualOnly, "仅手动", "MANUAL ONLY") \
   X(NotScheduled, "未排程", "NOT SCHEDULED") \
   X(DeepSleepOffline, "深睡时 HTTP/BLE 不可达", "NO HTTP/BLE IN DEEP SLEEP") \
-  X(ConfirmPhysical, "再按实体电源键确认", "PRESS POWER BUTTON AGAIN") \
+  X(ConfirmPhysicalHold, "重新按住实体电源键确认", "HOLD POWER BUTTON TO CONFIRM") \
   X(RecoveryApStarted, "恢复 AP：EEGO-A4-Setup / 192.168.4.1", "AP: EEGO-A4-Setup / 192.168.4.1") \
   X(WifiResetDone, "WiFi 已重置，恢复 AP 已开启", "WIFI RESET; RECOVERY AP OPEN") \
   X(FactoryResetDone, "恢复完成，即将重启", "RESET COMPLETE; REBOOTING") \
@@ -161,6 +161,28 @@ enum class Lang : uint8_t {
   X(SdReady, "SD 就绪", "SD READY") \
   X(SdMissing, "SD 不可用", "SD UNAVAILABLE") \
   X(SettingsPageFmt, "第 %u/%u 页", "PAGE %u/%u") \
+  X(PageHelp, "输入帮助", "INPUT HELP") \
+  X(InputResetDone, "输入映射已恢复默认", "INPUT DEFAULTS RESTORED") \
+  X(SetInputHelp, "输入帮助", "INPUT HELP") \
+  X(SetInputReset, "重置输入映射", "RESET INPUT MAPPINGS") \
+  X(HelpPower, "Power 短按 / 长按", "POWER SHORT / LONG") \
+  X(HelpActivateBack, "激活 / 返回（固定）", "ACTIVATE / BACK (FIXED)") \
+  X(HelpFrontHome, "Front 短按", "FRONT SHORT") \
+  X(HelpHome, "主页逃逸（固定）", "HOME ESCAPE (FIXED)") \
+  X(HelpFrontGestures, "Front 长按 / 双击", "FRONT LONG / DOUBLE") \
+  X(HelpDefaultHelpStatus, "帮助 / 状态（默认）", "HELP / STATUS (DEFAULT)") \
+  X(HelpUpDown, "Up/Down 短按 / 长按", "UP/DOWN SHORT / LONG") \
+  X(HelpFocusPage, "焦点 / 翻页（默认）", "FOCUS / PAGE (DEFAULT)") \
+  X(HelpSwipe, "水平滑动", "HORIZONTAL SWIPE") \
+  X(HelpPage, "翻页", "PAGE NAVIGATION") \
+  X(HelpChord, "Up+Down 组合键", "UP+DOWN CHORD") \
+  X(HelpCustomOnly, "仅自定义动作", "CUSTOM ACTION ONLY") \
+  X(HelpDanger, "危险动作", "DANGEROUS ACTION") \
+  X(HelpFreshHold, "重新按住同一控件 700ms", "FRESH HOLD SAME CONTROL 700ms") \
+  X(HelpCustomBindings, "自定义绑定", "CUSTOM BINDINGS") \
+  X(HelpOverrideOrder, "页面覆盖优先；默认安全", "PAGE FIRST; SAFE DEFAULTS") \
+  X(HelpLocalReset, "本地恢复", "LOCAL RESET") \
+  X(HelpResetHere, "设置 → 重置输入映射", "SETTINGS → RESET INPUT") \
   X(LangZh, "中文", "CHINESE") \
   X(LangEn, "英文", "ENGLISH")
 

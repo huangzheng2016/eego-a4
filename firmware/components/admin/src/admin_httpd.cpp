@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "admin_internal.h"
+#include "admin/input_bindings.h"
 #include "admin_page.h"
 #include "dashboard_api.h"
 #include "dashboard_page.h"
@@ -355,7 +356,9 @@ bool runCommand(httpd_req_t* req, const AdminCommand& cmd, AdminResult& res) {
     return false;
   }
   if (!res.ok) {
-    sendError(req, 500, errc::kInternal, res.err.empty() ? "command failed" : res.err);
+    sendError(req, res.conflict ? 409 : 500,
+              res.conflict ? errc::kConflict : errc::kInternal,
+              res.err.empty() ? "command failed" : res.err);
     return false;
   }
   return true;
@@ -1131,6 +1134,69 @@ esp_err_t h_settings_put(httpd_req_t* req) {
   return h_settings_get(req);
 }
 
+esp_err_t h_input_bindings_get(httpd_req_t* req) {
+  using alert_core::JsonValue;
+  const InputBindingSet snap = InputBindings::instance().snapshot();
+  JsonValue root = inputBindingsToJson(snap);
+  mutableItems(root).emplace_back("defaults", inputBindingListToJson(defaultInputBindings()));
+  mutableItems(root).emplace_back("loaded", JsonValue::makeBool(snap.loaded));
+  mutableItems(root).emplace_back("recovered", JsonValue::makeBool(snap.recovered));
+  return sendJson(req, 200, root.toString());
+}
+
+esp_err_t h_input_bindings_schema(httpd_req_t* req) {
+  const auto document = DashboardStore::instance().snapshot();
+  const dashboard::Dashboard* current =
+      document != nullptr && document->configured ? &document->dashboard : nullptr;
+  return sendJson(req, 200, inputBindingSchema(current).toString());
+}
+
+esp_err_t h_input_bindings_write(httpd_req_t* req, bool reset) {
+  using alert_core::JsonValue;
+  if (!contentTypeJsonOk(req)) {
+    return sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
+  }
+  std::string body;
+  const int rb = readBodyBudget(req, kBodyBudgetSmall, body);
+  if (rb != 0) return ESP_OK;
+  JsonValue root;
+  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (reset && root.type() == JsonValue::Type::Object) {
+    const JsonValue* bindings = root.find("bindings");
+    if (bindings == nullptr) {
+      mutableItems(root).emplace_back("bindings", JsonValue::makeArray({}));
+    } else if (bindings->type() != JsonValue::Type::Array || !bindings->arrayItems().empty()) {
+      return sendError(req, 400, errc::kValidationFailed, "reset bindings must be empty");
+    }
+  }
+
+  InputBindingSet candidate;
+  InputBindingErrors binding_errors;
+  if (!inputBindingsFromJson(root, true, candidate, binding_errors)) {
+    FieldErrors errors;
+    for (const auto& error : binding_errors) errors.push_back({error.field, error.message});
+    return sendError(req, 400, errc::kValidationFailed, "input binding validation failed", &errors);
+  }
+  const auto document = DashboardStore::instance().snapshot();
+  const dashboard::Dashboard* current =
+      document != nullptr && document->configured ? &document->dashboard : nullptr;
+  if (!validateInputBindings(reset ? std::vector<InputBinding>{} : candidate.bindings,
+                             current, binding_errors)) {
+    FieldErrors errors;
+    for (const auto& error : binding_errors) errors.push_back({error.field, error.message});
+    return sendError(req, 400, errc::kValidationFailed, "input binding validation failed", &errors);
+  }
+
+  AdminCommand cmd;
+  cmd.type = AdminCommandType::ApplyInputBindings;
+  cmd.input_reset = reset;
+  cmd.input_bindings = std::make_shared<InputBindingSet>(std::move(candidate));
+  AdminResult res;
+  if (!runCommand(req, cmd, res)) return ESP_OK;
+  ADMIN_LOG_INFO(reset ? "input bindings reset" : "input bindings updated");
+  return h_input_bindings_get(req);
+}
+
 esp_err_t h_wifi_add(httpd_req_t* req) {
   if (!contentTypeJsonOk(req)) {
     return sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
@@ -1556,6 +1622,14 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
       if (!bearer()) return ESP_OK;
       return h_settings_schema(req);
     }
+    if (strcmp(path, "input-bindings") == 0) {
+      if (!bearer()) return ESP_OK;
+      return h_input_bindings_get(req);
+    }
+    if (strcmp(path, "input-bindings/schema") == 0) {
+      if (!bearer()) return ESP_OK;
+      return h_input_bindings_schema(req);
+    }
     if (strcmp(path, "sources/presets") == 0) {
       if (!bearer()) return ESP_OK;
       return h_source_presets(req);
@@ -1619,6 +1693,11 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     if (strcmp(path, "sources/test") == 0) {
       return h_source_test(req);  // 内含 Bearer + 每令牌限速
     }
+    if (strcmp(path, "input-bindings/reset") == 0) {
+      if (!bearer()) return ESP_OK;
+      if (!rateLimit(req, "input-write:" + token.substr(0, 8), 60, 30)) return ESP_OK;
+      return h_input_bindings_write(req, true);
+    }
     if (strcmp(path, "system/reboot") == 0) {
       if (!bearer()) return ESP_OK;
       return h_reboot(req);
@@ -1642,6 +1721,11 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     if (strcmp(path, "settings") == 0) {
       if (!bearer()) return ESP_OK;
       return h_settings_put(req);
+    }
+    if (strcmp(path, "input-bindings") == 0) {
+      if (!bearer()) return ESP_OK;
+      if (!rateLimit(req, "input-write:" + token.substr(0, 8), 60, 30)) return ESP_OK;
+      return h_input_bindings_write(req, false);
     }
     // PUT /types/{id}
     if (strncmp(path, "types/", 6) == 0 && path[6] != '\0' && strchr(path + 6, '/') == nullptr) {

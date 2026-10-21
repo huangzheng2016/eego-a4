@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "admin_internal.h"
+#include "admin/input_bindings.h"
 #include "config_transaction.h"
 #include "device_settings/device_settings.h"
 #include "esp_timer.h"
@@ -313,6 +314,27 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       return;
     }
 
+    case AdminCommandType::ApplyInputBindings: {
+      if (cmd.input_bindings == nullptr) {
+        res.err = "missing input binding candidate";
+        return;
+      }
+      const auto document = DashboardStore::instance().snapshot();
+      const dashboard::Dashboard* current =
+          document != nullptr && document->configured ? &document->dashboard : nullptr;
+      bool conflict = false;
+      if (cmd.input_reset) {
+        res.ok = InputBindings::instance().reset(true, cmd.input_bindings->revision, current,
+                                                res.err, conflict);
+      } else {
+        res.ok = InputBindings::instance().update(
+            cmd.input_bindings->bindings, true, cmd.input_bindings->revision, current,
+            res.err, conflict);
+      }
+      res.conflict = conflict;
+      return;
+    }
+
     case AdminCommandType::ApplyWifi: {
       // NVS 为密码权威（M13 §4）；config wifi_list 仅 ssid+pass_ref 展示引用。
       std::vector<net::WifiAccount> accounts;
@@ -404,6 +426,10 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       }
       if (settings::DeviceSettings::erasePersisted() != ESP_OK) {
         ADMIN_LOG_ERROR("factory reset: clear device settings failed");
+        ok = false;
+      }
+      if (InputBindings::erasePersisted() != ESP_OK) {
+        ADMIN_LOG_ERROR("factory reset: clear input bindings failed");
         ok = false;
       }
       AuthManager::instance().revokeAllSessions();
