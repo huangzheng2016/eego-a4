@@ -1583,7 +1583,7 @@ struct DashboardRuntime::Impl {
   }
 
   void pollBattery() {
-    if (!ready) return;
+    if (!dashboardPipelineReady(ready, pipeline.get())) return;
     battery_cycle_active = true;
     battery_cycle_cancelled = false;
     battery_cycle_deadline_ms = monotonicMs() + kBatteryCycleMs;
@@ -1599,7 +1599,7 @@ struct DashboardRuntime::Impl {
     mains = value;
     battery_cycle_active = false;
     battery_cycle_cancelled = false;
-    if (mains) {
+    if (mains && dashboardPipelineReady(ready, pipeline.get())) {
       pipeline->resumeAsync();
       force_tick = true;
     }
