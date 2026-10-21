@@ -11,11 +11,13 @@ namespace {
 constexpr int64_t kHourMs = 60LL * 60 * 1000;
 constexpr int64_t kDayMs = 24 * kHourMs;
 
-int64_t floorDay(int64_t value) {
-  int64_t quotient = value / kDayMs;
-  if (value < 0 && value % kDayMs != 0) --quotient;
+int64_t floorUnit(int64_t value, int64_t unit) {
+  int64_t quotient = value / unit;
+  if (value < 0 && value % unit != 0) --quotient;
   return quotient;
 }
+
+int64_t floorDay(int64_t value) { return floorUnit(value, kDayMs); }
 
 void appendKey(std::string& key, std::string_view value) {
   key += std::to_string(value.size());
@@ -39,6 +41,37 @@ bool labelsMatch(const std::vector<KeyValue>& labels, const std::vector<KeyValue
     if (it == labels.end() || it->value != wanted.value) return false;
   }
   return true;
+}
+
+struct BucketStats {
+  size_t count = 1;
+  double sum = 0.0;
+  double min = 0.0;
+  double max = 0.0;
+  double first_value = 0.0;
+  double last_value = 0.0;
+  int64_t first_timestamp_ms = 0;
+};
+
+BucketStats statsFor(const HistoryEntry& entry) {
+  if (entry.count > 0) {
+    return {entry.count, entry.sum, entry.min, entry.max, entry.first_value,
+            entry.last_value, entry.first_timestamp_ms};
+  }
+  const double value = entry.sample.value;
+  return {1, value, value, value, value, value, entry.sample.timestamp_ms};
+}
+
+void initializeStats(HistoryEntry& entry) {
+  if (entry.count != 0) return;
+  const BucketStats stats = statsFor(entry);
+  entry.count = stats.count;
+  entry.sum = stats.sum;
+  entry.min = stats.min;
+  entry.max = stats.max;
+  entry.first_value = stats.first_value;
+  entry.last_value = stats.last_value;
+  entry.first_timestamp_ms = stats.first_timestamp_ms;
 }
 
 bool validSample(const MetricSample& sample) {
@@ -80,8 +113,20 @@ ResolvedWindow resolveWindow(WindowKind kind, int64_t now_ms, int64_t reset_at_m
                              : local_day - offset;
     return {std::max<int64_t>(from, 0), now_ms};
   }
-  if ((kind == WindowKind::Fixed5h || kind == WindowKind::Fixed7d) && reset_at_ms > 0) {
-    return {std::max<int64_t>(reset_at_ms - duration, 0), reset_at_ms};
+  if (kind == WindowKind::Fixed5h || kind == WindowKind::Fixed7d) {
+    if (reset_at_ms > 0)
+      return {std::max<int64_t>(reset_at_ms - duration, 0), reset_at_ms};
+    const int32_t bounded_offset =
+        std::max<int32_t>(-1440, std::min<int32_t>(1440, timezone_offset_minutes));
+    const int64_t offset = static_cast<int64_t>(bounded_offset) * 60000;
+    const int64_t shifted = offset > 0 && now_ms > std::numeric_limits<int64_t>::max() - offset
+                                ? std::numeric_limits<int64_t>::max()
+                                : now_ms + offset;
+    const int64_t local_start = floorUnit(shifted, duration) * duration;
+    const int64_t from = offset < 0 && local_start > std::numeric_limits<int64_t>::max() + offset
+                             ? std::numeric_limits<int64_t>::max()
+                             : local_start - offset;
+    return {std::max<int64_t>(from, 0), now_ms};
   }
   return {std::max<int64_t>(now_ms - duration, 0), now_ms};
 }
@@ -126,8 +171,54 @@ AggregationResult aggregateSamples(const std::vector<MetricSample>& samples,
   return result;
 }
 
+AggregationResult aggregateHistoryEntries(const std::vector<HistoryEntry>& entries,
+                                          Aggregation aggregation) {
+  std::vector<const HistoryEntry*> ordered;
+  ordered.reserve(entries.size());
+  for (const HistoryEntry& entry : entries) {
+    if (entry.sample.timestamp_ms >= 0 && std::isfinite(entry.sample.value))
+      ordered.push_back(&entry);
+  }
+  std::stable_sort(ordered.begin(), ordered.end(), [](const HistoryEntry* left,
+                                                      const HistoryEntry* right) {
+    return left->sample.timestamp_ms < right->sample.timestamp_ms;
+  });
+  AggregationResult result;
+  if (ordered.empty()) return result;
+  for (const HistoryEntry* entry : ordered) result.sample_count += statsFor(*entry).count;
+  const BucketStats first = statsFor(*ordered.front());
+  const BucketStats last = statsFor(*ordered.back());
+  result.first_timestamp_ms = first.first_timestamp_ms;
+  result.last_timestamp_ms = ordered.back()->sample.timestamp_ms;
+  double value = aggregation == Aggregation::Min ? first.min
+                 : aggregation == Aggregation::Max ? first.max
+                                                   : 0.0;
+  for (const HistoryEntry* entry : ordered) {
+    const BucketStats stats = statsFor(*entry);
+    if (aggregation == Aggregation::Sum || aggregation == Aggregation::Avg)
+      value += stats.sum;
+    else if (aggregation == Aggregation::Min)
+      value = std::min(value, stats.min);
+    else if (aggregation == Aggregation::Max)
+      value = std::max(value, stats.max);
+  }
+  if (aggregation == Aggregation::Avg) value /= static_cast<double>(result.sample_count);
+  if (aggregation == Aggregation::Delta || aggregation == Aggregation::Rate)
+    value = last.last_value - first.first_value;
+  if (aggregation == Aggregation::Rate) {
+    const int64_t elapsed = result.last_timestamp_ms - result.first_timestamp_ms;
+    if (elapsed <= 0) return result;
+    value /= static_cast<double>(elapsed) / 1000.0;
+  }
+  if (!std::isfinite(value)) return result;
+  result.value = value;
+  result.valid = true;
+  return result;
+}
+
 void downsampleEntries(std::vector<HistoryEntry>& entries, size_t target_points) {
   if (target_points == 0 || entries.size() <= target_points) return;
+  for (HistoryEntry& entry : entries) initializeStats(entry);
   std::stable_sort(entries.begin(), entries.end(), [](const HistoryEntry& left,
                                                       const HistoryEntry& right) {
     return left.sample.timestamp_ms < right.sample.timestamp_ms;
@@ -140,10 +231,24 @@ void downsampleEntries(std::vector<HistoryEntry>& entries, size_t target_points)
     const size_t end = (bucket + 1) * input_size / target_points;
     if (begin >= end) continue;
     HistoryEntry combined = entries[end - 1];
-    double average = 0.0;
-    for (size_t i = begin; i < end; ++i)
-      average += entries[i].sample.value / static_cast<double>(end - begin);
-    combined.sample.value = average;
+    const BucketStats first = statsFor(entries[begin]);
+    const BucketStats last = statsFor(entries[end - 1]);
+    combined.count = 0;
+    combined.sum = 0.0;
+    combined.min = first.min;
+    combined.max = first.max;
+    combined.first_value = first.first_value;
+    combined.last_value = last.last_value;
+    combined.first_timestamp_ms = first.first_timestamp_ms;
+    for (size_t i = begin; i < end; ++i) {
+      const BucketStats stats = statsFor(entries[i]);
+      combined.count += stats.count;
+      combined.sum += stats.sum;
+      combined.min = std::min(combined.min, stats.min);
+      combined.max = std::max(combined.max, stats.max);
+    }
+    combined.sample.value = combined.sum / static_cast<double>(combined.count);
+    combined.aggregated = true;
     reduced.push_back(std::move(combined));
   }
   entries = std::move(reduced);
@@ -162,6 +267,54 @@ std::string MetricHistory::keyFor(const MetricSample& sample) {
   return key;
 }
 
+bool MetricHistory::appendEntry(HistoryEntry entry, std::string& error) {
+  error.clear();
+  if (!validSample(entry.sample)) {
+    error = "history rejected an invalid metric sample";
+    return false;
+  }
+  entry.sample.labels = canonicalLabels(std::move(entry.sample.labels));
+  initializeStats(entry);
+  const BucketStats stats = statsFor(entry);
+  if (stats.count == 0 || !std::isfinite(stats.sum) || !std::isfinite(stats.min) ||
+      !std::isfinite(stats.max) || !std::isfinite(stats.first_value) ||
+      !std::isfinite(stats.last_value) || stats.min > stats.max ||
+      stats.first_timestamp_ms < 0 ||
+      stats.first_timestamp_ms > entry.sample.timestamp_ms) {
+    error = "history rejected invalid bucket metadata";
+    return false;
+  }
+  const std::string key = keyFor(entry.sample);
+  auto it = series_.find(key);
+  if (it == series_.end()) {
+    Series series;
+    series.source_id = entry.sample.source_id;
+    series.metric = entry.sample.metric;
+    series.labels = entry.sample.labels;
+    it = series_.emplace(key, std::move(series)).first;
+  }
+  Series& series = it->second;
+  series.reset_at_ms = entry.reset_at_ms;
+  if (series.compacted && !series.points.empty() &&
+      entry.sample.timestamp_ms <= series.points.back().sample.timestamp_ms) {
+    return true;
+  }
+  auto position = std::lower_bound(series.points.begin(), series.points.end(),
+                                   entry.sample.timestamp_ms,
+                                   [](const HistoryEntry& point, int64_t timestamp) {
+                                     return point.sample.timestamp_ms < timestamp;
+                                   });
+  if (position != series.points.end() &&
+      position->sample.timestamp_ms == entry.sample.timestamp_ms) {
+    if (!position->aggregated && !entry.aggregated) *position = std::move(entry);
+  } else {
+    series.points.insert(position, std::move(entry));
+  }
+  if (series.points.back().aggregated) series.compacted = true;
+  downsample(series);
+  return true;
+}
+
 void MetricHistory::downsample(Series& series) {
   if (series.points.size() <= limits_.max_points_per_series) return;
   std::vector<HistoryEntry> points;
@@ -170,6 +323,7 @@ void MetricHistory::downsample(Series& series) {
   downsampleEntries(points, limits_.downsample_points);
   series.points.clear();
   for (HistoryEntry& point : points) series.points.push_back(std::move(point));
+  series.compacted = true;
 }
 
 void MetricHistory::enforceLimits() {
@@ -216,37 +370,14 @@ bool MetricHistory::append(const SourceResult& result, int64_t now_ms, std::stri
   error.clear();
   for (MetricSample sample : result.metrics) {
     if (sample.source_id.empty()) sample.source_id = result.source_id;
-    if (sample.source_id != result.source_id || !validSample(sample)) {
-      error = "history rejected an invalid or cross-source metric sample";
+    if (sample.source_id != result.source_id) {
+      error = "history rejected a cross-source metric sample";
       return false;
     }
-    sample.labels = canonicalLabels(std::move(sample.labels));
-    const std::string key = keyFor(sample);
-    auto it = series_.find(key);
-    if (it == series_.end()) {
-      Series series;
-      series.source_id = sample.source_id;
-      series.metric = sample.metric;
-      series.labels = sample.labels;
-      it = series_.emplace(key, std::move(series)).first;
-    }
-    Series& series = it->second;
-    series.reset_at_ms = result.resetAtFor(sample.metric);
     HistoryEntry entry;
     entry.sample = std::move(sample);
-    entry.reset_at_ms = series.reset_at_ms;
-    auto position = std::lower_bound(series.points.begin(), series.points.end(),
-                                     entry.sample.timestamp_ms,
-                                     [](const HistoryEntry& point, int64_t timestamp) {
-                                       return point.sample.timestamp_ms < timestamp;
-                                     });
-    if (position != series.points.end() &&
-        position->sample.timestamp_ms == entry.sample.timestamp_ms) {
-      *position = std::move(entry);
-    } else {
-      series.points.insert(position, std::move(entry));
-    }
-    downsample(series);
+    entry.reset_at_ms = result.resetAtFor(entry.sample.metric);
+    if (!appendEntry(std::move(entry), error)) return false;
   }
   prune(now_ms);
   enforceLimits();
@@ -257,18 +388,21 @@ bool MetricHistory::replaceSource(const std::string& source_id,
                                   const std::vector<HistoryEntry>& entries, int64_t now_ms,
                                   std::string& error) {
   clearSource(source_id);
-  SourceResult result;
-  result.source_id = source_id;
-  result.fetched_at_ms = now_ms;
-  result.metrics.reserve(entries.size());
-  for (const HistoryEntry& entry : entries) {
-    result.metrics.push_back(entry.sample);
-    if (entry.reset_at_ms > 0) result.reset_at_ms[entry.sample.metric] = entry.reset_at_ms;
+  std::vector<HistoryEntry> ordered = entries;
+  std::stable_sort(ordered.begin(), ordered.end(), [](const HistoryEntry& left,
+                                                      const HistoryEntry& right) {
+    return left.sample.timestamp_ms < right.sample.timestamp_ms;
+  });
+  for (HistoryEntry& entry : ordered) {
+    if (entry.sample.source_id.empty()) entry.sample.source_id = source_id;
+    if (entry.sample.source_id != source_id || !appendEntry(std::move(entry), error)) {
+      if (error.empty()) error = "history rejected a cross-source cache entry";
+      clearSource(source_id);
+      return false;
+    }
   }
-  if (!append(result, now_ms, error)) {
-    clearSource(source_id);
-    return false;
-  }
+  prune(now_ms);
+  enforceLimits();
   return true;
 }
 
@@ -329,7 +463,20 @@ AggregationResult MetricHistory::aggregate(const std::string& source_id,
                                            int32_t timezone_offset_minutes) const {
   const ResolvedWindow resolved = resolveWindow(window, now_ms, resetAt(source_id, metric),
                                                 timezone_offset_minutes);
-  return aggregateSamples(query(source_id, metric, labels, resolved), aggregation);
+  std::vector<HistoryEntry> selected;
+  for (const auto& item : series_) {
+    const Series& series = item.second;
+    if (series.source_id != source_id || series.metric != metric ||
+        !labelsMatch(series.labels, labels))
+      continue;
+    for (const HistoryEntry& entry : series.points) {
+      if (entry.sample.timestamp_ms >= resolved.from_ms &&
+          entry.sample.timestamp_ms <= resolved.to_ms) {
+        selected.push_back(entry);
+      }
+    }
+  }
+  return aggregateHistoryEntries(selected, aggregation);
 }
 
 std::vector<HistoryEntry> MetricHistory::entries(const std::string& source_id) const {

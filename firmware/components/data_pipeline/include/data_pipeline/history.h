@@ -30,12 +30,24 @@ struct AggregationResult {
   int64_t last_timestamp_ms = 0;
 };
 
+struct HistoryEntry;
+
 AggregationResult aggregateSamples(const std::vector<MetricSample>& samples,
                                    Aggregation aggregation);
+AggregationResult aggregateHistoryEntries(const std::vector<HistoryEntry>& entries,
+                                          Aggregation aggregation);
 
 struct HistoryEntry {
   MetricSample sample;
   int64_t reset_at_ms = 0;
+  size_t count = 0;
+  double sum = 0.0;
+  double min = 0.0;
+  double max = 0.0;
+  double first_value = 0.0;
+  double last_value = 0.0;
+  int64_t first_timestamp_ms = 0;
+  bool aggregated = false;
 };
 
 struct HistoryLimits {
@@ -78,10 +90,12 @@ class MetricHistory {
     std::string metric;
     std::vector<KeyValue> labels;
     int64_t reset_at_ms = 0;
+    bool compacted = false;
     std::deque<HistoryEntry> points;
   };
 
   static std::string keyFor(const MetricSample& sample);
+  bool appendEntry(HistoryEntry entry, std::string& error);
   void enforceLimits();
   void downsample(Series& series);
 

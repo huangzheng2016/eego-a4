@@ -240,6 +240,7 @@ bool DataPipeline::setPanelBinding(const PanelBinding& binding, std::string& err
     return false;
   }
   panel->second.binding = binding;
+  panel->second.pending = true;
   panel->second.next_refresh_ms = 0;
   sources_[binding.source_id]->next_poll_ms = 0;
   return true;
@@ -257,6 +258,7 @@ bool DataPipeline::setPanelRefreshOverride(const std::string& panel_id, uint32_t
     return false;
   }
   panel->second.override_ms = refresh_ms;
+  panel->second.pending = true;
   panel->second.next_refresh_ms = 0;
   sources_[panel->second.binding.source_id]->next_poll_ms = 0;
   return true;
@@ -295,36 +297,33 @@ PanelUpdate DataPipeline::makeUpdate(const PanelState& panel, const SourceRuntim
 void DataPipeline::markDirtyPanels(const SourceRuntime& source, const SourceResult* previous,
                                    const SourceResult& current, int64_t now_ms,
                                    bool status_changed) {
+  (void)now_ms;
   const ChangeSet changes = diffResults(previous, current);
   for (auto& item : panels_) {
     PanelState& panel = item.second;
-    if (panel.binding.source_id != source.plan.source.id || now_ms < panel.next_refresh_ms)
-      continue;
-    panel.next_refresh_ms = now_ms + panelInterval(panel);
+    if (panel.binding.source_id != source.plan.source.id) continue;
     const bool metric_changed = !panel.binding.metric.empty() &&
                                 changes.metrics.count(panel.binding.metric) != 0;
     const bool relevant = status_changed || metric_changed ||
                           (panel.binding.metric.empty() && changes.any);
-    if (!relevant) continue;
-    PanelUpdate update = makeUpdate(panel, source, now_ms);
-    const auto existing =
-        std::find_if(updates_.begin(), updates_.end(), [&](const PanelUpdate& old) {
-      return old.panel_id == update.panel_id;
-    });
-    if (existing == updates_.end())
-      updates_.push_back(std::move(update));
-    else
-      *existing = std::move(update);
-    dirty_panels_.insert(panel.binding.panel_id);
+    if (relevant) panel.pending = true;
   }
 }
 
 void DataPipeline::markStatusPanels(const SourceRuntime& source, int64_t now_ms) {
+  (void)now_ms;
+  for (auto& item : panels_) {
+    if (item.second.binding.source_id == source.plan.source.id) item.second.pending = true;
+  }
+}
+
+void DataPipeline::servicePanels(const SourceRuntime& source, int64_t now_ms) {
   for (auto& item : panels_) {
     PanelState& panel = item.second;
     if (panel.binding.source_id != source.plan.source.id || now_ms < panel.next_refresh_ms)
       continue;
     panel.next_refresh_ms = now_ms + panelInterval(panel);
+    if (!panel.pending && !panel.binding.has_aggregation) continue;
     PanelUpdate update = makeUpdate(panel, source, now_ms);
     const auto existing =
         std::find_if(updates_.begin(), updates_.end(), [&](const PanelUpdate& old) {
@@ -335,6 +334,7 @@ void DataPipeline::markStatusPanels(const SourceRuntime& source, int64_t now_ms)
     else
       *existing = std::move(update);
     dirty_panels_.insert(panel.binding.panel_id);
+    panel.pending = false;
   }
 }
 
@@ -472,6 +472,7 @@ TickResult DataPipeline::tick(int64_t now_ms) {
     source.initial_fanout = false;
     ++tick.succeeded;
   }
+  for (const auto& source : sources_) servicePanels(*source.second, now_ms);
   tick.dirty_panels = dirty_panels_.size();
   return tick;
 }
@@ -486,6 +487,7 @@ bool DataPipeline::refreshSource(const std::string& source_id) {
 bool DataPipeline::refreshPanel(const std::string& panel_id) {
   const auto panel = panels_.find(panel_id);
   if (panel == panels_.end()) return false;
+  panel->second.pending = true;
   panel->second.next_refresh_ms = 0;
   sources_[panel->second.binding.source_id]->next_poll_ms = 0;
   return true;

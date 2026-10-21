@@ -83,6 +83,7 @@ class DataPipeline {
     uint32_t refresh_ms = 60000;
     uint32_t override_ms = 0;
     int64_t next_refresh_ms = 0;
+    bool pending = true;
   };
 
   IHttpTransport& transport_;
@@ -101,6 +102,7 @@ class DataPipeline {
   void markDirtyPanels(const SourceRuntime& source, const SourceResult* previous,
                        const SourceResult& current, int64_t now_ms, bool status_changed);
   void markStatusPanels(const SourceRuntime& source, int64_t now_ms);
+  void servicePanels(const SourceRuntime& source, int64_t now_ms);
   PanelUpdate makeUpdate(const PanelState& panel, const SourceRuntime& source,
                          int64_t now_ms) const;
 };

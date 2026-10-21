@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "data_pipeline/cache.h"
 
+#include <dirent.h>
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -19,6 +20,13 @@ bool validId(std::string_view id) {
          std::all_of(id.begin(), id.end(), [](char c) {
            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
                   (c >= '0' && c <= '9') || c == '_' || c == '-';
+         });
+}
+
+bool validGeneration(std::string_view generation) {
+  return generation.size() == 16 &&
+         std::all_of(generation.begin(), generation.end(), [](char c) {
+           return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
          });
 }
 
@@ -209,25 +217,69 @@ bool historyEntryFromJson(const JsonValue& root, HistoryEntry& out) {
       reset->intValue() < 0 || !readSample(*sample, out.sample))
     return false;
   out.reset_at_ms = reset->intValue();
-  return true;
+  const JsonValue* bucket = root.find("bucket");
+  if (bucket == nullptr) return true;
+  if (bucket->type() != JsonValue::Type::Object) return false;
+  const JsonValue* count = bucket->find("count");
+  const JsonValue* sum = bucket->find("sum");
+  const JsonValue* min = bucket->find("min");
+  const JsonValue* max = bucket->find("max");
+  const JsonValue* first = bucket->find("first_value");
+  const JsonValue* last = bucket->find("last_value");
+  const JsonValue* first_timestamp = bucket->find("first_timestamp_ms");
+  const JsonValue* aggregated = bucket->find("aggregated");
+  const auto number = [](const JsonValue* value) {
+    return value != nullptr &&
+           (value->type() == JsonValue::Type::Int || value->type() == JsonValue::Type::Double) &&
+           std::isfinite(value->doubleValue());
+  };
+  if (count == nullptr || count->type() != JsonValue::Type::Int || count->intValue() <= 0 ||
+      static_cast<uint64_t>(count->intValue()) > std::numeric_limits<size_t>::max() ||
+      !number(sum) || !number(min) || !number(max) || !number(first) || !number(last) ||
+      first_timestamp == nullptr || first_timestamp->type() != JsonValue::Type::Int ||
+      first_timestamp->intValue() < 0 ||
+      first_timestamp->intValue() > out.sample.timestamp_ms || aggregated == nullptr ||
+      aggregated->type() != JsonValue::Type::Bool) {
+    return false;
+  }
+  out.count = static_cast<size_t>(count->intValue());
+  out.sum = sum->doubleValue();
+  out.min = min->doubleValue();
+  out.max = max->doubleValue();
+  out.first_value = first->doubleValue();
+  out.last_value = last->doubleValue();
+  out.first_timestamp_ms = first_timestamp->intValue();
+  out.aggregated = aggregated->boolValue();
+  return out.min <= out.max;
 }
 
 std::string historyEntryToJson(const HistoryEntry& entry) {
+  const size_t count = entry.count == 0 ? 1 : entry.count;
+  const double sum = entry.count == 0 ? entry.sample.value : entry.sum;
+  const double min = entry.count == 0 ? entry.sample.value : entry.min;
+  const double max = entry.count == 0 ? entry.sample.value : entry.max;
+  const double first = entry.count == 0 ? entry.sample.value : entry.first_value;
+  const double last = entry.count == 0 ? entry.sample.value : entry.last_value;
+  const int64_t first_timestamp =
+      entry.count == 0 ? entry.sample.timestamp_ms : entry.first_timestamp_ms;
+  JsonValue::Object bucket;
+  bucket.emplace_back("count", integer(static_cast<int64_t>(count)));
+  bucket.emplace_back("sum", JsonValue::makeDouble(sum));
+  bucket.emplace_back("min", JsonValue::makeDouble(min));
+  bucket.emplace_back("max", JsonValue::makeDouble(max));
+  bucket.emplace_back("first_value", JsonValue::makeDouble(first));
+  bucket.emplace_back("last_value", JsonValue::makeDouble(last));
+  bucket.emplace_back("first_timestamp_ms", integer(first_timestamp));
+  bucket.emplace_back("aggregated", JsonValue::makeBool(entry.aggregated));
   JsonValue::Object object;
   object.emplace_back("sample", sampleToJson(entry.sample));
   object.emplace_back("reset_at", integer(entry.reset_at_ms));
+  object.emplace_back("bucket", JsonValue::makeObject(std::move(bucket)));
   return JsonValue::makeObject(std::move(object)).toString();
 }
 
 std::vector<HistoryEntry> boundHistory(const std::vector<HistoryEntry>& input,
                                        const CacheLimits& limits, std::string& error) {
-  SourceResult result;
-  result.source_id = input.empty() ? "cache" : input.front().sample.source_id;
-  result.metrics.reserve(input.size());
-  for (const HistoryEntry& entry : input) {
-    result.metrics.push_back(entry.sample);
-    if (entry.reset_at_ms > 0) result.reset_at_ms[entry.sample.metric] = entry.reset_at_ms;
-  }
   HistoryLimits history_limits;
   history_limits.max_series = std::max<size_t>(limits.max_history_points, 1);
   history_limits.max_points_per_series = std::max<size_t>(limits.max_history_points, 2);
@@ -235,7 +287,8 @@ std::vector<HistoryEntry> boundHistory(const std::vector<HistoryEntry>& input,
   history_limits.max_total_points = std::max<size_t>(limits.max_history_points, 1);
   history_limits.retention_ms = std::numeric_limits<int64_t>::max();
   MetricHistory history(history_limits);
-  if (!input.empty() && !history.append(result, 0, error)) return {};
+  const std::string source_id = input.empty() ? "cache" : input.front().sample.source_id;
+  if (!input.empty() && !history.replaceSource(source_id, input, 0, error)) return {};
   return history.entries();
 }
 
@@ -282,6 +335,26 @@ std::string SdCache::snapshotPath(const std::string& source_id) const {
 }
 std::string SdCache::imagePath(const std::string& source_id) const {
   return directory_ + "/" + source_id + ".image";
+}
+std::string SdCache::imageGenerationPath(const std::string& source_id,
+                                         const std::string& generation) const {
+  return directory_ + "/" + source_id + ".image-" + generation;
+}
+void SdCache::cleanupImages(const std::string& source_id,
+                            const std::string& keep_generation) const {
+  const std::string prefix = source_id + ".image-";
+  const std::string keep = prefix + keep_generation;
+  DIR* directory = opendir(directory_.c_str());
+  if (directory != nullptr) {
+    while (dirent* entry = readdir(directory)) {
+      const std::string name = entry->d_name;
+      if (name.rfind(prefix, 0) == 0 && name != keep &&
+          name.size() == prefix.size() + 16)
+        std::remove((directory_ + "/" + name).c_str());
+    }
+    closedir(directory);
+  }
+  std::remove(imagePath(source_id).c_str());
 }
 
 bool SdCache::appendHistory(const std::string& source_id,
@@ -356,13 +429,15 @@ bool SdCache::writeSnapshot(const SourceResult& result, std::string& error) {
     error = "invalid snapshot source or collection budget";
     return false;
   }
+  std::string bytes;
+  std::string generation;
   if (result.has_image) {
     if (result.image.bytes.empty() || result.image.bytes.size() > limits_.max_image_bytes) {
       error = "snapshot image exceeds configured budget";
       return false;
     }
-    const std::string bytes(result.image.bytes.begin(), result.image.bytes.end());
-    if (!writeAtomic(imagePath(result.source_id), bytes, error)) return false;
+    bytes.assign(result.image.bytes.begin(), result.image.bytes.end());
+    generation = hex(fnv1a(bytes));
   }
   JsonValue::Object root;
   root.emplace_back("version", integer(1));
@@ -385,11 +460,11 @@ bool SdCache::writeSnapshot(const SourceResult& result, std::string& error) {
   root.emplace_back("events", JsonValue::makeArray(std::move(events)));
   root.emplace_back("text", result.has_text ? string(result.text.text) : JsonValue());
   if (result.has_image) {
-    const std::string bytes(result.image.bytes.begin(), result.image.bytes.end());
     JsonValue::Object image;
     image.emplace_back("media_type", string(result.image.media_type));
     image.emplace_back("size", integer(static_cast<int64_t>(bytes.size())));
-    image.emplace_back("digest", string(hex(fnv1a(bytes))));
+    image.emplace_back("digest", string(generation));
+    image.emplace_back("generation", string(generation));
     root.emplace_back("image", JsonValue::makeObject(std::move(image)));
   } else {
     root.emplace_back("image", JsonValue());
@@ -399,8 +474,36 @@ bool SdCache::writeSnapshot(const SourceResult& result, std::string& error) {
     error = "snapshot exceeds configured byte budget";
     return false;
   }
-  if (!writeAtomic(snapshotPath(result.source_id), data, error)) return false;
-  if (!result.has_image) std::remove(imagePath(result.source_id).c_str());
+  JsonValue manifest;
+  JsonParseError parse_error;
+  if (!jsonParse(data, manifest, parse_error)) {
+    error = "snapshot manifest validation failed";
+    return false;
+  }
+  if (result.has_image) {
+    const std::string path = imageGenerationPath(result.source_id, generation);
+    if (!writeAtomic(path, bytes, error)) return false;
+    std::string staged;
+    if (!readFile(path, limits_.max_image_bytes, staged, error) || staged != bytes) {
+      if (error.empty()) error = "snapshot image read-back failed";
+      return false;
+    }
+  }
+  const std::string stage = snapshotPath(result.source_id) + ".next";
+  if (!writeAtomic(stage, data, error)) return false;
+  std::string staged_manifest;
+  if (!readFile(stage, limits_.max_snapshot_bytes, staged_manifest, error) ||
+      staged_manifest != data) {
+    std::remove(stage.c_str());
+    if (error.empty()) error = "snapshot manifest read-back failed";
+    return false;
+  }
+  if (std::rename(stage.c_str(), snapshotPath(result.source_id).c_str()) != 0) {
+    std::remove(stage.c_str());
+    error = "snapshot manifest publication failed";
+    return false;
+  }
+  cleanupImages(result.source_id, generation);
   return true;
 }
 
@@ -484,16 +587,24 @@ bool SdCache::readSnapshot(const std::string& source_id, SourceResult& out,
     const JsonValue* media = image->find("media_type");
     const JsonValue* size = image->find("size");
     const JsonValue* digest = image->find("digest");
+    const JsonValue* generation = image->find("generation");
     if (media == nullptr || media->type() != JsonValue::Type::String || size == nullptr ||
         size->type() != JsonValue::Type::Int || size->intValue() <= 0 ||
         size->intValue() > static_cast<int64_t>(limits_.max_image_bytes) || digest == nullptr ||
-        digest->type() != JsonValue::Type::String) {
+        digest->type() != JsonValue::Type::String ||
+        (generation != nullptr &&
+         (generation->type() != JsonValue::Type::String ||
+          !validGeneration(generation->stringValue()) ||
+          generation->stringValue() != digest->stringValue()))) {
       error = "snapshot image metadata is invalid";
       out = SourceResult{};
       return false;
     }
+    const std::string path = generation == nullptr
+                                 ? imagePath(source_id)
+                                 : imageGenerationPath(source_id, generation->stringValue());
     std::string bytes;
-    if (!readFile(imagePath(source_id), limits_.max_image_bytes, bytes, error) ||
+    if (!readFile(path, limits_.max_image_bytes, bytes, error) ||
         bytes.size() != static_cast<size_t>(size->intValue()) ||
         hex(fnv1a(bytes)) != digest->stringValue()) {
       if (error.empty()) error = "snapshot image is missing or does not match metadata";

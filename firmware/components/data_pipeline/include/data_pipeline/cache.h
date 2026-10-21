@@ -38,6 +38,9 @@ class SdCache {
   std::string historyPath(const std::string& source_id) const;
   std::string snapshotPath(const std::string& source_id) const;
   std::string imagePath(const std::string& source_id) const;
+  std::string imageGenerationPath(const std::string& source_id,
+                                  const std::string& generation) const;
+  void cleanupImages(const std::string& source_id, const std::string& keep_generation) const;
 
   std::string directory_;
   CacheLimits limits_;
