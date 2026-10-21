@@ -78,6 +78,18 @@ bool isSourcePlanMappingValue(const std::string& path) {
   return matches("metrics", "fields") || matches("events", "severity_map");
 }
 
+bool isDashboardSampleLabelValue(const std::string& path) {
+  const auto matches = [&](const char* prefix_text) {
+    const std::string prefix(prefix_text);
+    if (path.rfind(prefix, 0) != 0) return false;
+    const std::string suffix = "].labels";
+    if (path.size() < suffix.size()) return false;
+    const size_t suffix_pos = path.size() - suffix.size();
+    return path.compare(suffix_pos, suffix.size(), suffix) == 0 && suffix_pos > prefix.size();
+  };
+  return matches("dashboard.samples[") || matches("samples[");
+}
+
 JsonValue maskJson(const JsonValue& value, const std::string& path) {
   if (value.type() == JsonValue::Type::Array) {
     JsonValue::Array out;
@@ -104,7 +116,7 @@ JsonValue maskJson(const JsonValue& value, const std::string& path) {
       out.emplace_back(member.first, JsonValue::makeObject(std::move(headers)));
     } else if (member.second.type() == JsonValue::Type::String && sensitiveKey(member.first) &&
                !(member.first == "key" && isTableColumnMappingKey(path)) &&
-               !isSourcePlanMappingValue(path)) {
+               !isSourcePlanMappingValue(path) && !isDashboardSampleLabelValue(path)) {
       out.emplace_back(member.first, JsonValue::makeString(kMask));
     } else {
       out.emplace_back(member.first, maskJson(member.second, child_path));
