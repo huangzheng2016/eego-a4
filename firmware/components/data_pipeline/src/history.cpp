@@ -265,7 +265,7 @@ MetricHistory::MetricHistory(HistoryLimits limits, int32_t timezone_offset_minut
     : limits_(sanitize(limits)), timezone_offset_minutes_(timezone_offset_minutes) {}
 
 void MetricHistory::addWindowSample(Series& series, WindowKind kind, int64_t from_ms,
-                                    const MetricSample& sample) {
+                                    const MetricSample& sample, bool coverage_lost) {
   const WindowKey key{kind, from_ms};
   auto it = series.windows.find(key);
   if (it == series.windows.end()) {
@@ -287,6 +287,7 @@ void MetricHistory::addWindowSample(Series& series, WindowKind kind, int64_t fro
     it = series.windows.emplace(key, WindowAccumulator{}).first;
   }
   WindowAccumulator& state = it->second;
+  state.coverage_lost = state.coverage_lost || coverage_lost;
   auto position = std::lower_bound(state.samples.begin(), state.samples.end(), sample.timestamp_ms,
                                    [](const std::pair<int64_t, double>& point, int64_t timestamp) {
                                      return point.first < timestamp;
@@ -601,10 +602,11 @@ bool MetricHistory::replaceSource(const std::string& source_id,
     if (series.unit.empty()) series.unit = canonical.unit;
     if (entry.coverage_sample) {
       if (entry.coverage_windows.empty()) {
-        addWindowSample(series, entry.window_kind, entry.window_from_ms, canonical);
+        addWindowSample(series, entry.window_kind, entry.window_from_ms, canonical,
+                        entry.coverage_lost);
       } else {
         for (const auto& window : entry.coverage_windows)
-          addWindowSample(series, window.first, window.second, canonical);
+          addWindowSample(series, window.first, window.second, canonical, entry.coverage_lost);
       }
       series.fixed_gap = series.fixed_gap || entry.fixed_gap;
       continue;
@@ -623,6 +625,7 @@ bool MetricHistory::replaceSource(const std::string& source_id,
       state.coverage_lost = entry.coverage_lost;
       series.windows[window_key] = state;
     }
+    if (entry.coverage_lost) series.windows[window_key].coverage_lost = true;
     series.fixed_gap = series.fixed_gap || entry.fixed_gap;
   }
   prune(now_ms);
