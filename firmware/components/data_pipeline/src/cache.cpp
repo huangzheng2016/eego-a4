@@ -137,18 +137,35 @@ bool writeAtomic(const std::string& path, const std::string& data, std::string& 
   return writeAtomic(path, data.data(), data.size(), error);
 }
 
+bool validLabels(const std::vector<KeyValue>& labels) {
+  if (labels.size() > kMaxLabels) return false;
+  for (size_t i = 0; i < labels.size(); ++i) {
+    if (labels[i].key.empty() || jsonCodePointCount(labels[i].key) > 64 ||
+        jsonCodePointCount(labels[i].value) > 512) {
+      return false;
+    }
+    for (size_t j = 0; j < i; ++j) {
+      if (labels[i].key == labels[j].key) return false;
+    }
+  }
+  return true;
+}
+
+bool validMetricSample(const MetricSample& sample) {
+  return validId(sample.source_id) && !sample.metric.empty() && sample.metric.size() <= 128 &&
+         sample.timestamp_ms >= 0 && std::isfinite(sample.value) && sample.unit.size() <= 32 &&
+         validLabels(sample.labels);
+}
+
 bool readLabels(const JsonValue& value, std::vector<KeyValue>& out) {
   if (value.type() != JsonValue::Type::Object || value.objectItems().size() > kMaxLabels)
     return false;
   out.clear();
   for (const auto& member : value.objectItems()) {
-    if (member.first.empty() || member.first.size() > 64 ||
-        member.second.type() != JsonValue::Type::String ||
-        jsonCodePointCount(member.second.stringValue()) > 512)
-      return false;
+    if (member.second.type() != JsonValue::Type::String) return false;
     out.push_back({member.first, member.second.stringValue()});
   }
-  return true;
+  return validLabels(out);
 }
 
 bool readSample(const JsonValue& value, MetricSample& out) {
@@ -172,8 +189,8 @@ bool readSample(const JsonValue& value, MetricSample& out) {
   out.timestamp_ms = timestamp->intValue();
   out.value = number->doubleValue();
   out.unit = unit->stringValue();
-  return validId(out.source_id) && !out.metric.empty() && out.metric.size() <= 128 &&
-         out.unit.size() <= 32 && readLabels(*labels, out.labels);
+  if (!readLabels(*labels, out.labels)) return false;
+  return validMetricSample(out);
 }
 
 bool readEvent(const JsonValue& value, Event& out) {
@@ -613,6 +630,10 @@ bool SdCache::appendHistory(const std::string& source_id,
       error = "history entry source does not match cache source";
       return false;
     }
+    if (!validMetricSample(entry.sample)) {
+      error = "invalid history metric sample";
+      return false;
+    }
   }
   struct stat info;
   const bool exists = ::stat(historyPath(source_id).c_str(), &info) == 0;
@@ -726,6 +747,12 @@ bool SdCache::writeSnapshot(const SourceResult& result, std::string& error) {
       result.events.size() > kMaxResultEvents || result.fetched_at_ms < 0) {
     error = "invalid snapshot source or collection budget";
     return false;
+  }
+  for (const MetricSample& sample : result.metrics) {
+    if (sample.source_id != result.source_id || !validMetricSample(sample)) {
+      error = "snapshot contains an invalid metric";
+      return false;
+    }
   }
   std::string bytes;
   std::string generation;
