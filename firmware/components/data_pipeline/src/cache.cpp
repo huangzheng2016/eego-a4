@@ -16,6 +16,8 @@
 namespace eego::dashboard::pipeline {
 namespace {
 
+constexpr size_t kMaxHistoryRecordBytes = 64 * 1024;
+
 bool validId(std::string_view id) {
   return !id.empty() && id.size() <= 64 &&
          std::all_of(id.begin(), id.end(), [](char c) {
@@ -434,6 +436,7 @@ std::string serializeHistory(std::vector<HistoryEntry> entries, size_t max_bytes
     size_t total = 0;
     for (const HistoryEntry& entry : entries) {
       lines.push_back(historyEntryToJson(entry) + "\n");
+      if (lines.back().size() > kMaxHistoryRecordBytes) return {};
       total += lines.back().size();
     }
     if (total <= max_bytes) {
@@ -664,7 +667,7 @@ bool SdCache::loadHistoryLimited(const std::string& source_id, std::vector<Histo
     return false;
   }
   size_t valid_records = 0;
-  std::vector<char> buffer(16384);
+  std::vector<char> buffer(kMaxHistoryRecordBytes + 1);
   while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), file) != nullptr) {
     const size_t length = std::strlen(buffer.data());
     const bool complete = length > 0 && buffer[length - 1] == '\n';
