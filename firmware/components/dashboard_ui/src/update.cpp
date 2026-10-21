@@ -16,9 +16,10 @@ UpdatePlan planUpdate(const PageLayout& layout, const std::vector<uint64_t>& fin
   for (const std::string& id : manual_dirty) all_dirty = all_dirty || id == "*";
 
   const size_t count = std::min(layout.panels.size(), fingerprints.size());
+  const bool detect_reorder = incremental && previous->size() == layout.panels.size();
   for (size_t i = 0; i < count; ++i) {
     const PanelLayout& panel = layout.panels[i];
-    PanelVersion next{panel.panel->id, fingerprints[i], panel.bounds};
+    PanelVersion next{panel.panel->id, fingerprints[i], panel.bounds, i};
     const PanelVersion* cached = nullptr;
     if (incremental) {
       for (const PanelVersion& candidate : *previous) {
@@ -33,6 +34,11 @@ UpdatePlan planUpdate(const PageLayout& layout, const std::vector<uint64_t>& fin
     for (const std::string& id : manual_dirty) panel_dirty = panel_dirty || id == next.id;
     if (cached == nullptr && incremental) plan.structural = true;
     if (cached != nullptr && !(cached->bounds == next.bounds)) {
+      plan.dirty.add(cached->bounds);
+      panel_dirty = true;
+      plan.structural = true;
+    }
+    if (cached != nullptr && detect_reorder && cached->order != next.order) {
       plan.dirty.add(cached->bounds);
       panel_dirty = true;
       plan.structural = true;

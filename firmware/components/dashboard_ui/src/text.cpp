@@ -37,11 +37,24 @@ size_t validCharLength(std::string_view text, size_t offset) {
   return length;
 }
 
-size_t boundaryBefore(std::string_view text, size_t offset) {
-  offset = std::min(offset, text.size());
-  while (offset > 0 && offset < text.size() &&
-         (static_cast<unsigned char>(text[offset]) & 0xc0) == 0x80) {
-    --offset;
+size_t codepointCount(std::string_view text, size_t begin, size_t end) {
+  size_t count = 0;
+  size_t offset = begin;
+  while (offset < end) {
+    size_t length = validCharLength(text, offset);
+    if (length == 0 || offset + length > end) length = 1;
+    offset += length;
+    ++count;
+  }
+  return count;
+}
+
+size_t offsetForCodepoint(std::string_view text, size_t begin, size_t count, size_t end) {
+  size_t offset = begin;
+  for (size_t i = 0; i < count && offset < end; ++i) {
+    size_t length = validCharLength(text, offset);
+    if (length == 0 || offset + length > end) length = 1;
+    offset += length;
   }
   return offset;
 }
@@ -51,34 +64,37 @@ std::string ellipsizeValid(FontManager& font, std::string_view text, int16_t max
   if (max_width <= 0) return {};
   if (measureText(font, text, scale) <= max_width) return std::string(text);
   if (measureText(font, "...", scale) > max_width) return {};
+  const size_t count = codepointCount(text, 0, text.size());
   size_t low = 0;
-  size_t high = text.size();
+  size_t high = count;
   while (low < high) {
-    size_t middle = boundaryBefore(text, low + (high - low + 1) / 2);
-    const std::string candidate = std::string(text.substr(0, middle)) + "...";
+    const size_t middle = low + (high - low + 1) / 2;
+    const size_t offset = offsetForCodepoint(text, 0, middle, text.size());
+    const std::string candidate = std::string(text.substr(0, offset)) + "...";
     if (measureText(font, candidate, scale) <= max_width) {
-      low = middle;
-    } else {
-      high = middle == 0 ? 0 : middle - 1;
-    }
-  }
-  return std::string(text.substr(0, boundaryBefore(text, low))) + "...";
-}
-
-size_t longestFit(FontManager& font, std::string_view text, size_t begin, size_t end,
-                  int16_t width, int16_t scale) {
-  size_t low = begin;
-  size_t high = end;
-  while (low < high) {
-    const size_t middle = boundaryBefore(text, low + (high - low + 1) / 2);
-    if (middle <= begin) return begin;
-    if (measureText(font, text.substr(begin, middle - begin), scale) <= width) {
       low = middle;
     } else {
       high = middle - 1;
     }
   }
-  return boundaryBefore(text, low);
+  return std::string(text.substr(0, offsetForCodepoint(text, 0, low, text.size()))) + "...";
+}
+
+size_t longestFit(FontManager& font, std::string_view text, size_t begin, size_t end,
+                  int16_t width, int16_t scale) {
+  const size_t count = codepointCount(text, begin, end);
+  size_t low = 0;
+  size_t high = count;
+  while (low < high) {
+    const size_t middle = low + (high - low + 1) / 2;
+    const size_t offset = offsetForCodepoint(text, begin, middle, end);
+    if (measureText(font, text.substr(begin, offset - begin), scale) <= width) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return offsetForCodepoint(text, begin, low, end);
 }
 
 std::vector<std::string> wrapValid(FontManager& font, std::string_view text, int16_t width,

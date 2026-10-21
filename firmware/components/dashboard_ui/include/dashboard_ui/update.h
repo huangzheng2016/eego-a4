@@ -14,6 +14,7 @@ struct PanelVersion {
   std::string id;
   uint64_t fingerprint = 0;
   Rect bounds;
+  size_t order = 0;
 };
 
 struct UpdatePlan {
