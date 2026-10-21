@@ -3,13 +3,14 @@
 #include "admin/admin.h"
 
 #include <algorithm>
-#include <dirent.h>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <set>
 #include <vector>
 
 #include "admin_internal.h"
+#include "config_transaction.h"
+#include "device_settings/device_settings.h"
 #include "esp_timer.h"
 #include "net_stack/credentials.h"
 #include "net_stack/net_task.h"
@@ -47,63 +48,109 @@ void scheduleReboot(uint32_t delay_ms) {
   esp_timer_start_once(g_reboot_timer, static_cast<int64_t>(delay_ms) * 1000);
 }
 
-// 递归删除 SD 目录（恢复出厂：删配置目录保留字体，M13 F8）。
-bool removeRecursive(const std::string& path) {
-  DIR* dir = opendir(path.c_str());
-  if (dir == nullptr) return true;  // 不存在视为成功
+// 只删除明确列出的配置/数据文件。不得递归删目录：字体和未知用户文件保留。
+bool removeFactoryConfigs() {
+  static constexpr const char* kPaths[] = {
+      "/sdcard/alertpanel/config.json",
+      "/sdcard/alertpanel/config.json.tmp",
+      "/sdcard/alertpanel/config.json.bak",
+      "/sdcard/alertpanel/alerts.db",
+      "/sdcard/alertpanel/alerts.db.tmp",
+      "/sdcard/alertpanel/dashboard.json",
+      "/sdcard/alertpanel/dashboard.json.tmp",
+      "/sdcard/alertpanel/dashboard.json.bak",
+  };
   bool ok = true;
-  struct dirent* ent;
-  while ((ent = readdir(dir)) != nullptr) {
-    if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
-    const std::string child = path + "/" + ent->d_name;
-    if (ent->d_type == DT_DIR) {
-      if (!removeRecursive(child)) ok = false;
-    } else {
-      if (remove(child.c_str()) != 0) ok = false;
-    }
+  for (const char* path : kPaths) {
+    if (remove(path) != 0 && errno != ENOENT) ok = false;
   }
-  closedir(dir);
-  if (rmdir(path.c_str()) != 0) ok = false;
   return ok;
 }
 
-// sources 热生效（sources_changed 时调用；net_task 线程安全 API）。
-// v1 语义：全量替换——移除所有现存源，按配置重新 addSource。
-void syncSources(const std::vector<net::SourceConfig>& desired) {
+bool syncSources(const std::vector<net::SourceConfig>& desired, std::string& error) {
   net::NetStack& ns = net::NetStack::instance();
   if (!ns.running()) {
-    ADMIN_LOG_WARN("sources sync skipped: net_task not running");
-    return;
+    error = "net_task is unavailable";
+    return false;
   }
   net::NetStatusSnapshot snap;
-  if (ns.queryStatus(snap)) {
-    for (const auto& h : snap.sources) {
-      ns.removeSource(h.id);
+  if (!ns.queryStatus(snap)) {
+    error = "cannot query current sources";
+    return false;
+  }
+  for (const auto& health : snap.sources) {
+    if (!ns.removeSource(health.id)) {
+      error = "failed to remove existing source: " + health.id;
+      return false;
     }
   }
-  for (const auto& cfg : desired) {
-    std::string err;
-    if (!ns.addSource(cfg, err)) {
-      ADMIN_LOG_ERROR("source add failed: id=%s (%s)", cfg.id.c_str(), err.c_str());
+  for (const auto& config : desired) {
+    std::string detail;
+    if (!ns.addSource(config, detail)) {
+      error = "failed to add source " + config.id + ": " + detail;
+      return false;
     }
   }
-  ADMIN_LOG_INFO("sources synced: %u source(s)", static_cast<unsigned>(desired.size()));
+  return true;
 }
 
-// mute_rules 热生效（M21；net_task 线程安全 API，全量替换语义与 store 一致）。
-// net_task 未运行时跳过（规则已在 config.json，下次启动恢复，M21 组合根保证）。
-void syncMuteRules(const std::vector<alert_core::MuteRule>& rules) {
+bool syncMuteRules(const std::vector<alert_core::MuteRule>& rules, std::string& error) {
   net::NetStack& ns = net::NetStack::instance();
   if (!ns.running()) {
-    ADMIN_LOG_WARN("mute rules sync skipped: net_task not running");
-    return;
+    error = "net_task is unavailable";
+    return false;
   }
-  std::string err;
-  if (!ns.setMuteRules(rules, err)) {
-    ADMIN_LOG_ERROR("mute rules sync failed: %s", err.c_str());
-    return;
+  return ns.setMuteRules(rules, error);
+}
+
+struct RuntimeConfig {
+  AdminDomainConfig admin;
+  alert_core::JsonValue overrides = alert_core::JsonValue::makeObject({});
+  std::vector<net::SourceConfig> sources;
+  std::vector<alert_core::MuteRule> mute_rules;
+};
+
+RuntimeConfig captureRuntime(ConfigStore& store, const alert_core::JsonValue& dom) {
+  RuntimeConfig out;
+  out.admin = store.admin();
+  if (const alert_core::JsonValue* overrides = dom.find("alert_type_overrides")) {
+    out.overrides = *overrides;
   }
-  ADMIN_LOG_INFO("mute rules synced: %u rule(s)", static_cast<unsigned>(rules.size()));
+  out.sources = store.sources();
+  out.mute_rules = store.muteRules();
+  return out;
+}
+
+bool applyRuntime(const RuntimeConfig& config, uint32_t sections, std::string& error) {
+  if ((sections & AdminCommand::kChangedAdmin) != 0) {
+    AuthManager::instance().setSessionTtl(config.admin.session_ttl_s);
+    AuthManager::instance().setLockThreshold(config.admin.login_lock_threshold);
+    LogLevel level;
+    if (logLevelFromString(config.admin.log_level, level)) {
+      AdminLog::instance().setMinLevel(level);
+    }
+  }
+  if ((sections & AdminCommand::kChangedOverrides) != 0) {
+    if (g_registry == nullptr) {
+      error = "alert type registry is unavailable";
+      return false;
+    }
+    g_registry->clearOverrides();
+    alert_core::ValidationError detail;
+    if (!g_registry->applyOverridesJson(config.overrides, detail)) {
+      error = "type overrides apply failed: " + detail.field + "." + detail.message;
+      return false;
+    }
+  }
+  if ((sections & AdminCommand::kChangedSources) != 0 &&
+      !syncSources(config.sources, error)) {
+    return false;
+  }
+  if ((sections & AdminCommand::kChangedMuteRules) != 0 &&
+      !syncMuteRules(config.mute_rules, error)) {
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -145,44 +192,81 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
 
   switch (cmd.type) {
     case AdminCommandType::ApplyConfig: {
-      // 1. 原子持久化（tmp+rename+回读；失败 RAM 不变 → httpd 500）
-      std::string err;
-      if (!store.commit(cmd.config, err)) {
+      FieldErrors capability_errors;
+      validateLegacyDisplayCapability(cmd.display_patch, capability_errors);
+      if (!capability_errors.empty()) {
         res.ok = false;
-        res.err = err;
+        res.err = capability_errors.front().field + ": " + capability_errors.front().message;
         return;
       }
-      // 2. admin 域热生效（日志只记 section 名，M13 F7）
-      if (cmd.changed_sections & AdminCommand::kChangedAdmin) {
-        const AdminDomainConfig admin = store.admin();
-        AuthManager::instance().setSessionTtl(admin.session_ttl_s);
-        AuthManager::instance().setLockThreshold(admin.login_lock_threshold);
-        LogLevel lv;
-        if (logLevelFromString(admin.log_level, lv)) AdminLog::instance().setMinLevel(lv);
-        ADMIN_LOG_INFO("config applied: admin");
+      if ((cmd.changed_sections & AdminCommand::kChangedOverrides) != 0 && g_registry == nullptr) {
+        res.ok = false;
+        res.err = "alert type registry is unavailable";
+        return;
       }
-      // 3. alert_type_overrides → 注册表（整段替换语义：先清再应用）
-      if ((cmd.changed_sections & AdminCommand::kChangedOverrides) && g_registry != nullptr) {
-        g_registry->clearOverrides();
-        const alert_core::JsonValue* ov = cmd.config.find("alert_type_overrides");
-        alert_core::ValidationError verr;
-        if (ov != nullptr && !g_registry->applyOverridesJson(*ov, verr)) {
-          ADMIN_LOG_ERROR("type overrides apply failed: %s.%s", verr.field.c_str(),
-                          verr.message.c_str());
+      if ((cmd.changed_sections & (AdminCommand::kChangedSources |
+                                   AdminCommand::kChangedMuteRules)) != 0) {
+        net::NetStack& net = net::NetStack::instance();
+        net::NetStatusSnapshot status;
+        if (!net.running() ||
+            ((cmd.changed_sections & AdminCommand::kChangedSources) != 0 &&
+             !net.queryStatus(status))) {
+          res.ok = false;
+          res.err = "net_task is unavailable; config was not committed";
+          return;
         }
-        ADMIN_LOG_INFO("config applied: alert_type_overrides");
       }
-      // 4. sources 热生效（整段替换）
-      if (cmd.changed_sections & AdminCommand::kChangedSources) {
-        syncSources(store.sources());
-        ADMIN_LOG_INFO("config applied: sources");
+
+      const alert_core::JsonValue previous_dom = store.rawDom();
+      const RuntimeConfig previous_runtime = captureRuntime(store, previous_dom);
+      const settings::Snapshot previous_settings =
+          settings::DeviceSettings::instance().snapshot();
+      settings::Settings desired_settings = previous_settings.values;
+      if ((cmd.changed_sections & AdminCommand::kChangedAdminDisplay) != 0) {
+        settings::applyLegacyDisplay(cmd.display_patch, desired_settings);
       }
-      // 5. mute_rules 热生效（整段替换；M21）
-      if (cmd.changed_sections & AdminCommand::kChangedMuteRules) {
-        syncMuteRules(store.muteRules());
-        ADMIN_LOG_INFO("config applied: mute_rules");
+      settings::FieldErrors validation;
+      settings::validate(desired_settings, validation);
+      if (!validation.empty()) {
+        res.ok = false;
+        res.err = validation.front().field + ": " + validation.front().message;
+        return;
       }
-      res.ok = true;
+      const bool settings_changed =
+          settings::changedFields(previous_settings.values, desired_settings) != 0;
+
+      internal::ConfigTransactionHooks hooks;
+      hooks.commit_config = [&](std::string& error) { return store.commit(cmd.config, error); };
+      hooks.apply_settings = [&](std::string& error) {
+        if (!settings_changed) return true;
+        uint32_t changed = 0;
+        return settings::DeviceSettings::instance().update(desired_settings, &changed, error);
+      };
+      hooks.apply_runtime = [&](std::string& error) {
+        const RuntimeConfig desired = captureRuntime(store, cmd.config);
+        return applyRuntime(desired, cmd.changed_sections, error);
+      };
+      hooks.rollback_config = [&](std::string& error) {
+        return store.commit(previous_dom, error);
+      };
+      hooks.rollback_settings = [&](std::string& error) {
+        if (!settings_changed) return true;
+        uint32_t changed = 0;
+        return settings::DeviceSettings::instance().update(previous_settings.values, &changed,
+                                                            error);
+      };
+      hooks.rollback_runtime = [&](std::string& error) {
+        return applyRuntime(previous_runtime, cmd.changed_sections, error);
+      };
+
+      std::string error;
+      res.ok = internal::runConfigTransaction(hooks, error);
+      res.err = error;
+      if (!res.ok) {
+        ADMIN_LOG_ERROR("config transaction failed: %s", error.c_str());
+        return;
+      }
+      ADMIN_LOG_INFO("config transaction applied");
       return;
     }
 
@@ -204,6 +288,28 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       res.ok = DashboardStore::instance().erase(
           cmd.dashboard_check_revision, cmd.dashboard_expected_revision, res.err, conflict);
       res.conflict = conflict;
+      return;
+    }
+
+    case AdminCommandType::ApplySettings: {
+      const settings::Snapshot snap = settings::DeviceSettings::instance().snapshot();
+      settings::Settings candidate;
+      settings::FieldErrors errors;
+      if (!settings::mergePatch(snap.values, cmd.settings_patch, candidate, errors)) {
+        res.ok = false;
+        res.err = errors.empty() ? "settings validation failed"
+                                 : errors.front().field + ": " + errors.front().message;
+        return;
+      }
+      uint32_t changed = 0;
+      std::string err;
+      if (!settings::DeviceSettings::instance().update(candidate, &changed, err)) {
+        res.ok = false;
+        res.err = err;
+        return;
+      }
+      ADMIN_LOG_INFO("device settings applied: mask=%u", static_cast<unsigned>(changed));
+      res.ok = true;
       return;
     }
 
@@ -240,7 +346,6 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
         res.err = "failed to persist wifi credentials to NVS";
         return;
       }
-      // config wifi_list 同步 + 原子提交（失败不阻断：NVS 已是权威）
       alert_core::JsonValue dom = store.rawDom();
       std::vector<std::pair<std::string, std::string>> list;
       for (size_t i = 0; i < accounts.size(); i++) {
@@ -254,24 +359,64 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       } else {
         ADMIN_LOG_ERROR("wifi_list config sync failed: %s", err.c_str());
       }
-      // 触发重连（net_task 上下文，线程安全）
       net::NetStack::instance().reconnectNow();
       res.ok = true;
       return;
     }
 
+    case AdminCommandType::WifiReset: {
+      ADMIN_LOG_WARN("wifi-only reset executing");
+      if (net::CredentialStore::clearWifiAccounts() != ESP_OK) {
+        res.ok = false;
+        res.err = "failed to clear wifi credentials";
+        return;
+      }
+      alert_core::JsonValue dom = store.rawDom();
+      std::string err;
+      if (!store.setWifiListInDom(dom, {}) || !store.commit(dom, err)) {
+        ADMIN_LOG_ERROR("wifi reset: wifi_list sync failed: %s", err.c_str());
+      }
+      net::NetStack::instance().reconnectNow();
+      const esp_err_t ap_err = ProvisionPortal::instance().openApFallback();
+      if (ap_err != ESP_OK && ap_err != ESP_ERR_INVALID_STATE) {
+        res.ok = false;
+        res.err = "wifi credentials cleared but recovery AP failed";
+        return;
+      }
+      res.ok = true;
+      return;
+    }
+
     case AdminCommandType::FactoryReset: {
-      // M13 F8：清 NVS sec/wifi + 删 SD 配置目录（保留字体）→ 重启
+      if (!::eego::SdCard::instance().ready()) {
+        res.ok = false;
+        res.err = "factory reset incomplete: SD unavailable; persistent state unchanged";
+        return;
+      }
       ADMIN_LOG_WARN("factory reset executing");
-      net::CredentialStore::clearNamespace("sec");
-      net::CredentialStore::clearNamespace("wifi");
-      AuthManager::instance().revokeAllSessions();
-      if (::eego::SdCard::instance().ready()) {
-        if (!removeRecursive("/sdcard/alertpanel")) {
-          ADMIN_LOG_ERROR("factory reset: config dir removal incomplete");
+      net::NetStack::instance().stop();
+      bool ok = true;
+      for (const char* ns : {"sec", "wifi", "ui", "ble", "dashboard"}) {
+        if (net::CredentialStore::clearNamespace(ns) != ESP_OK) {
+          ADMIN_LOG_ERROR("factory reset: clear namespace failed: %s", ns);
+          ok = false;
         }
       }
-      res.ok = true;  // 先回 httpd 202，再延迟重启
+      if (settings::DeviceSettings::erasePersisted() != ESP_OK) {
+        ADMIN_LOG_ERROR("factory reset: clear device settings failed");
+        ok = false;
+      }
+      AuthManager::instance().revokeAllSessions();
+      if (!removeFactoryConfigs()) {
+        ADMIN_LOG_ERROR("factory reset: config file removal incomplete");
+        ok = false;
+      }
+      if (!ok) {
+        res.ok = false;
+        res.err = "factory reset incomplete; recovery required; reboot not scheduled";
+        return;
+      }
+      res.ok = true;
       scheduleReboot(cmd.delay_ms > 0 ? cmd.delay_ms : 2000);
       return;
     }

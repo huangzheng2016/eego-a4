@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 
@@ -34,18 +35,24 @@ using eego::net::AlertAction;
 using eego::net::AlertActionResult;
 using eego::net::AlertActionType;
 using eego::net::NetStack;
+using eego::settings::PowerMode;
 
-// net 事件位（notifyNetEvent 原子置位，drainNetBits 消费）
 constexpr uint32_t kNetBitWifi = 1u << 0;
 constexpr uint32_t kNetBitSource = 1u << 1;
+constexpr uint32_t kPollWaitMs = 45000;
+constexpr uint32_t kRenderThrottleMs = 250;
+constexpr uint32_t kClockRenderMs = 30000;
+constexpr uint32_t kConfirmWindowMs = 5000;
+constexpr size_t kSettingsRowCount = 26;
+constexpr size_t kSettingsPageRows = 8;
 
-// 电源/电池常量
-constexpr uint32_t kAwakeWindowMs = 90000;   // 电池模式交互窗口（输入可延长）
-constexpr uint32_t kPollWaitMs = 45000;      // 电池模式等 WiFi 上限
-constexpr uint32_t kDashboardPollWaitMs = 130000;  // 数据源 120s 超时 + 队列余量
-constexpr uint32_t kRenderThrottleMs = 250;  // 渲染最小间隔（e-ink 节奏）
-constexpr uint32_t kClockRenderMs = 30000;   // 状态栏时钟节奏
-constexpr uint32_t kConfirmWindowMs = 5000;  // 二次确认窗口
+constexpr uint32_t kDashboardPollWaitMs = 130000;
+
+void localTm(const eego::settings::Settings& settings, uint64_t unix, struct tm& out) {
+  const time_t local = static_cast<time_t>(static_cast<int64_t>(unix) +
+                                           static_cast<int64_t>(settings.timezone_offset_min) * 60);
+  gmtime_r(&local, &out);
+}
 
 // AdminEvent 小信箱元素（httpd/sys_evt → app_task）
 struct AdminMail {
@@ -69,8 +76,11 @@ int64_t PanelApp::nowMs() const { return esp_timer_get_time() / 1000; }
 
 void PanelApp::begin(const Deps& deps) {
   deps_ = deps;
-  prefs_.load();
-  setLang(prefs_.lang());
+  settings_ = eego::settings::DeviceSettings::instance().snapshot().values;
+  wakeCause_ = static_cast<int>(esp_sleep_get_wakeup_cause());
+  settingsSubscription_ = eego::settings::DeviceSettings::instance().subscribe(
+      &PanelApp::onSettingsChanged, this);
+  if (settingsSubscription_ < 0) ESP_LOGW(TAG, "settings subscription table full");
   adminQueue_ = xQueueCreate(8, sizeof(AdminMail));
 
   charging_ = eego::PowerManager::instance().isCharging();
@@ -78,24 +88,17 @@ void PanelApp::begin(const Deps& deps) {
   lastBatMs_ = nowMs();
   lastChargeMs_ = lastBatMs_;
   lastInputMs_ = lastBatMs_;
+  lastFullRenderMs_ = lastBatMs_;
 
   mains_ = computeMains();
-  NetStack::instance().wifi().setPowerSave(mains_);  // 常供电 = modem-sleep
+  NetStack::instance().wifi().setPowerSave(mains_);
   if (!mains_) {
     battPhase_ = BattPhase::Polling;
     cycleStartMs_ = lastBatMs_;
     pollDeadlineMs_ = cycleStartMs_ + kPollWaitMs;
   }
 
-  // 前光按 admin 配置应用（缺席时配置被忽略，S4 显示"无前光"）
-  const admin::AdminDomainConfig ac = admin::ConfigStore::instance().admin();
-  if (eego::FrontlightManager::instance().present() && ac.brightness > 0) {
-    eego::FrontlightManager::instance().setWarm(
-        static_cast<uint8_t>(ac.warmth < 0 ? 0 : (ac.warmth > 100 ? 100 : ac.warmth)));
-    eego::FrontlightManager::instance().setBrightness(
-        static_cast<uint8_t>(ac.brightness > 100 ? 100 : ac.brightness));
-    frontlightOn_ = true;
-  }
+  applySettings(eego::settings::kChangedAll);
 
   DashboardRuntime::Deps dashboardDeps;
   dashboardDeps.canvas = deps_.canvas;
@@ -105,8 +108,72 @@ void PanelApp::begin(const Deps& deps) {
   dashboard_.setMains(mains_);
 
   ESP_LOGI(TAG, "panel begin: mains=%d lang=%s bat=%umV/%u%%", mains_ ? 1 : 0,
-           langCode(prefs_.lang()), batCache_.millivolts, batCache_.percent);
+           settings_.language.c_str(), batCache_.millivolts, batCache_.percent);
   markDirty(true);
+}
+
+bool PanelApp::updateSettings(const eego::settings::Settings& candidate) {
+  uint32_t changed = 0;
+  std::string error;
+  if (!eego::settings::DeviceSettings::instance().update(candidate, &changed, error)) {
+    showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), error.c_str());
+    return false;
+  }
+  return true;
+}
+
+void PanelApp::applySettings(uint32_t changed) {
+  if ((changed & eego::settings::kChangedLanguage) != 0) {
+    setLang(settings_.language == "en" ? Lang::En : Lang::Zh);
+  }
+  if ((changed & eego::settings::kChangedFrontlight) != 0) {
+    eego::FrontlightManager& frontlight = eego::FrontlightManager::instance();
+    if (!frontlight.present()) {
+      frontlight.off();
+    } else {
+      frontlight.setWarm(settings_.frontlight_warmth);
+      frontlight.setBrightness(settings_.frontlight_enabled
+                                   ? settings_.frontlight_brightness
+                                   : 0);
+    }
+  }
+  if ((changed & eego::settings::kChangedDataRefresh) != 0) {
+    const uint32_t interval_ms = settings_.data_refresh_s * 1000;
+    if (!NetStack::instance().setDataRefreshInterval(interval_ms)) {
+      ESP_LOGW(TAG, "data refresh scheduler unavailable");
+    }
+  }
+  if ((changed & eego::settings::kChangedEpdRefresh) != 0) {
+    lastFullRenderMs_ = nowMs();
+  }
+  if ((changed & eego::settings::kChangedSleep) != 0) {
+    lastScheduleCheckMs_ = nowMs() - 1001;
+    if (battPhase_ == BattPhase::Serving && settings_.idle_sleep_s > 0) {
+      awakeDeadlineMs_ = nowMs() + static_cast<int64_t>(settings_.idle_sleep_s) * 1000;
+    }
+  }
+  markDirty((changed & (eego::settings::kChangedLanguage |
+                        eego::settings::kChangedTimezone)) != 0);
+}
+
+void PanelApp::onSettingsChanged(const eego::settings::Settings& values, uint32_t changed,
+                                 void* ctx) {
+  PanelApp* self = static_cast<PanelApp*>(ctx);
+  self->settings_ = values;
+  self->applySettings(changed);
+}
+
+uint64_t PanelApp::nextWakeAt(int64_t now_ms) const {
+  if (admin::ProvisionPortal::instance().apActive()) return 0;
+  const uint64_t now_unix = TimeSource::now();
+  uint64_t wake_at = 0;
+  uint32_t remaining = 0;
+  if (eego::settings::scheduledSleep(settings_, now_unix, wake_at, remaining)) return wake_at;
+  if (mains_ || settings_.idle_sleep_s == 0) return 0;
+  const int64_t cycle_end = cycleStartMs_ + static_cast<int64_t>(settings_.battery_poll_s) * 1000;
+  int64_t left = cycle_end > now_ms ? cycle_end - now_ms : 0;
+  if (left < 10000) left = 10000;
+  return now_unix + static_cast<uint64_t>(left / 1000);
 }
 
 // ── 跨任务通知（短平快）─────────────────────────────────────────────────────
@@ -201,17 +268,37 @@ void PanelApp::service() {
     back();
   }
 
-  // 模式切换（充电插拔/设置变更）
   const bool wantMains = computeMains();
   if (wantMains != mains_) onModeChange(wantMains);
   dashboard_.service(mains_);
   if (page_ == Page::Dashboard && dashboard_.consumeExitRequest()) gotoPage(Page::Overview);
 
+  if (now - lastScheduleCheckMs_ > 1000) {
+    lastScheduleCheckMs_ = now;
+    if (!admin::ProvisionPortal::instance().apActive()) {
+      uint64_t wake_at = 0;
+      uint32_t remaining = 0;
+      if (eego::settings::scheduledSleep(settings_, nowUnix(), wake_at, remaining)) {
+        enterSleep(now, static_cast<int64_t>(remaining) * 1000);
+      }
+    }
+  }
   batteryFsm(now);
+
+  if (settings_.epd_full_refresh_s > 0 &&
+      now - lastFullRenderMs_ >= static_cast<int64_t>(settings_.epd_full_refresh_s) * 1000) {
+    if (page_ == Page::Dashboard) {
+      dashboard_.invalidateAll();
+      forceFull_ = true;
+    } else {
+      markDirty(true);
+    }
+  }
 
   if (page_ == Page::Dashboard) {
     if (dashboard_.needsRender()) {
       dashboard_.render();
+      if (forceFull_) lastFullRenderMs_ = now;
       dirty_ = false;
       forceFull_ = false;
       lastRenderMs_ = now;
@@ -219,7 +306,6 @@ void PanelApp::service() {
     return;
   }
 
-  // 状态栏时钟节奏（页面停留时也保持时间新鲜）
   if (now - lastRenderMs_ > kClockRenderMs) markDirty();
 
   if (dirty_ && now - lastRenderMs_ >= kRenderThrottleMs) {
@@ -379,8 +465,8 @@ void PanelApp::moveFocus(int delta) {
       markDirty();
       break;
     case Page::Settings: {
-      const size_t rows = 8;
-      focus_ = (focus_ + delta + rows) % rows;
+      const int rows = static_cast<int>(kSettingsRowCount);
+      focus_ = static_cast<size_t>((static_cast<int>(focus_) + delta + rows) % rows);
       markDirty();
       break;
     }
@@ -517,9 +603,13 @@ void PanelApp::onTouchTap(int16_t x, int16_t y) {
     }
   } else if (page_ == Page::Settings) {
     const int16_t rowsY = geom::kContentTop + 64;
-    if (y >= rowsY && y < rowsY + 8 * 56) {
-      hitRow = true;
-      hitIdx = static_cast<int>((y - rowsY) / 56) + 1;
+    if (y >= rowsY && y < rowsY + static_cast<int16_t>(kSettingsPageRows * 56)) {
+      const size_t row = static_cast<size_t>((y - rowsY) / 56);
+      const size_t global = (focus_ / kSettingsPageRows) * kSettingsPageRows + row;
+      if (global < kSettingsRowCount) {
+        hitRow = true;
+        hitIdx = static_cast<int>(global + 1);
+      }
     }
   }
 
@@ -687,104 +777,222 @@ void PanelApp::doPollNow() {
 }
 
 void PanelApp::activateSettingRow(size_t row) {
+  eego::settings::Settings next = settings_;
   switch (row) {
-    case 0: {  // 语言
-      const Lang next = (prefs_.lang() == Lang::Zh) ? Lang::En : Lang::Zh;
-      prefs_.setLang(next);
-      prefs_.save();
-      setLang(next);
+    case 0: {
+      const eego::net::NetStatusSnapshot& status = netStatus();
+      if (!status.wifi.ip.empty()) showBannerFmt(5000, "http://%s/", status.wifi.ip.c_str());
+      else showBanner(tr(Str::WifiDisconnected), 3000);
+      break;
+    }
+    case 1: armConfirm(ConfirmKind::NetworkRecovery); break;
+    case 2: armConfirm(ConfirmKind::WifiReset); break;
+    case 3: showBanner(tr(Str::Unavailable), 3000); break;
+    case 4:
+      next.language = settings_.language == "zh" ? "en" : "zh";
+      updateSettings(next);
+      break;
+    case 5:
+      next.timezone_offset_min += 60;
+      if (next.timezone_offset_min > 840) next.timezone_offset_min = -720;
+      updateSettings(next);
+      break;
+    case 6:
+    case 7:
+    case 8: {
+      if (!eego::FrontlightManager::instance().present()) {
+        showBanner(tr(Str::FrontlightMissing), 3000);
+        break;
+      }
+      if (row == 6) next.frontlight_enabled = !settings_.frontlight_enabled;
+      if (row == 7) {
+        switch (settings_.frontlight_brightness) {
+          case 10: next.frontlight_brightness = 25; break;
+          case 25: next.frontlight_brightness = 50; break;
+          case 50: next.frontlight_brightness = 75; break;
+          case 75: next.frontlight_brightness = 100; break;
+          default: next.frontlight_brightness = 10; break;
+        }
+      }
+      if (row == 8) next.frontlight_warmth = (settings_.frontlight_warmth + 25) % 125;
+      updateSettings(next);
+      break;
+    }
+    case 9:
+      switch (settings_.data_refresh_s) {
+        case 0: next.data_refresh_s = 60; break;
+        case 60: next.data_refresh_s = 300; break;
+        case 300: next.data_refresh_s = 900; break;
+        default: next.data_refresh_s = 0; break;
+      }
+      updateSettings(next);
+      break;
+    case 10: doPollNow(); break;
+    case 11:
+      switch (settings_.epd_full_refresh_s) {
+        case 0: next.epd_full_refresh_s = 3600; break;
+        case 3600: next.epd_full_refresh_s = 86400; break;
+        case 86400: next.epd_full_refresh_s = 604800; break;
+        default: next.epd_full_refresh_s = 0; break;
+      }
+      updateSettings(next);
+      break;
+    case 12:
       markDirty(true);
+      showBanner(tr(Str::FullRefreshQueued), 3000);
       break;
-    }
-    case 1: {  // 电源模式
-      PowerMode next;
-      switch (prefs_.powerMode()) {
-        case PowerMode::Auto: next = PowerMode::Mains; break;
-        case PowerMode::Mains: next = PowerMode::Battery; break;
-        default: next = PowerMode::Auto; break;
+    case 13:
+      switch (settings_.power_mode) {
+        case PowerMode::Auto: next.power_mode = PowerMode::Mains; break;
+        case PowerMode::Mains: next.power_mode = PowerMode::Battery; break;
+        default: next.power_mode = PowerMode::Auto; break;
       }
-      prefs_.setPowerMode(next);
-      prefs_.save();
-      markDirty();
+      updateSettings(next);
       break;
-    }
-    case 2: {  // 电池轮询周期
-      uint32_t next;
-      switch (prefs_.batteryPollS()) {
-        case 300: next = 900; break;
-        case 900: next = 1800; break;
-        case 1800: next = 3600; break;
-        default: next = 300; break;
+    case 14:
+      switch (settings_.battery_poll_s) {
+        case 300: next.battery_poll_s = 900; break;
+        case 900: next.battery_poll_s = 1800; break;
+        case 1800: next.battery_poll_s = 3600; break;
+        case 3600: next.battery_poll_s = 21600; break;
+        default: next.battery_poll_s = 300; break;
       }
-      prefs_.setBatteryPollS(next);
-      prefs_.save();
-      markDirty();
+      updateSettings(next);
+      break;
+    case 15:
+      switch (settings_.idle_sleep_s) {
+        case 0: next.idle_sleep_s = 30; break;
+        case 30: next.idle_sleep_s = 90; break;
+        case 90: next.idle_sleep_s = 300; break;
+        case 300: next.idle_sleep_s = 600; break;
+        default: next.idle_sleep_s = 0; break;
+      }
+      updateSettings(next);
+      break;
+    case 16:
+      if (settings_.sleep_start_min < 0) {
+        next.sleep_start_min = 22 * 60;
+        next.sleep_end_min = 6 * 60;
+      } else if (settings_.sleep_start_min == 22 * 60 && settings_.sleep_end_min == 6 * 60) {
+        next.sleep_start_min = 23 * 60;
+        next.sleep_end_min = 7 * 60;
+      } else if (settings_.sleep_start_min == 23 * 60 && settings_.sleep_end_min == 7 * 60) {
+        next.sleep_start_min = 12 * 60 + 30;
+        next.sleep_end_min = 13 * 60 + 30;
+      } else {
+        next.sleep_start_min = -1;
+        next.sleep_end_min = -1;
+      }
+      if (updateSettings(next) && next.sleep_start_min >= 0) {
+        showBanner(tr(Str::DeepSleepOffline), 5000);
+      }
+      break;
+    case 17: {
+      const uint64_t wake = nextWakeAt(nowMs());
+      if (wake == 0) showBanner(tr(Str::NotScheduled), 3000);
+      else {
+        char text[32];
+        formatTs(wake, text, sizeof(text));
+        showBanner(text, 4000);
+      }
       break;
     }
-    case 3: {  // 前光开关
-      eego::FrontlightManager& fl = eego::FrontlightManager::instance();
-      if (!fl.present()) break;
-      frontlightOn_ = !frontlightOn_;
-      const admin::AdminDomainConfig ac = admin::ConfigStore::instance().admin();
-      fl.setBrightness(frontlightOn_
-                           ? static_cast<uint8_t>(ac.brightness > 0 ? ac.brightness : 60)
-                           : 0);
-      markDirty();
+    case 18: {
+      Str text = Str::WakeOther;
+      if (wakeCause_ == ESP_SLEEP_WAKEUP_TIMER) text = Str::WakeTimer;
+      else if (wakeCause_ == ESP_SLEEP_WAKEUP_EXT0) text = Str::WakeButton;
+      else if (wakeCause_ == ESP_SLEEP_WAKEUP_UNDEFINED) text = Str::WakeReset;
+      showBanner(tr(text), 3000);
       break;
     }
-    case 4:  // 静音列表（清除需二次确认；store 级规则清空，M21）
+    case 19:
+      showBanner(eego::SdCard::instance().ready() ? tr(Str::SdReady) : tr(Str::SdMissing), 3000);
+      break;
+    case 20:
+      next.diagnostics_enabled = !settings_.diagnostics_enabled;
+      updateSettings(next);
+      break;
+    case 21:
+      if (settings_.diagnostics_enabled) diagSmoke();
+      else showBanner(tr(Str::Unavailable), 3000);
+      break;
+    case 22:
+      showBanner(admin::AuthManager::instance().hasPassword() ? tr(Str::SecuritySet)
+                                                              : tr(Str::SecurityMissing),
+                 3000);
+      break;
+    case 23:
       if (confirm_ == ConfirmKind::ClearMutes) {
         doClearMutes();
         clearConfirm();
-        markDirty();
       } else {
         armConfirm(ConfirmKind::ClearMutes);
       }
       break;
-    case 5:  // 立即轮询
-      doPollNow();
-      break;
-    case 6: {  // 管理后台地址
-      const eego::net::NetStatusSnapshot& ns = netStatus();
-      if (!ns.wifi.ip.empty()) {
-        showBannerFmt(5000, "http://%s/", ns.wifi.ip.c_str());
-      } else {
-        showBanner(tr(Str::WifiDisconnected), 3000);
-      }
+    case 24: armConfirm(ConfirmKind::FactoryReset); break;
+    case 25: {
+      const esp_app_desc_t* description = esp_app_get_description();
+      showBannerFmt(5000, "%s %s", description->project_name, description->version);
       break;
     }
-    case 7: {  // 版本
-      const esp_app_desc_t* d = esp_app_get_description();
-      showBannerFmt(5000, "%s %s", d->project_name, d->version);
-      break;
-    }
-    default:
-      break;
+    default: break;
   }
+}
+
+void PanelApp::doOpenRecovery() {
+  esp_err_t err = ESP_OK;
+  if (!admin::ProvisionPortal::instance().apActive()) {
+    err = admin::ProvisionPortal::instance().openApFallback();
+  }
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), esp_err_to_name(err));
+    return;
+  }
+  awakeDeadlineMs_ = nowMs() + 600000;
+  showBanner(tr(Str::RecoveryApStarted), 7000);
+  markDirty(true);
+}
+
+void PanelApp::doWifiReset() {
+  admin::AdminCommand cmd;
+  cmd.type = admin::AdminCommandType::WifiReset;
+  admin::AdminResult result;
+  admin::defaultCommandHandler(cmd, result, nullptr);
+  if (result.ok) showBanner(tr(Str::WifiResetDone), 7000);
+  else showBannerFmt(5000, "%s: %s", tr(Str::ActionFailed), result.err.c_str());
+  markDirty(true);
+}
+
+void PanelApp::doFactoryReset() {
+  admin::AdminCommand cmd;
+  cmd.type = admin::AdminCommandType::FactoryReset;
+  cmd.delay_ms = 3000;
+  admin::AdminResult result;
+  admin::defaultCommandHandler(cmd, result, nullptr);
+  if (result.ok) {
+    eego::FrontlightManager::instance().off();
+    showBanner(tr(Str::FactoryResetDone), 3000);
+  } else {
+    showBannerFmt(5000, "%s: %s", tr(Str::ActionFailed), result.err.c_str());
+  }
+  markDirty(true);
 }
 
 void PanelApp::executeArmedConfirm() {
   switch (confirm_) {
-    case ConfirmKind::AckAll:
-      doAckAll();
-      break;
+    case ConfirmKind::AckAll: doAckAll(); break;
     case ConfirmKind::Mute: {
       const alert_core::AlertRecord* rec = findRecord(detailId_);
-      if (rec != nullptr) {
-        doMute(*rec);
-      } else {
-        showBanner(tr(Str::ActionFailed), 3000);
-      }
+      if (rec != nullptr) doMute(*rec);
+      else showBanner(tr(Str::ActionFailed), 3000);
       break;
     }
-    case ConfirmKind::Clear:
-      doClear(detailId_);
-      break;
-    case ConfirmKind::ClearMutes:
-      doClearMutes();
-      break;
-    default:
-      break;
+    case ConfirmKind::Clear: doClear(detailId_); break;
+    case ConfirmKind::ClearMutes: doClearMutes(); break;
+    case ConfirmKind::NetworkRecovery: doOpenRecovery(); break;
+    case ConfirmKind::WifiReset: doWifiReset(); break;
+    case ConfirmKind::FactoryReset: doFactoryReset(); break;
+    default: break;
   }
   clearConfirm();
 }
@@ -792,7 +1000,9 @@ void PanelApp::executeArmedConfirm() {
 void PanelApp::armConfirm(ConfirmKind kind) {
   confirm_ = kind;
   confirmDeadlineMs_ = nowMs() + kConfirmWindowMs;
-  if (kind == ConfirmKind::AckAll) {
+  if (requiresPhysicalConfirm(kind)) {
+    showBanner(tr(Str::ConfirmPhysical), kConfirmWindowMs);
+  } else if (kind == ConfirmKind::AckAll) {
     showBanner(tr(Str::ConfirmAckAll), kConfirmWindowMs);
   } else {
     showBanner(tr(Str::ConfirmHint), kConfirmWindowMs);
@@ -802,7 +1012,8 @@ void PanelApp::armConfirm(ConfirmKind kind) {
 void PanelApp::clearConfirm() {
   if (confirm_ == ConfirmKind::None) return;
   confirm_ = ConfirmKind::None;
-  if (banner_ == tr(Str::ConfirmHint) || banner_ == tr(Str::ConfirmAckAll)) {
+  if (banner_ == tr(Str::ConfirmHint) || banner_ == tr(Str::ConfirmAckAll) ||
+      banner_ == tr(Str::ConfirmPhysical)) {
     banner_.clear();
   }
   markDirty();
@@ -831,7 +1042,7 @@ void PanelApp::showBannerFmt(uint32_t ms, const char* fmt, ...) {
 // ── 电源模式 ────────────────────────────────────────────────────────────────
 
 bool PanelApp::computeMains() {
-  switch (prefs_.powerMode()) {
+  switch (settings_.power_mode) {
     case PowerMode::Mains:
       return true;
     case PowerMode::Battery:
@@ -864,6 +1075,10 @@ void PanelApp::onModeChange(bool mains) {
 }
 
 void PanelApp::batteryFsm(int64_t now) {
+  if (admin::ProvisionPortal::instance().apActive()) {
+    if (battPhase_ == BattPhase::Serving) awakeDeadlineMs_ = now + 60000;
+    return;
+  }
   switch (battPhase_) {
     case BattPhase::Mains:
       return;
@@ -884,25 +1099,24 @@ void PanelApp::batteryFsm(int64_t now) {
       if (!dashboard_idle && now <= pollDeadlineMs_) return;
       if (!dashboard_idle) {
         ESP_LOGW(TAG, "battery poll: dashboard still busy, serving cached data");
-      } else {
-        // Dashboard 已静默；保留原有 net_task 静默检查与超时重试合同。
-        if (!NetStack::instance().waitIdle(30000)) {
-          ESP_LOGW(TAG, "battery poll: waitIdle timeout, retrying once");
-          if (!NetStack::instance().waitIdle(10000)) {
-            ESP_LOGW(TAG, "battery poll: net still not idle, serving with current data");
-          }
+      }
+      if (!NetStack::instance().waitIdle(30000)) {
+        ESP_LOGW(TAG, "battery poll: waitIdle timeout, retrying once");
+        if (!NetStack::instance().waitIdle(10000)) {
+          ESP_LOGW(TAG, "battery poll: net still not idle, serving with current data");
         }
       }
       battPhase_ = BattPhase::Serving;
-      awakeDeadlineMs_ = now + kAwakeWindowMs;
+      awakeDeadlineMs_ = now + static_cast<int64_t>(settings_.idle_sleep_s) * 1000;
       markDirty(true);
       return;
     }
     case BattPhase::Serving: {
-      // 交互窗口：近期输入延长 90s，但累计交互不超过周期起点后 10 分钟
+      if (settings_.idle_sleep_s == 0) return;
+      const int64_t idleMs = static_cast<int64_t>(settings_.idle_sleep_s) * 1000;
       const int64_t hardCapMs = cycleStartMs_ + 600000;
       if (now - lastInputMs_ < 15000 && now < hardCapMs) {
-        awakeDeadlineMs_ = now + kAwakeWindowMs;
+        awakeDeadlineMs_ = now + idleMs;
         if (awakeDeadlineMs_ > hardCapMs) awakeDeadlineMs_ = hardCapMs;
       }
       if (now > awakeDeadlineMs_) enterSleep(now);
@@ -911,16 +1125,20 @@ void PanelApp::batteryFsm(int64_t now) {
   }
 }
 
-void PanelApp::enterSleep(int64_t now) {
-  ESP_LOGI(TAG, "battery: entering deep sleep");
-  // 实际睡眠时长 = 轮询周期剩余（不是完整周期），先算好供休眠画面与唤醒定时共用
-  int64_t sleepMs = cycleStartMs_ + static_cast<int64_t>(prefs_.batteryPollS()) * 1000 - now;
-  if (sleepMs < 10000) sleepMs = 10000;  // 防高频醒睡循环
+void PanelApp::enterSleep(int64_t now, int64_t durationMs) {
+  ESP_LOGI(TAG, "entering deep sleep");
+  int64_t sleepMs = durationMs;
+  if (sleepMs < 0) {
+    sleepMs = cycleStartMs_ + static_cast<int64_t>(settings_.battery_poll_s) * 1000 - now;
+  }
+  if (sleepMs < 10000) sleepMs = 10000;
 
   if (!dashboard_.networkIdle()) {
     ESP_LOGW(TAG, "battery: dashboard work pending, sleep deferred");
-    battPhase_ = BattPhase::Serving;
+    battPhase_ = mains_ ? BattPhase::Mains : BattPhase::Serving;
     awakeDeadlineMs_ = now + 30000;
+    lastScheduleCheckMs_ = now + 30000;
+    applySettings(eego::settings::kChangedFrontlight);
     markDirty();
     return;
   }
@@ -929,15 +1147,17 @@ void PanelApp::enterSleep(int64_t now) {
   //    30s 后重试——绝不带在途 HTTP 传输断电 WiFi）
   if (!NetStack::instance().waitIdle(10000) &&
       !NetStack::instance().waitIdle(5000)) {
-    ESP_LOGW(TAG, "battery: net not idle after retries, sleep aborted this round");
-    battPhase_ = BattPhase::Serving;
+    ESP_LOGW(TAG, "net not idle after retries, sleep aborted this round");
+    battPhase_ = mains_ ? BattPhase::Mains : BattPhase::Serving;
     awakeDeadlineMs_ = now + 30000;
+    lastScheduleCheckMs_ = now + 30000;
+    applySettings(eego::settings::kChangedFrontlight);
     markDirty();
     return;
   }
+  eego::FrontlightManager::instance().off();
   NetStack::instance().wifi().powerOff();
 
-  // 2. 休眠画面（Full 刷新；e-ink 断电保持图像；唤醒时刻 = now + 实际睡眠时长）
   if (deps_.boot.displayReady && deps_.canvas != nullptr) {
     eego::PortraitCanvas& c = *deps_.canvas;
     c.clear();
@@ -947,21 +1167,18 @@ void PanelApp::enterSleep(int64_t now) {
     char wake[48];
     const uint64_t wakeTs = nowUnix() + static_cast<uint64_t>(sleepMs / 1000);
     struct tm tm_buf;
-    time_t t = static_cast<time_t>(wakeTs);
-    gmtime_r(&t, &tm_buf);
+    localTm(settings_, wakeTs, tm_buf);
     snprintf(wake, sizeof(wake), "%02d-%02d %02d:%02d", tm_buf.tm_mon + 1, tm_buf.tm_mday,
              tm_buf.tm_hour, tm_buf.tm_min);
     eego::FontManager::instance().drawTextGray(c, 76, 396, wake, 1, 6);
+    eego::FontManager::instance().drawTextGray(c, 76, 420, tr(Str::DeepSleepOffline), 1, 6);
     c.display(eego::RefreshMode::Full);
     c.waitRefreshComplete();
     if (deps_.display != nullptr) deps_.display->deepSleep();
   }
 
-  // 3. GPIO4 锁存保持（深睡不断电；boot 已 hold，这里再确认）
   gpio_hold_en(static_cast<gpio_num_t>(eego::POWER_LATCH));
   gpio_deep_sleep_hold_en();
-
-  // 4. 唤醒源：定时（实际睡眠时长）+ 电源键 EXT0（GPIO8 active-high）
   esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(sleepMs) * 1000ULL);
   esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(eego::BUTTON_POWER), 1);
 
@@ -1041,8 +1258,7 @@ void PanelApp::formatTs(uint64_t ts, char* out, size_t cap) const {
     return;
   }
   struct tm tm_buf;
-  time_t t = static_cast<time_t>(ts);
-  gmtime_r(&t, &tm_buf);
+  localTm(settings_, ts, tm_buf);
   snprintf(out, cap, "%02d-%02d %02d:%02d", tm_buf.tm_mon + 1, tm_buf.tm_mday, tm_buf.tm_hour,
            tm_buf.tm_min);
 }
@@ -1216,19 +1432,18 @@ void PanelApp::render(int64_t now) {
 
   c.display(forceFull_ ? eego::RefreshMode::Full : eego::RefreshMode::Fast);
   c.waitRefreshComplete();
+  if (forceFull_) lastFullRenderMs_ = now;
   forceFull_ = false;
   dirty_ = false;
   lastRenderMs_ = now;
 }
 
 void PanelApp::buildStatusBar(StatusBarModel& m) {
-  // 统一时间源（M21）：可信显示 MM-DD HH:MM；不可信保持 "--:--"（与未知时间
-  // 的既有约定一致；明确的「时间不可用」在 S3 状态页行内显示）
+  // UTC 时间源不变；状态栏按 DeviceSettings 的显示时区偏移。
   if (TimeSource::valid()) {
     const uint64_t now = TimeSource::now();
     struct tm tm_buf;
-    time_t t = static_cast<time_t>(now);
-    gmtime_r(&t, &tm_buf);
+    localTm(settings_, now, tm_buf);
     snprintf(m.timeText, sizeof(m.timeText), "%02d-%02d %02d:%02d", tm_buf.tm_mon + 1,
              tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min);
   }
@@ -1378,8 +1593,8 @@ void PanelApp::buildS3(S3Model& m) {
   char buf[96];
   // 模式/电源
   const char* pmode = tr(Str::ModeAuto);
-  if (prefs_.powerMode() == PowerMode::Mains) pmode = tr(Str::ModeMains);
-  if (prefs_.powerMode() == PowerMode::Battery) pmode = tr(Str::ModeBattery);
+  if (settings_.power_mode == PowerMode::Mains) pmode = tr(Str::ModeMains);
+  if (settings_.power_mode == PowerMode::Battery) pmode = tr(Str::ModeBattery);
   snprintf(buf, sizeof(buf), "%s -> %s%s", pmode, mains_ ? tr(Str::ModeMains) : tr(Str::ModeBattery),
            (charging_ || batCache_.charging) ? tr(Str::Charging) : "");
   add(tr(Str::SetPowerMode), buf);
@@ -1475,40 +1690,107 @@ void PanelApp::buildS3(S3Model& m) {
 }
 
 void PanelApp::buildS4(S4Model& m) {
-  m.selected = focus_;
   auto add = [&m](Str label, const std::string& value, bool isAction) {
-    S4RowModel r;
-    r.label = tr(label);
-    r.value = value;
-    r.isAction = isAction;
-    m.rows.push_back(std::move(r));
+    S4RowModel row;
+    row.label = tr(label);
+    row.value = value;
+    row.isAction = isAction;
+    m.rows.push_back(std::move(row));
   };
-  add(Str::SetLanguage, prefs_.lang() == Lang::Zh ? tr(Str::LangZh) : tr(Str::LangEn), false);
-  const char* pmode = tr(Str::ModeAuto);
-  if (prefs_.powerMode() == PowerMode::Mains) pmode = tr(Str::ModeMains);
-  if (prefs_.powerMode() == PowerMode::Battery) pmode = tr(Str::ModeBattery);
-  add(Str::SetPowerMode, pmode, false);
-  char buf[48];
-  snprintf(buf, sizeof(buf), tr(Str::PollEveryFmt),
-           static_cast<unsigned>(prefs_.batteryPollS()));
-  add(Str::SetBatteryPoll, buf, false);
-  if (eego::FrontlightManager::instance().present()) {
-    add(Str::SetFrontlight, frontlightOn_ ? tr(Str::On) : tr(Str::Off), false);
+  char buf[96];
+  const eego::net::NetStatusSnapshot& status = netStatus();
+  add(Str::SetNetwork, status.wifi.ip.empty() ? tr(Str::WifiDisconnected) : status.wifi.ip, false);
+  if (admin::ProvisionPortal::instance().apActive()) {
+    snprintf(buf, sizeof(buf), "%us",
+             static_cast<unsigned>(admin::ProvisionPortal::instance().windowRemainingMs() / 1000));
+    add(Str::SetRecoveryAp, buf, true);
   } else {
-    add(Str::SetFrontlight, tr(Str::FrontlightMissing), false);
+    add(Str::SetRecoveryAp, tr(Str::Off), true);
   }
-  snprintf(buf, sizeof(buf), tr(Str::MutesFmt),
-           static_cast<unsigned>(muteRuleCount_));  // store 规则数（M21）
-  add(Str::SetMutes, buf, true);
+  add(Str::SetWifiReset, "", true);
+  add(Str::SetBluetooth, tr(Str::Unavailable), false);
+  add(Str::SetLanguage, settings_.language == "zh" ? tr(Str::LangZh) : tr(Str::LangEn), false);
+  const int offset = settings_.timezone_offset_min;
+  snprintf(buf, sizeof(buf), "UTC%c%02d:%02d", offset < 0 ? '-' : '+', abs(offset) / 60,
+           abs(offset) % 60);
+  add(Str::SetTimezone, buf, false);
+  const bool frontlight = eego::FrontlightManager::instance().present();
+  add(Str::SetFrontlight,
+      !frontlight ? tr(Str::FrontlightMissing)
+                  : (settings_.frontlight_enabled ? tr(Str::On) : tr(Str::Off)),
+      false);
+  snprintf(buf, sizeof(buf), "%u%%", static_cast<unsigned>(settings_.frontlight_brightness));
+  add(Str::SetBrightness, frontlight ? buf : tr(Str::FrontlightMissing), false);
+  snprintf(buf, sizeof(buf), "%u%%", static_cast<unsigned>(settings_.frontlight_warmth));
+  add(Str::SetWarmth, frontlight ? buf : tr(Str::FrontlightMissing), false);
+  if (settings_.data_refresh_s == 0) {
+    add(Str::SetDataRefresh, tr(Str::SourceSchedules), false);
+  } else {
+    snprintf(buf, sizeof(buf), tr(Str::PollEveryFmt),
+             static_cast<unsigned>(settings_.data_refresh_s));
+    add(Str::SetDataRefresh, buf, false);
+  }
   add(Str::SetPollNow, "", true);
-  std::string url = tr(Str::WifiDisconnected);
-  const eego::net::NetStatusSnapshot& ns = netStatus();
-  if (!ns.wifi.ip.empty()) {
-    url = "http://" + ns.wifi.ip + "/";
+  if (settings_.epd_full_refresh_s == 0) {
+    add(Str::SetEpdFull, tr(Str::ManualOnly), false);
+  } else {
+    snprintf(buf, sizeof(buf), tr(Str::PollEveryFmt),
+             static_cast<unsigned>(settings_.epd_full_refresh_s));
+    add(Str::SetEpdFull, buf, false);
   }
-  add(Str::SetAdmin, url, false);
-  const esp_app_desc_t* d = esp_app_get_description();
-  add(Str::Version, std::string(d->version), false);
+  add(Str::SetEpdNow, "", true);
+  const char* power = tr(Str::ModeAuto);
+  if (settings_.power_mode == PowerMode::Mains) power = tr(Str::ModeMains);
+  if (settings_.power_mode == PowerMode::Battery) power = tr(Str::ModeBattery);
+  add(Str::SetPowerMode, power, false);
+  snprintf(buf, sizeof(buf), tr(Str::PollEveryFmt), static_cast<unsigned>(settings_.battery_poll_s));
+  add(Str::SetBatteryPoll, buf, false);
+  if (settings_.idle_sleep_s == 0) {
+    add(Str::SetIdleSleep, tr(Str::Off), false);
+  } else {
+    snprintf(buf, sizeof(buf), tr(Str::PollEveryFmt), static_cast<unsigned>(settings_.idle_sleep_s));
+    add(Str::SetIdleSleep, buf, false);
+  }
+  if (settings_.sleep_start_min < 0) {
+    add(Str::SetSleepPlan, tr(Str::NotScheduled), false);
+  } else {
+    snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d", settings_.sleep_start_min / 60,
+             settings_.sleep_start_min % 60, settings_.sleep_end_min / 60,
+             settings_.sleep_end_min % 60);
+    add(Str::SetSleepPlan, buf, false);
+  }
+  const uint64_t wake = nextWakeAt(nowMs());
+  if (wake == 0) {
+    add(Str::SetNextWake, tr(Str::NotScheduled), false);
+  } else {
+    formatTs(wake, buf, sizeof(buf));
+    add(Str::SetNextWake, buf, false);
+  }
+  Str wake_reason = Str::WakeOther;
+  if (wakeCause_ == ESP_SLEEP_WAKEUP_TIMER) wake_reason = Str::WakeTimer;
+  else if (wakeCause_ == ESP_SLEEP_WAKEUP_EXT0) wake_reason = Str::WakeButton;
+  else if (wakeCause_ == ESP_SLEEP_WAKEUP_UNDEFINED) wake_reason = Str::WakeReset;
+  add(Str::SetLastWake, tr(wake_reason), false);
+  add(Str::SetStorage, eego::SdCard::instance().ready() ? tr(Str::SdReady) : tr(Str::SdMissing),
+      false);
+  add(Str::SetDiagnostics, settings_.diagnostics_enabled ? tr(Str::On) : tr(Str::Off), false);
+  add(Str::SetRunDiagnostics, settings_.diagnostics_enabled ? "" : tr(Str::Unavailable), true);
+  add(Str::SetSecurity, admin::AuthManager::instance().hasPassword() ? tr(Str::SecuritySet)
+                                                                     : tr(Str::SecurityMissing),
+      false);
+  snprintf(buf, sizeof(buf), tr(Str::MutesFmt), static_cast<unsigned>(muteRuleCount_));
+  add(Str::SetMutes, buf, true);
+  add(Str::SetFactoryReset, "", true);
+  add(Str::Version, esp_app_get_description()->version, false);
+
+  m.pageCount = (m.rows.size() + kSettingsPageRows - 1) / kSettingsPageRows;
+  m.page = focus_ / kSettingsPageRows;
+  m.selected = focus_ % kSettingsPageRows;
+  const size_t begin = m.page * kSettingsPageRows;
+  const size_t end = std::min(begin + kSettingsPageRows, m.rows.size());
+  std::vector<S4RowModel> visible;
+  for (size_t i = begin; i < end; i++) visible.push_back(std::move(m.rows[i]));
+  m.rows = std::move(visible);
 }
 
 }  // namespace panel

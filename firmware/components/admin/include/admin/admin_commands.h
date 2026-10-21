@@ -25,7 +25,9 @@ namespace eego::admin {
 enum class AdminCommandType : uint8_t {
   ApplyConfig = 0,  // 校验后的合并 DOM：原子持久化 + 热生效（sources/overrides/admin 域）
   ApplyWifi,        // WiFi 账号变更（NVS 权威 + config wifi_list 同步 + 重连）
-  FactoryReset,     // 清 NVS sec/wifi + 删 SD 配置目录 → 重启
+  ApplySettings,    // typed patch → app_task 对最新快照合并 + NVS commit
+  WifiReset,        // 仅清 WiFi 凭据并打开限时恢复 AP（保留管理密码和偏好）
+  FactoryReset,     // 清 sec/wifi/ui/ble/device + 指定 SD 配置 → 重启
   Reboot,           // delay_ms 后 esp_restart
   ApplyDashboard,   // 完整 dashboard bundle：校验 + revision 检查 + 原子持久化
   DeleteDashboard,  // 删除 dashboard；同样支持 revision 冲突检查
@@ -36,13 +38,19 @@ struct AdminCommand {
 
   // ApplyConfig：校验合并后的完整 DOM。
   alert_core::JsonValue config;
+  // ApplyConfig：原始 admin.display patch（仅显示节；用于精确能力校验与迁移）。
+  alert_core::JsonValue display_patch;
+
+  // ApplySettings：httpd 已预校验的 partial typed patch；执行时基于最新快照重验。
+  alert_core::JsonValue settings_patch;
 
   // ApplyConfig：变更的顶层 section 位掩码（httpd 按 PUT body 出现情况设置），
   // 供处理器避免不必要的全量热生效。
   static constexpr uint32_t kChangedAdmin = 1u << 0;
   static constexpr uint32_t kChangedSources = 1u << 1;
   static constexpr uint32_t kChangedOverrides = 1u << 2;
-  static constexpr uint32_t kChangedMuteRules = 1u << 3;  // M21：静音规则热生效
+  static constexpr uint32_t kChangedMuteRules = 1u << 3;
+  static constexpr uint32_t kChangedAdminDisplay = 1u << 4;
   uint32_t changed_sections = 0;
 
   // ApplyDashboard：不可变候选配置，默认处理器在 app_task 一次性提交。

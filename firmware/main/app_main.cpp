@@ -37,6 +37,8 @@
 #include "alert_core/store.h"
 #include "alert_core/type_registry.h"
 #include "diag/diag.h"
+#include "device_prefs.h"
+#include "device_settings/device_settings.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
@@ -205,6 +207,23 @@ extern "C" void app_main(void) {
     eego::admin::AdminLog::instance().init();
   }
 
+  const alert_core::JsonValue* adminSection = dom.find("admin");
+  const alert_core::JsonValue* legacyDisplay =
+      adminSection != nullptr ? adminSection->find("display") : nullptr;
+  auto& deviceSettings = eego::settings::DeviceSettings::instance();
+  const esp_err_t settingsErr = deviceSettings.init(legacyDisplay);
+  if (settingsErr != ESP_OK) {
+    ESP_LOGE(TAG, "device settings init failed: %s", esp_err_to_name(settingsErr));
+  }
+  eego::settings::Capabilities capabilities;
+  capabilities.frontlight = eego::FrontlightManager::instance().present();
+  capabilities.battery = eego::PowerManager::instance().readBattery().millivolts > 0;
+  capabilities.bluetooth = false;
+  capabilities.display = bootStatus.displayReady;
+  capabilities.sd = bootStatus.sdReady;
+  capabilities.rtc = bootStatus.rtcReady;
+  deviceSettings.setCapabilities(capabilities);
+
   // 4. 字体
   tryLoadUiFont();
 
@@ -242,7 +261,7 @@ extern "C" void app_main(void) {
   {
     std::vector<alert_core::MuteRule> mute_rules = config.muteRules();
     panel::DevicePrefs& legacy_prefs = panel::DevicePrefs::instance();
-    legacy_prefs.load();  // 幂等重读（app.begin 会再读一次，无害）
+    legacy_prefs.load();  // 只读旧 mute 键；其他 ui 偏好已由 DeviceSettings 迁移
     size_t migrated = 0;
     for (const std::string& fp : legacy_prefs.mutes()) {
       bool dup = false;
@@ -367,8 +386,8 @@ extern "C" void app_main(void) {
       app.handleButton(bevt);
     }
 
-    // 串口诊断命令（读行在 diag 任务，执行在本上下文）
-    diag::service();
+    // 诊断开关热生效；禁用时不分发串口命令。
+    if (deviceSettings.snapshot().values.diagnostics_enabled) diag::service();
 
     // admin 命令队列（httpd → app_task；0ms = 非阻塞轮询）
     admin::serviceCommands(0);

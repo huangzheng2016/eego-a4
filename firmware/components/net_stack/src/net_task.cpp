@@ -14,6 +14,7 @@
 #include "mbedtls/platform.h"
 
 #include "net_stack/http_poll_adapter.h"
+#include "net_stack/refresh_schedule.h"
 #include "store_digest.h"
 
 namespace eego::net {
@@ -59,6 +60,10 @@ struct NetStack::Impl {
     bool flag = false;  // SetEnabled: 目标状态；PollNow/ReconnectNow 忽略
     PendingOp op;
   };
+  struct RefreshPayload {
+    uint32_t interval_ms = 0;
+    PendingOp op;
+  };
   struct HttpPayload {
     NetRequest req;
     NetResponse resp;  // net_task 写入；take 成功后调用方 move 出（防超时 UAF）
@@ -99,6 +104,7 @@ struct NetStack::Impl {
   QueueHandle_t queue = nullptr;
   TaskHandle_t task = nullptr;
   std::vector<std::unique_ptr<SourceRuntime>> sources_;
+  uint32_t data_refresh_interval_ms_ = 0;
 
   // WiFi 重连状态（net_task 上下文私有）
   int64_t next_wifi_retry_ms_ = 0;
@@ -178,7 +184,8 @@ struct NetStack::Impl {
             rt->health.id = p->cfg.id;
             rt->health.kind = p->cfg.kind;
             rt->health.enabled = p->cfg.enabled;
-            rt->health.interval_ms = p->cfg.interval_ms;
+            rt->health.interval_ms =
+                effectivePollIntervalMs(data_refresh_interval_ms_, p->cfg.interval_ms);
             rt->next_due_ms = nowMs();  // 新源立即首轮（M11 验收 2：≤interval+5s）
             sources_.push_back(std::move(rt));
             p->op.ok = true;
@@ -222,6 +229,22 @@ struct NetStack::Impl {
         } else {
           SourceRuntime* rt = findSource(p->id);
           if (rt && rt->cfg.enabled) rt->next_due_ms = nowMs();
+        }
+        p->op.ok = true;
+        p->op.give();
+        break;
+      }
+      case CmdType::SetDataRefresh: {
+        auto p = std::static_pointer_cast<RefreshPayload>(cmd->payload);
+        data_refresh_interval_ms_ = p->interval_ms;
+        const int64_t now = nowMs();
+        for (auto& source : sources_) {
+          source->health.interval_ms =
+              effectivePollIntervalMs(data_refresh_interval_ms_, source->cfg.interval_ms);
+          if (source->cfg.enabled) {
+            source->next_due_ms = dueAfterRefreshChange(
+                data_refresh_interval_ms_, source->cfg.interval_ms, now);
+          }
         }
         p->op.ok = true;
         p->op.give();
@@ -435,12 +458,14 @@ struct NetStack::Impl {
       if (ok) {
         s->health.consecutive_failures = 0;
         s->health.backoff_level = 0;
-        s->next_due_ms = now + s->cfg.interval_ms;
+        s->next_due_ms =
+            now + effectivePollIntervalMs(data_refresh_interval_ms_, s->cfg.interval_ms);
       } else {
         s->health.consecutive_failures++;
         s->health.backoff_level = std::min(s->health.backoff_level + 1, (uint32_t)6);
-        uint32_t backoff = std::min(s->cfg.interval_ms << s->health.backoff_level,
-                                    self->cfg_.source_backoff_max_ms);
+        const uint32_t backoff = pollBackoffMs(data_refresh_interval_ms_, s->cfg.interval_ms,
+                                               s->health.backoff_level,
+                                               self->cfg_.source_backoff_max_ms);
         s->next_due_ms = now + backoff;
         ESP_LOGW(TAG, "source %s poll failed (#%u, next in %ums): %s", s->cfg.id.c_str(),
                  (unsigned)s->health.consecutive_failures, (unsigned)backoff,
@@ -543,6 +568,7 @@ esp_err_t NetStack::start(const NetStackConfig& cfg, alert_core::AlertStore* sto
   if (!impl_) impl_ = std::make_unique<Impl>();
   impl_->self = this;
   impl_->sources_.clear();
+  impl_->data_refresh_interval_ms_ = 0;
   impl_->next_wifi_retry_ms_ = 0;
   impl_->wifi_backoff_ms_ = kWifiBackoffStartMs;
   impl_->last_wifi_state_ = WifiState::Disconnected;
@@ -632,6 +658,16 @@ bool NetStack::pollNow(const std::string& id, uint32_t wait_ms) {
   if (!sendCmdAndWait(CmdType::PollNow, p, wait_ms) ||
       xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
     return false;
+  return p->op.ok;
+}
+
+bool NetStack::setDataRefreshInterval(uint32_t interval_ms, uint32_t wait_ms) {
+  auto p = std::make_shared<Impl::RefreshPayload>();
+  p->interval_ms = interval_ms;
+  if (!sendCmdAndWait(CmdType::SetDataRefresh, p, wait_ms) ||
+      xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE) {
+    return false;
+  }
   return p->op.ok;
 }
 

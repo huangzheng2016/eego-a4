@@ -475,6 +475,11 @@ void drawS3(PortraitCanvas& c, const S3Model& m) {
 
 void drawS4(PortraitCanvas& c, const S4Model& m) {
   drawPageTitle(c, Str::PageSettings);
+  char page[32];
+  snprintf(page, sizeof(page), tr(Str::SettingsPageFmt), static_cast<unsigned>(m.page + 1),
+           static_cast<unsigned>(m.pageCount));
+  textRightGray(c, geom::kContentX + geom::kContentW - 160, geom::kContentTop + 34, 152,
+                page, 1, 6);
   const int16_t x = geom::kContentX;
   const int16_t w = geom::kContentW;
   int16_t y = static_cast<int16_t>(geom::kContentTop + 64);

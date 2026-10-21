@@ -10,7 +10,7 @@
 //     这里落地）；
 //   * 快照发布方（注入 SnapshotPublisher 后，任何 store 变更——摄入/动作/过期/
 //     加载/静音规则——都由本任务 buildSnapshot + publish；UI/API 无锁 acquire 读）；
-//   * 轮询调度器（每源 interval，vTaskDelay 级节拍，指数退避）；
+//   * 轮询调度器（每源 interval 或 DeviceSettings 全局覆盖，指数退避）；
 //   * WiFi 重连状态机（指数退避 30s→60s→120s…封顶 5min，M13 F3）；
 //   * 时间同步驱动（M21：WiFi 连上触发 SNTP，同步结果由本任务回写 RTC）。
 //
@@ -110,6 +110,8 @@ class NetStack {
   bool setSourceEnabled(const std::string& id, bool enabled, uint32_t wait_ms = 5000);
   // 立即轮询（"" = 全部源）。常供电即时刷新与电池唤醒批量拉取同一入口。
   bool pollNow(const std::string& id = "", uint32_t wait_ms = 5000);
+  // 全局调度覆盖：非零值替换所有源的周期；0 恢复各自 cfg.interval_ms。
+  bool setDataRefreshInterval(uint32_t interval_ms, uint32_t wait_ms = 5000);
   // 电池唤醒：立即重置 WiFi 退避并发起连接（不等待结果）
   bool reconnectNow(uint32_t wait_ms = 1000);
 
@@ -193,6 +195,7 @@ class NetStack {
     RemoveSource,
     SetEnabled,
     PollNow,
+    SetDataRefresh,
     ReconnectNow,
     HttpSubmit,
     Ingest,

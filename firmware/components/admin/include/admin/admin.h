@@ -54,10 +54,10 @@ void setAlertSnapshotSource(AlertSnapshotSource src);
 void setAlertActionSink(AlertActionSink sink);
 void setAdminEventCallback(AdminEventCallback cb, void* ctx);
 
-// 默认命令处理器：ApplyConfig（原子持久化 + sources/overrides/admin 域热生效）、
+// 默认命令处理器：ApplyConfig/ApplySettings（校验、事务回滚、订阅热生效）、
 // ApplyDashboard/DeleteDashboard（完整 bundle 校验、revision 检查与原子持久化）、
-// ApplyWifi（NVS + config wifi_list + 重连）、FactoryReset（清 NVS + 删 SD
-// 配置目录 + 重启）、Reboot。在 app_task 上下文执行。
+// ApplyWifi、WifiReset（仅清 WiFi + 限时恢复 AP）、FactoryReset（清
+// sec/wifi/ui/ble/device/dashboard + 指定 SD 配置，保留字体）、Reboot。仅在 app_task 执行。
 void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx);
 
 // 组件内部共用：事件发射（portal/httpd → app_task 回调）。

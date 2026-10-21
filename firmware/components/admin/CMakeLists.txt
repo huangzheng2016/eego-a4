@@ -22,6 +22,7 @@ idf_component_register(
         "src/admin_auth.cpp"
         "src/admin_config.cpp"
         "src/admin_commands.cpp"
+        "src/config_transaction.cpp"
         "src/admin_httpd.cpp"
         "src/admin_page.cpp"
         "src/dashboard_api.cpp"
@@ -34,6 +35,7 @@ idf_component_register(
         alert_core
         dashboard_core
         data_pipeline
+        device_settings
         net_stack
         eego_hal
         esp_http_server
