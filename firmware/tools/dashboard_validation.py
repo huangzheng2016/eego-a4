@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from expression_validation import validate_expression_syntax
+
 DASHBOARD_SCHEMA = "eego.dashboard/2"
 BUNDLE_SCHEMA = "eego.dashboard-bundle/1"
 PRESET_SCHEMA = "eego.dashboard-preset/1"
@@ -398,23 +400,46 @@ def _valid_path(path, required=False):
 def _validate_expression(expression, path, errors):
     if not expression:
         return
-    if len(expression) > 512 or expression.count("(") != expression.count(")"):
-        errors.append(f"{path}: invalid expression length or unbalanced parentheses")
-        return
-    functions = re.findall(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(", expression)
-    allowed = {"abs", "min", "max", "clamp", "floor", "ceil", "round", "sqrt", "pow",
-               "isfinite", "isnull", "coalesce", "convert"}
-    for function in functions:
-        if function not in allowed:
-            errors.append(f"{path}: unsupported expression function {function}")
-    if ";" in expression or re.search(r"(?<![=!<>])=(?!=)", expression):
-        errors.append(f"{path}: unsupported expression syntax")
+    valid, message = validate_expression_syntax(expression)
+    if not valid:
+        errors.append(f"{path}: {message}")
+
+
+def _validate_headers(headers, path, errors):
+    seen = set()
+    for key, value in headers.items():
+        field = f"{path}.{key}"
+        if re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}", key) is None:
+            errors.append(f"{field}: invalid HTTP header name")
+        lowered = key.lower()
+        if lowered in ("authorization", "host", "content-length"):
+            errors.append(f"{field}: header is managed by the runtime and cannot be configured")
+        if lowered in seen:
+            errors.append(f"{field}: duplicate HTTP header")
+        seen.add(lowered)
+        if any((ord(char) < 32 and char != "\t") or ord(char) == 127 for char in value):
+            errors.append(f"{field}: HTTP header value contains a forbidden control character")
+        if len(value) > 512:
+            errors.append(f"{field}: exceeds 512 code points")
+
+
+def _valid_variant(kind, variant):
+    if variant == "default":
+        return True
+    allowed = {
+        "text": {"single", "multiline", "key_value", "description", "log_tail", "markdown"},
+        "card": {"delta", "progress", "status", "dual", "triple"},
+        "table": {"status_grid", "heatmap", "timeline"},
+    }
+    return variant in allowed.get(kind, set())
 
 
 def _validate_plan(plan, path, errors):
-    errors.extend(PLAN_VALIDATOR.validate(plan, path=path, errors=[]))
-    if not isinstance(plan, dict):
+    schema_errors = PLAN_VALIDATOR.validate(plan, path=path, errors=[])
+    errors.extend(schema_errors)
+    if schema_errors or not isinstance(plan, dict):
         return
+    _validate_headers(plan.get("headers", {}), path + ".headers", errors)
     response = plan.get("response", "standard_json")
     if response in ("standard", "metrics", "events"):
         response = {"standard": "standard_json", "metrics": "metrics_json", "events": "events_json"}[response]
@@ -431,8 +456,16 @@ def _validate_plan(plan, path, errors):
             default = "$" if key == "items_path" else "$.value" if key == "value_path" else ""
             if not _valid_path(mapping.get(key, default), key in ("items_path", "value_path")):
                 errors.append(f"{item_path}.{key}: invalid JSONPath")
+        for key, maximum in (("name", 128), ("unit", 32), ("target_unit", 32)):
+            if len(mapping.get(key, "")) > maximum:
+                errors.append(f"{item_path}.{key}: exceeds {maximum} code points")
         _validate_expression(mapping.get("expression", ""), item_path + ".expression", errors)
+        label_names = set()
         for label_index, label in enumerate(mapping.get("labels", [])):
+            name = label.get("name", "")
+            if not name or len(name) > 64 or name in label_names:
+                errors.append(f"{item_path}.labels[{label_index}]: invalid or duplicate label mapping")
+            label_names.add(name)
             if bool(label.get("path")) == bool(label.get("value")):
                 errors.append(f"{item_path}.labels[{label_index}]: exactly one of path/value is required")
             if not _valid_path(label.get("path", "")):
@@ -509,6 +542,8 @@ def validate_bundle(bundle, schema, raw_bytes=None, strict_layout=True):
     rule_ids = [item["id"] for item in rules]
     event_ids = [item["id"] for item in events]
     panel_items = [(page, panel) for page in pages for panel in page.get("panels", [])]
+    if len(panel_items) > 72:
+        errors.append(f"$.dashboard.pages: total panel count {len(panel_items)} exceeds maximum item count 72")
     panel_ids = [panel["id"] for _, panel in panel_items]
     for label, values in (("source", source_ids), ("page", page_ids), ("variable", variable_names),
                           ("asset", asset_ids), ("alert rule", rule_ids), ("event", event_ids),
@@ -545,6 +580,7 @@ def validate_bundle(bundle, schema, raw_bytes=None, strict_layout=True):
     for index, source in enumerate(sources):
         path = f"$.dashboard.sources[{index}]"
         _validate_placeholders(source.get("url", ""), variable_set, path + ".url", errors)
+        _validate_headers(source.get("headers", {}), path + ".headers", errors)
         for key, value in source.get("headers", {}).items():
             _validate_placeholders(value, variable_set, f"{path}.headers.{key}", errors)
         if source.get("auth_token_ref") and not source["auth_token_ref"].startswith("nvs:"):
@@ -583,12 +619,28 @@ def validate_bundle(bundle, schema, raw_bytes=None, strict_layout=True):
                 keys = [column["key"] for column in panel.get("columns", [])]
                 for duplicate in _duplicates(keys):
                     errors.append(f"{path}.columns: duplicate key {duplicate}")
+            grid = panel["grid"]
+            if grid["w"] <= 0 or grid["h"] <= 0:
+                errors.append(f"{path}.grid: panel size must be nonzero")
+            if grid["x"] + grid["w"] > page["grid_columns"]:
+                errors.append(f"{path}.grid: panel exceeds page grid columns")
+            if not _valid_variant(panel["kind"], panel.get("style", {}).get("variant", "default")):
+                errors.append(f"{path}.style.variant: unsupported variant for panel kind")
             links = panel.get("linked_panel_ids", [])
+            for link in links:
+                if link not in panel_set:
+                    errors.append(f"{path}.linked_panel_ids: unknown panel ID {link}")
+                if link == panel["id"]:
+                    errors.append(f"{path}.linked_panel_ids: panel cannot link to itself")
+            for duplicate in _duplicates(links):
+                errors.append(f"{path}.linked_panel_ids: duplicate panel link {duplicate}")
             if panel.get("kind") == "card" and panel.get("style", {}).get("variant") in ("dual", "triple"):
                 variant = panel["style"]["variant"]
                 expected = 1 if variant == "dual" else 2
                 same_page = {item["id"]: item for item in page.get("panels", [])}
                 series = {(source_id, metric)}
+                if not source_id or not metric:
+                    errors.append(f"{path}: multi-metric cards require source_id and metric")
                 if len(links) != expected:
                     errors.append(f"{path}.linked_panel_ids: {variant} requires {expected} linked cards")
                 for link in links:
