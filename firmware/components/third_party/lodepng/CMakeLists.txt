@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # lodepng — 单文件 PNG 解码库（zlib 许可，Copyright (c) 2005-2026 Lode Vandevenne）
 #
 # 上游: https://github.com/lvandeve/lodepng （版本 20260119）

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # 分区表 - EEGO A4 16MB Flash (A/B OTA)
 # Name,    Type, SubType,  Offset,   Size,    Flags
 nvs,       data, nvs,      0x9000,   0x5000,

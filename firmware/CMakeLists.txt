@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # EEGO A4 告警/数据面板固件 — ESP-IDF v5.5.1 工程
 #
 # 纯 ESP-IDF（无 Arduino 依赖）。组件依赖方向（自上而下，禁止反向）：

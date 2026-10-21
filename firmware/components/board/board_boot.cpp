@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // board_boot.cpp — EEGO A4 板级启动事实实现
 //
 // 顺序即合同，调整前请先读 board_boot.h 头部与 docs/ARCHITECTURE.md：

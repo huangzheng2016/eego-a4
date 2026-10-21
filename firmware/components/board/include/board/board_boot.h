@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // board_boot.h — EEGO A4 板级启动事实（启动顺序合同）
 //
 // 本组件把 EEGO A4 的实机启动合同固化为一处可审计的实现，顺序继承自

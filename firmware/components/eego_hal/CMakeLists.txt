@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # eego_hal 组件 — EEGO A4 硬件抽象层
 # 显示 UC8279C / 触控 GSLX680 / SD HSPI / 电源电池RTC / 前光 / 按键
 #

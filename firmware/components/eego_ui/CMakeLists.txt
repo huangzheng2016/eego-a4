@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # eego_ui 组件 — 画布 + 字体渲染 + 图片解码（灰阶）
 # (PortraitCanvas / EDCBook .bin / CPFONT v4 .eefont / 字体管理器 /
 #  ImageRenderer / 内置 5x7 回退字体)
