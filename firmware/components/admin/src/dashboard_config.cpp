@@ -64,6 +64,20 @@ bool isTableColumnMappingKey(const std::string& path) {
          columns != std::string::npos && columns > panels;
 }
 
+bool isSourcePlanMappingValue(const std::string& path) {
+  const auto matches = [&](const char* collection, const char* map) {
+    if (path.rfind("source_plans[", 0) != 0) return false;
+    const std::string collection_marker = "]." + std::string(collection) + "[";
+    const std::string suffix = "]." + std::string(map);
+    const size_t collection_pos = path.find(collection_marker);
+    if (collection_pos == std::string::npos || path.size() < suffix.size()) return false;
+    const size_t suffix_pos = path.size() - suffix.size();
+    return path.compare(suffix_pos, suffix.size(), suffix) == 0 &&
+           suffix_pos > collection_pos + collection_marker.size();
+  };
+  return matches("metrics", "fields") || matches("events", "severity_map");
+}
+
 JsonValue maskJson(const JsonValue& value, const std::string& path) {
   if (value.type() == JsonValue::Type::Array) {
     JsonValue::Array out;
@@ -89,7 +103,8 @@ JsonValue maskJson(const JsonValue& value, const std::string& path) {
       }
       out.emplace_back(member.first, JsonValue::makeObject(std::move(headers)));
     } else if (member.second.type() == JsonValue::Type::String && sensitiveKey(member.first) &&
-               !(member.first == "key" && isTableColumnMappingKey(path))) {
+               !(member.first == "key" && isTableColumnMappingKey(path)) &&
+               !isSourcePlanMappingValue(path)) {
       out.emplace_back(member.first, JsonValue::makeString(kMask));
     } else {
       out.emplace_back(member.first, maskJson(member.second, child_path));
