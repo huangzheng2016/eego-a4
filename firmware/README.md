@@ -58,9 +58,9 @@ idf.py -p /dev/cu.usbmodem* flash monitor     # Linux 为 /dev/ttyACM*
    失败显示中文原因，停留门户可重试。
 4. 门户窗口 10 分钟无操作自动关闭（屏幕有提示），之后需本地操作重新进入。
 
-忘记管理密码 = 恢复出厂（屏幕设置页 5 秒内二次确认，或远程
+忘记管理密码 = 全量恢复出厂（屏幕设置页 5 秒内按实体电源键二次确认，或远程
 `POST /api/v1/system/factory-reset` 带密码 + `confirm:"RESET"` 双确认），
-**不留后门**。
+**不留后门**；WiFi-only 重置不清管理密码，不能用于此场景。
 
 ## 局域网管理
 
@@ -77,6 +77,8 @@ idf.py -p /dev/cu.usbmodem* flash monitor     # Linux 为 /dev/ttyACM*
 | `GET /api/v1/status` | 设备/网络/内存/存储/告警计数/安全元数据（不含秘密值） |
 | `GET /api/v1/config` / `PUT` | 配置读取（secrets 掩码）/ 白名单校验 + 原子持久化 |
 | `GET /api/v1/config/schema` | 配置 schema v1 静态描述 |
+| `GET /api/v1/settings` / `PUT` | DeviceSettings 读取 / typed 局部修改、原子持久化并热生效；含 revision、能力与电源状态 |
+| `GET /api/v1/settings/schema` | 本机设置字段、范围和只读元数据 |
 | `GET /api/v1/alerts` / `GET /alerts/{id}` | 告警列表 / 详情 |
 | `POST /api/v1/alerts/{id}/ack` `/clear`、`POST /alerts/ack-all` | 确认 / 清除 |
 | `GET /api/v1/types` / `PUT /api/v1/types/{id}` | 告警类型注册表查询 / 覆盖 |
@@ -253,6 +255,11 @@ credential 流程，bundle 只保存 `auth_token_ref: "nvs:<key>"`；`Authorizat
 - action 仅支持 `goto_page/goto_panel/set_variable/refresh/back/ack_alert`。`confirm=true`
   或 ack 需要在 5 秒窗口内再次确认；目标在最新快照上重新校验。`refresh` 的 `all/current/
   <source>` 只安排**数据轮询**，不等于强制墨水屏全刷。
+- DeviceSettings 的 `data_refresh_s` 是 net_task 告警 `http_poll` sources 的统一周期覆盖：
+  `0` 恢复各 source 自己的 `interval_ms`，非零可取 30–86400 秒并同时约束失败退避。
+  dashboard 的 `source.refresh_ms` 与 panel 覆盖仍按 bundle 独立调度，不被这个告警源
+  全局值隐式改写。`epd_full_refresh_s` 则是独立的墨水屏周期全刷：`0` 表示仅手动，
+  非零可取 3600–604800 秒；它与数据轮询频率无关。
 - panel 数据/文本/图片或状态变化按 fingerprint 标脏，未变化可跳过绘制；结构、翻页和
   布局变化会触发更大的重绘。面板周期可覆盖为配置默认或 1/5/15/30 分钟，运行层实际
   panel 调度最小 1 分钟。电子纸不适合秒级动画，建议普通源 1–5 分钟、天气 5–15 分钟、
@@ -281,16 +288,32 @@ credential 流程，bundle 只保存 `auth_token_ref: "nvs:<key>"`；`Authorizat
 预设均按单屏无重叠校验。多个大 PNG、多数据源长历史和高频全屏变化仍可能造成内存或
 刷新压力，需用 `idf.py size`、串口 dashboard 诊断、内部 RAM 水位和真机刷新耗时验收。
 
+## 本机设置与恢复
+
+DeviceSettings schema v1 统一保存非秘密本机偏好（语言、电源、前光、数据/EPD 刷新、
+休眠、时区、诊断），迁移旧 NVS `ui` 与 `admin.display`。本机设置页和
+`GET/PUT /api/v1/settings` 共用字段校验、原子持久化和订阅式热生效；硬件能力不足的
+前光/蓝牙等项显示不可用，不伪装成功。前光开关、亮度和色温持久化，入睡前在网络空闲
+后显式关闭，唤醒按保存值恢复。
+
+设置页提供限时网络恢复 AP、WiFi-only 重置和全量恢复出厂。三类本地恢复操作的第二次
+确认都必须在 5 秒内按**实体电源键**，触屏不能确认。WiFi-only 只清 WiFi 账号并打开恢复
+AP，不清管理密码；忘记管理密码仍需全量恢复。全量恢复清除 `sec/wifi/ui/ble/dashboard`
+命名空间、DeviceSettings 以及 config/alerts/dashboard 等明确列出的 SD 文件，保留字体和
+未知用户文件；SD 不可用或清除不完整时不会安排“成功”重启。
+
 ## 供电模式
 
-设置页/串口 `status` 可见当前模式；`PowerMode` 三档（NVS 持久）：
+设置页/串口 `status` 可见当前模式；`PowerMode` 三档由 DeviceSettings 持久化并热生效：
 
 - **Auto（默认）**：按充电状态自动判定——充电中=常供电，否则=电池；无电池
   读数（台式）视为常供电，避免误判进休眠。
 - **常供电（Mains）**：modem-sleep 常驻，WiFi 即时在线，http_push 即时到达，
   面板按快照刷新。
-- **电池（Battery）**：按周期轮询——唤醒 → 等 WiFi → 全源轮询 → 静默 →
-  交互窗口 → 安全休眠（GPIO4 保持锁存）；http_push 延迟到下一周期。
+- **电池（Battery）**：按 `battery_poll_s` 周期执行唤醒 → 等 WiFi → 全源轮询 →
+  静默 → 交互窗口 → 安全休眠（GPIO4 保持锁存）；`idle_sleep_s` 控制无操作窗口，
+  也可配置本地时间睡眠计划。http_push 延迟到下一周期，深睡时 HTTP/BLE 均不可达；
+  恢复 AP 窗口暂停自动入睡。
 
 电池信息：电压/百分比/充电状态经 ADC 分压（÷1.559）读取，`battery` 串口
 命令与状态页可见。
