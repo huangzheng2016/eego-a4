@@ -5,12 +5,15 @@
 //
 // net_task 是：
 //   * 一切 esp_http_client 的唯一属主（HttpPool 只能在本任务上下文调用）；
-//   * 一切 AlertStore 写入的唯一执行方（适配器产 AlertEvent，本任务 ingest）；
+//   * 一切 AlertStore 写入的唯一执行方（适配器产 AlertEvent，本任务 ingest；
+//     告警动作 ack/ackAll/clear 与 expire 过期同样只在这里落地）；
+//   * 快照发布方（注入 SnapshotPublisher 后，任何 store 变更——摄入/动作/过期/
+//     加载——都由本任务 buildSnapshot + publish；UI/API 无锁 acquire 读）；
 //   * 轮询调度器（每源 interval，vTaskDelay 级节拍，指数退避）；
 //   * WiFi 重连状态机（指数退避 30s→60s→120s…封顶 5min，M13 F3）。
 //
 // 其他任务（app_task/httpd/serial）不直接触碰本组件内部对象：
-//   * 配置/查询/摄入 → 命令队列（线程安全，调用方阻塞等结果，有超时）；
+//   * 配置/查询/摄入/告警动作 → 命令队列（线程安全，调用方阻塞等结果，有超时）；
 //   * WiFi/源状态变化 → NetEvent 回调（net_task 上下文，必须短平快）。
 //
 // 常供电与电池唤醒同一 API：
@@ -24,9 +27,11 @@
 #include <string>
 #include <vector>
 
+#include "alert_core/snapshot.h"
 #include "alert_core/store.h"
 #include "alert_core/type_registry.h"
 #include "esp_err.h"
+#include "net_stack/alert_actions.h"
 #include "net_stack/http_pool.h"
 #include "net_stack/source_adapter.h"
 #include "net_stack/source_cache.h"
@@ -61,6 +66,13 @@ struct NetStackConfig {
   uint8_t task_priority = 5;                // M12 任务表：CPU0/5/16KB
   uint16_t task_stack_bytes = 16384;
   int8_t task_core = 0;                     // M12：net_task 固定 CPU0
+  // 快照发布接线（M12：UI/API 无锁读快照，store 只能 net_task 写）。
+  // 注入后，net_task 在任何 store 变更（摄入/ack/clear/过期/加载）后
+  // buildSnapshot + publish；nullptr = 不发布（alertSnapshotSource 恒返回
+  // nullptr，动作不受影响）。必须 outlive NetStack（同 store/registry）。
+  alert_core::SnapshotPublisher* snapshot_publisher = nullptr;
+  // expire 过期巡检节拍（秒级 TTL 精度足够；0 = 关闭巡检）
+  uint32_t alert_expire_interval_ms = 15000;
 };
 
 class NetStack {
@@ -70,6 +82,8 @@ class NetStack {
   // 启动 net_task（幂等：已启动返回 ESP_ERR_INVALID_STATE）。
   // store/registry 必须 outlive NetStack；store 的全部写操作此后只发生在
   // net_task 上下文（M12 单属主模型）。time_fn 为空用 time(nullptr)。
+  // cfg.snapshot_publisher 非空时，net_task 启动即发布首帧快照，此后任何
+  // store 变更（摄入/告警动作/过期/加载后 republishSnapshot）都会重建发布。
   esp_err_t start(const NetStackConfig& cfg, alert_core::AlertStore* store,
                   const alert_core::TypeRegistry* registry, TimeFn time_fn = nullptr);
   void stop();
@@ -87,6 +101,25 @@ class NetStack {
 
   // ---- 查询（线程安全快照）----
   bool queryStatus(NetStatusSnapshot& out, uint32_t wait_ms = 1000);
+
+  // ---- 告警动作（M11 ack/ack-all/clear；net_task 在 AlertStore 上下文执行）----
+  // 线程安全：httpd/UI 线程经此入口提交，命令队列串行化，阻塞等结果（有超时）；
+  // 绝不直写 store。结果语义见 alert_actions.h。
+  AlertActionResult alertAction(const AlertAction& action, uint32_t wait_ms = 5000);
+
+  // ---- 快照发布与 admin 注入点（M12/M17）----
+  // 注入的 publisher（可能 nullptr = 未接线；admin 据此 503，不崩溃）。
+  alert_core::SnapshotPublisher* alertPublisher() const { return cfg_.snapshot_publisher; }
+  // 现成 functor，admin 直接注入 setAlertSnapshotSource(fn)：无锁 acquire
+  // 当前快照；未接线/从未发布返回 nullptr（admin 渲染空表/503）。
+  AlertSnapshotSource alertSnapshotSource();
+  // 现成 functor，admin 直接注入 setAlertActionSink(fn)：net_task 执行并回
+  // 明确结果；net_task 未运行时 Unavailable + detail（admin 映射 503）。
+  AlertActionSink alertActionSink();
+  // store 在 net_task 之外变更后（如组合根加载 alerts.db 完成），请求 net_task
+  // 重建并发布快照。正常接线顺序（先 load 后 start）无需调用——net_task 启动
+  // 时会发布首帧快照。
+  bool republishSnapshot(uint32_t wait_ms = 1000);
 
   // ---- 通用出站（admin sources/test 等；net_task 执行）----
   // resp 由调用方持有（move-only）；false = 入队/等待失败。
@@ -139,6 +172,8 @@ class NetStack {
     ReconnectNow,
     HttpSubmit,
     Ingest,
+    AlertActionCmd,
+    RepublishSnapshot,
     QueryStatus,
     WaitIdle,
     Stop,
