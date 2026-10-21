@@ -20,6 +20,7 @@
 #include "freertos/queue.h"
 #include "net_stack/net_stack.h"
 #include "pcf8563_rtc.h"
+#include "time_source.h"
 
 namespace admin = eego::admin;
 
@@ -175,7 +176,6 @@ void PanelApp::service() {
     if (snap && snap->seq != snapshotSeq_) markDirty();
   }
 
-  refreshRtc(now);
   refreshBattery(now);
   if (now - lastChargeMs_ > 30000) {
     charging_ = eego::PowerManager::instance().isCharging();
@@ -293,6 +293,7 @@ void PanelApp::gotoPage(Page p) {
   focus_ = 0;
   provisionSucceeded_ = false;
   clearConfirm();
+  if (p == Page::Settings) refreshMuteRuleCount();  // S4 静音规则数（M21）
   markDirty(true);  // 切页 Full 刷新（避免跨页残影）
 }
 
@@ -570,14 +571,69 @@ void PanelApp::doClear(const std::string& id) {
 }
 
 void PanelApp::doMute(const alert_core::AlertRecord& rec) {
-  if (prefs_.addMute(rec.fingerprint)) {
-    prefs_.save();
-    showBanner(tr(Str::DoneMute), 3000);
-  } else {
+  // store 级静音（M21）：指纹规则经 net_task 落入 AlertStore（重估 muted
+  // 标志 + 快照发布），并持久化到 config.json（重启后恢复）。
+  // query→append→set 全程在 app_task 上下文，与 admin 配置热生效同任务串行，
+  // 无读改写竞争。
+  NetStack& net = NetStack::instance();
+  std::vector<alert_core::MuteRule> rules;
+  if (!net.queryMuteRules(rules)) {
     showBanner(tr(Str::ActionFailed), 3000);
+    return;
   }
-  if (page_ == Page::Detail) back();
+  bool dup = false;
+  for (const auto& r : rules) {
+    if (r.match_by == alert_core::MuteRule::MatchBy::Fingerprint && r.value == rec.fingerprint) {
+      dup = true;
+      break;
+    }
+  }
+  if (!dup) {
+    alert_core::MuteRule rule;
+    rule.match_by = alert_core::MuteRule::MatchBy::Fingerprint;
+    rule.value = rec.fingerprint;
+    rule.expires_at = 0;  // 面板静音语义：不过期（清除走 S4 清静音）
+    rules.push_back(std::move(rule));
+  }
+  std::string err;
+  if (!net.setMuteRules(rules, err)) {
+    showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), err.c_str());
+    return;
+  }
+  persistMuteRules(rules);
+  muteRuleCount_ = rules.size();
+  showBanner(tr(Str::DoneMute), 3000);
+  if (page_ == Page::Detail) back();  // 静音后详情目标从列表消失，回列表
   markDirty();
+}
+
+void PanelApp::doClearMutes() {
+  std::string err;
+  if (!NetStack::instance().clearMuteRules(err)) {
+    showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), err.c_str());
+    return;
+  }
+  persistMuteRules({});
+  muteRuleCount_ = 0;
+  showBanner(tr(Str::DoneClear), 3000);
+  markDirty();
+}
+
+void PanelApp::persistMuteRules(const std::vector<alert_core::MuteRule>& rules) {
+  admin::ConfigStore& cs = admin::ConfigStore::instance();
+  alert_core::JsonValue dom = cs.rawDom();
+  if (!cs.setMuteRulesInDom(dom, rules)) return;
+  std::string err;
+  if (!cs.commit(dom, err)) {
+    ESP_LOGW(TAG, "mute rules persist failed (active until reboot): %s", err.c_str());
+  }
+}
+
+void PanelApp::refreshMuteRuleCount() {
+  std::vector<alert_core::MuteRule> rules;
+  if (NetStack::instance().queryMuteRules(rules)) {
+    muteRuleCount_ = rules.size();
+  }
 }
 
 void PanelApp::doPollNow() {
@@ -632,11 +688,9 @@ void PanelApp::activateSettingRow(size_t row) {
       markDirty();
       break;
     }
-    case 4:  // 静音列表（清除需二次确认）
+    case 4:  // 静音列表（清除需二次确认；store 级规则清空，M21）
       if (confirm_ == ConfirmKind::ClearMutes) {
-        prefs_.clearMutes();
-        prefs_.save();
-        showBanner(tr(Str::DoneClear), 3000);
+        doClearMutes();
         clearConfirm();
         markDirty();
       } else {
@@ -683,10 +737,7 @@ void PanelApp::executeArmedConfirm() {
       doClear(detailId_);
       break;
     case ConfirmKind::ClearMutes:
-      prefs_.clearMutes();
-      prefs_.save();
-      showBanner(tr(Str::DoneClear), 3000);
-      markDirty();
+      doClearMutes();
       break;
     default:
       break;
@@ -863,12 +914,6 @@ void PanelApp::leaveProvision() {
 
 // ── 数据辅助 ────────────────────────────────────────────────────────────────
 
-void PanelApp::refreshRtc(int64_t now) {
-  if (now - lastRtcMs_ < 1000) return;
-  lastRtcMs_ = now;
-  rtcCache_ = rtc_.readTime();
-}
-
 void PanelApp::refreshBattery(int64_t now) {
   if (now - lastBatMs_ < 60000) return;
   lastBatMs_ = now;
@@ -889,8 +934,8 @@ const eego::net::NetStatusSnapshot& PanelApp::netStatus() {
 }
 
 uint64_t PanelApp::nowUnix() {
-  if (rtcCache_.valid) return static_cast<uint64_t>(rtc_.toEpoch(rtcCache_));
-  return static_cast<uint64_t>(time(nullptr));
+  // 统一时间源（M21）：与 net_task ingest/expire/快照 generated_at 同一墙钟
+  return TimeSource::now();
 }
 
 const alert_core::AlertRecord* PanelApp::findRecord(const std::string& id) const {
@@ -902,7 +947,9 @@ const alert_core::AlertRecord* PanelApp::findRecord(const std::string& id) const
 }
 
 bool PanelApp::recordVisible(const alert_core::AlertRecord& r) const {
-  return !r.muted && !prefs_.isMuted(r.fingerprint);
+  // store 级静音语义（M21）：muted 记录留在库但不进总览/列表/徽标（M11）；
+  // 与 API 默认列表（muted 排除）、状态统计一致——不再有 UI 级指纹过滤。
+  return !r.muted;
 }
 
 size_t PanelApp::visibleRecords(std::vector<const alert_core::AlertRecord*>& out) const {
@@ -990,7 +1037,7 @@ void PanelApp::softKeys(SoftKeyModel* out, size_t cap) const {
       const bool active = rec != nullptr && rec->state == alert_core::AlertState::Active;
       const bool clearable = rec != nullptr && (rec->state == alert_core::AlertState::Active ||
                                                 rec->state == alert_core::AlertState::Acked);
-      const bool muted = rec != nullptr && prefs_.isMuted(rec->fingerprint);
+      const bool muted = rec != nullptr && rec->muted;  // store 级（M21）
       out[0] = {tr(Str::Ack), active};
       out[1] = {tr(Str::Mute), rec != nullptr && !muted};
       out[2] = {tr(Str::Clear), clearable};
@@ -1088,9 +1135,15 @@ void PanelApp::render(int64_t now) {
 }
 
 void PanelApp::buildStatusBar(StatusBarModel& m) {
-  if (rtcCache_.valid) {
-    snprintf(m.timeText, sizeof(m.timeText), "%02u-%02u %02u:%02u", rtcCache_.month,
-             rtcCache_.day, rtcCache_.hour, rtcCache_.minute);
+  // 统一时间源（M21）：可信显示 MM-DD HH:MM；不可信保持 "--:--"（与未知时间
+  // 的既有约定一致；明确的「时间不可用」在 S3 状态页行内显示）
+  if (TimeSource::valid()) {
+    const uint64_t now = TimeSource::now();
+    struct tm tm_buf;
+    time_t t = static_cast<time_t>(now);
+    gmtime_r(&t, &tm_buf);
+    snprintf(m.timeText, sizeof(m.timeText), "%02d-%02d %02d:%02d", tm_buf.tm_mon + 1,
+             tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min);
   }
   m.batPercent = batCache_.percent;
   m.batMv = batCache_.millivolts;
@@ -1099,7 +1152,13 @@ void PanelApp::buildStatusBar(StatusBarModel& m) {
   m.mains = mains_;
   m.portalOpen = admin::ProvisionPortal::instance().isOpen();
   m.apFallback = admin::ProvisionPortal::instance().isApFallbackActive();
-  m.mutedCount = prefs_.mutes().size();
+  // 已静音告警数（store 语义：快照内 muted 记录计数，与 S0/列表过滤一致）
+  m.mutedCount = 0;
+  if (snapshot_ != nullptr) {
+    for (const auto& r : snapshot_->records) {
+      if (r.muted) m.mutedCount++;
+    }
+  }
   if (!banner_.empty()) {
     snprintf(m.banner, sizeof(m.banner), "%s", banner_.c_str());
   }
@@ -1115,7 +1174,6 @@ void PanelApp::buildS0(S0Model& m) {
         storeMuted++;
         continue;
       }
-      if (prefs_.isMuted(r.fingerprint)) continue;
       if (r.state == alert_core::AlertState::Active || r.state == alert_core::AlertState::Acked) {
         switch (r.severity) {
           case alert_core::Severity::Critical: m.critical++; break;
@@ -1127,7 +1185,7 @@ void PanelApp::buildS0(S0Model& m) {
     }
   }
   m.activeTotal = m.critical + m.warning + m.info;
-  m.muted = storeMuted + prefs_.mutes().size();
+  m.muted = storeMuted;
   m.empty = (m.activeTotal == 0);
   if (snapshot_ != nullptr) formatTs(snapshot_->generated_at, m.updatedText, sizeof(m.updatedText));
 
@@ -1185,7 +1243,7 @@ void PanelApp::buildS2(S2Model& m) {
   m.canAck = rec->state == alert_core::AlertState::Active;
   m.canClear = rec->state == alert_core::AlertState::Active ||
                rec->state == alert_core::AlertState::Acked;
-  m.muted = prefs_.isMuted(rec->fingerprint);
+  m.muted = rec->muted;  // store 级静音（M21）
 
   char buf[40];
   // meta 值与 title/message 同为不可信字段（ack_by 来自 API 客户端），统一钳制
@@ -1258,6 +1316,20 @@ void PanelApp::buildS3(S3Model& m) {
     add("  ", buf);
   }
 
+  // 统一时间源（M21）：如实显示来源与可用性，不可用时不拿 0 时间冒充
+  if (ns.time.valid) {
+    if (ns.time.sntp_synced) {
+      char sync_at[40];
+      formatTs(ns.time.last_sync_at, sync_at, sizeof(sync_at));
+      snprintf(buf, sizeof(buf), "SNTP · %s", sync_at);
+    } else {
+      snprintf(buf, sizeof(buf), "%s", tr(Str::TimeRtc));
+    }
+  } else {
+    snprintf(buf, sizeof(buf), "%s", tr(Str::TimeUnavailable));
+  }
+  add(tr(Str::TimeLabel), buf);
+
   // 源健康
   addSection(Str::Sources);
   if (ns.sources.empty()) {
@@ -1284,7 +1356,7 @@ void PanelApp::buildS3(S3Model& m) {
   if (snapshot_ != nullptr) {
     size_t active = 0, acked = 0, term = 0, muted = 0;
     for (const auto& r : snapshot_->records) {
-      if (r.muted || prefs_.isMuted(r.fingerprint)) {
+      if (r.muted) {
         muted++;
         continue;
       }
@@ -1339,7 +1411,7 @@ void PanelApp::buildS4(S4Model& m) {
     add(Str::SetFrontlight, tr(Str::FrontlightMissing), false);
   }
   snprintf(buf, sizeof(buf), tr(Str::MutesFmt),
-           static_cast<unsigned>(prefs_.mutes().size()));
+           static_cast<unsigned>(muteRuleCount_));  // store 规则数（M21）
   add(Str::SetMutes, buf, true);
   add(Str::SetPollNow, "", true);
   std::string url = tr(Str::WifiDisconnected);

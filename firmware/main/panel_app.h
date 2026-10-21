@@ -7,8 +7,8 @@
 //   * 全部渲染/导航/本地动作只在 app_task 上下文（begin/service/handle* 由
 //     app_main 主循环调用）；触控 8ms 轮询与按键队列在 app_main 泵入；
 //   * 告警数据只读：SnapshotPublisher::acquire 无锁取不可变快照，绝不直写
-//     AlertStore；告警动作（ack/ackAll/clear）一律经 NetStack::alertAction
-//     命令队列由 net_task 执行；本类不触碰 HttpPool/适配器；
+//     AlertStore；告警动作（ack/ackAll/clear）与静音规则（set/clear/query）
+//     一律经 NetStack 命令队列由 net_task 执行；本类不触碰 HttpPool/适配器；
 //   * 跨任务入口只有 notifyNetEvent / notifyAdminEvent：只做原子置位与小
 //     信箱投递，短平快，绝不做渲染/IO。
 //
@@ -18,8 +18,10 @@
 //     （GPIO4 锁存保持 + 定时唤醒 + 电源键 EXT0 唤醒）；唤醒=重启，循环。
 //   模式判定：prefs Auto = 充电状态（无电池读数回退常供电），S4 可强制。
 //
-// UI 级静音：指纹表存 NVS（DevicePrefs），渲染层过滤（store 级静音需
-// net_task 入口，NetStack 暂未暴露——见 mission finding）。
+// 静音（M21 store 级）：详情静音 = 指纹规则经 net_task 落入 AlertStore
+// （重估 muted 标志 + 快照发布），并持久化到 config.json mute_rules（重启
+// 恢复）；S4 清除全部静音 = 清空规则表。总览/列表/状态统计统一按记录的
+// muted 标志过滤（store 语义），不再有 UI 级指纹过滤。
 
 #include <atomic>
 #include <cstdint>
@@ -37,6 +39,11 @@
 #include "panel_render.h"
 #include "panel_types.h"
 #include "ui_text.h"
+
+// 仅声明引用所需（定义见 alert_core/store.h，panel_app.cpp 经 net_stack 获得）
+namespace alert_core {
+struct MuteRule;
+}  // namespace alert_core
 
 namespace panel {
 
@@ -111,7 +118,12 @@ class PanelApp {
   void doAck(const std::string& id);
   void doAckAll();
   void doClear(const std::string& id);
-  void doMute(const alert_core::AlertRecord& rec);
+  void doMute(const alert_core::AlertRecord& rec);  // store 级指纹规则（M21）
+  void doClearMutes();                              // 清空规则表（M21，二次确认）
+  // 规则表持久化到 config.json mute_rules（app_task 上下文原子写；失败仅记
+  // 日志——运行时已生效，下次启动丢失可接受且可诊断）。
+  void persistMuteRules(const std::vector<alert_core::MuteRule>& rules);
+  void refreshMuteRuleCount();  // S4 行显示用（进设置页/规则变更后刷新）
   void doPollNow();
   void armConfirm(ConfirmKind kind);
   void executeArmedConfirm();  // 执行当前布防动作并清除布防（按键/触控共用）
@@ -142,12 +154,11 @@ class PanelApp {
   void buildS4(S4Model& m);
 
   // ---- 数据辅助 ----
-  uint64_t nowUnix();             // RTC 有效用 RTC，否则 time(nullptr)
-  void refreshRtc(int64_t nowMs);
+  uint64_t nowUnix();             // 统一时间源（TimeSource：SNTP 系统时间 > RTC > 0）
   void refreshBattery(int64_t nowMs);
-  const eego::net::NetStatusSnapshot& netStatus();  // 5s 缓存的源/WiFi 状态
+  const eego::net::NetStatusSnapshot& netStatus();  // 5s 缓存的源/WiFi/时间状态
   const alert_core::AlertRecord* findRecord(const std::string& id) const;
-  bool recordVisible(const alert_core::AlertRecord& r) const;  // 非库静音且非 UI 静音
+  bool recordVisible(const alert_core::AlertRecord& r) const;  // 非 store 静音
   size_t visibleRecords(std::vector<const alert_core::AlertRecord*>& out) const;
   void formatAge(uint64_t ts, char* out, size_t cap);
   void formatTs(uint64_t ts, char* out, size_t cap) const;
@@ -186,9 +197,7 @@ class PanelApp {
   bool forceFull_ = true;
   int64_t lastRenderMs_ = -10000;
 
-  // 时钟/电池缓存
-  eego::RtcTime rtcCache_{};
-  int64_t lastRtcMs_ = -100000;
+  // 电池/充电缓存
   eego::BatteryInfo batCache_{};
   int64_t lastBatMs_ = -100000;
   bool charging_ = false;
@@ -205,6 +214,9 @@ class PanelApp {
   // net 状态缓存（5s 有效期，避免每次渲染都过 net_task 命令队列）
   eego::net::NetStatusSnapshot netStatusCache_{};
   int64_t netStatusCacheMs_ = 0;
+
+  // 静音规则数（S4「静音列表」行显示；进设置页与规则变更后刷新，M21）
+  size_t muteRuleCount_ = 0;
 
   // 电源模式状态
   bool mains_ = true;

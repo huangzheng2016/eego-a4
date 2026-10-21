@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <strings.h>
 #include <vector>
 
@@ -531,15 +532,27 @@ esp_err_t h_alerts_list(httpd_req_t* req) {
     return sendError(req, 503, errc::kUnavailable, "alert snapshot source not wired");
   }
   using alert_core::JsonValue;
-  // 查询参数（容忍缺省/非法值 → 默认）
+  // 查询参数（容忍缺省/非法值 → 默认）。M11 契约：state/severity/type/source/
+  // muted/since/limit。muted 默认排除（与总览/徽标/默认列表一致），
+  // muted=true 才包含静音记录（可查，不丢数据）。
   char q[128] = {};
-  std::string state, severity, type;
+  std::string state, severity, type, source;
+  bool include_muted = false;
+  uint64_t since = 0;
   size_t limit = 50;
   if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
     char v[64];
     if (httpd_query_key_value(q, "state", v, sizeof(v)) == ESP_OK) state = v;
     if (httpd_query_key_value(q, "severity", v, sizeof(v)) == ESP_OK) severity = v;
     if (httpd_query_key_value(q, "type", v, sizeof(v)) == ESP_OK) type = v;
+    if (httpd_query_key_value(q, "source", v, sizeof(v)) == ESP_OK) source = v;
+    if (httpd_query_key_value(q, "muted", v, sizeof(v)) == ESP_OK) {
+      include_muted = (strcmp(v, "true") == 0 || strcmp(v, "1") == 0);
+    }
+    if (httpd_query_key_value(q, "since", v, sizeof(v)) == ESP_OK) {
+      const long long n = strtoll(v, nullptr, 10);
+      if (n > 0) since = static_cast<uint64_t>(n);
+    }
     if (httpd_query_key_value(q, "limit", v, sizeof(v)) == ESP_OK) {
       const long n = strtol(v, nullptr, 10);
       if (n > 0) limit = static_cast<size_t>(n) > 200 ? 200 : static_cast<size_t>(n);
@@ -551,9 +564,12 @@ esp_err_t h_alerts_list(httpd_req_t* req) {
     for (const auto& rec : snap->records) {
       const std::string st = alert_core::alertStateName(rec.state);
       const std::string sev = alert_core::severityName(rec.severity);
+      if (!include_muted && rec.muted) continue;
       if (!state.empty() && st != state) continue;
       if (!severity.empty() && sev != severity) continue;
       if (!type.empty() && rec.type != type) continue;
+      if (!source.empty() && rec.source.id != source) continue;
+      if (since != 0 && rec.last_seen < since) continue;
       total++;
       if (arr.size() < limit) arr.push_back(alert_core::recordToJson(rec));
     }
@@ -682,8 +698,9 @@ esp_err_t h_status(httpd_req_t* req) {
 
   // network（net_task 快照优先；未运行回退 WifiManager 直读）
   net::NetStatusSnapshot ns;
+  const bool ns_ok = net::NetStack::instance().queryStatus(ns);
   JsonValue::Object netobj;
-  if (net::NetStack::instance().queryStatus(ns)) {
+  if (ns_ok) {
     netobj.emplace_back("ssid", JsonValue::makeString(ns.wifi.ssid));
     netobj.emplace_back("ip", JsonValue::makeString(ns.wifi.ip));
     netobj.emplace_back("rssi", JsonValue::makeInt(ns.wifi.rssi));
@@ -697,6 +714,24 @@ esp_err_t h_status(httpd_req_t* req) {
   }
   netobj.emplace_back("ap_active", JsonValue::makeBool(ProvisionPortal::instance().apActive()));
   root.emplace_back("network", JsonValue::makeObject(std::move(netobj)));
+
+  // 统一时间源（M21）：net_task 快照优先；未运行回退系统时间可信度下限。
+  // valid=false 时 now 可能为 0 —— 客户端不得把 0 当作有效告警时间。
+  JsonValue::Object timeobj;
+  if (ns_ok) {
+    timeobj.emplace_back("valid", JsonValue::makeBool(ns.time.valid));
+    timeobj.emplace_back("now", JsonValue::makeInt(static_cast<int64_t>(ns.time.now)));
+    timeobj.emplace_back("sntp_synced", JsonValue::makeBool(ns.time.sntp_synced));
+    timeobj.emplace_back("last_sync_at",
+                         JsonValue::makeInt(static_cast<int64_t>(ns.time.last_sync_at)));
+  } else {
+    const int64_t sys = static_cast<int64_t>(time(nullptr));
+    timeobj.emplace_back("valid", JsonValue::makeBool(sys >= net::kPlausibleUnixFloor));
+    timeobj.emplace_back("now", JsonValue::makeInt(sys));
+    timeobj.emplace_back("sntp_synced", JsonValue::makeBool(false));
+    timeobj.emplace_back("last_sync_at", JsonValue::makeInt(0));
+  }
+  root.emplace_back("time", JsonValue::makeObject(std::move(timeobj)));
 
   // memory / storage
   root.emplace_back("memory",
@@ -953,6 +988,7 @@ esp_err_t h_config_put(httpd_req_t* req) {
       if (patch.find("alert_type_overrides") != nullptr) {
         mask |= AdminCommand::kChangedOverrides;
       }
+      if (patch.find("mute_rules") != nullptr) mask |= AdminCommand::kChangedMuteRules;
     }
   }
 

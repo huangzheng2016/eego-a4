@@ -64,10 +64,15 @@ void PanelApp::diagRtc() {
   const eego::RtcTime t = rtc_.readTime();
   if (!t.valid && t.year == 0) {
     printf("rtc: read failed\n");
-    return;
+  } else {
+    printf("rtc: %04u-%02u-%02u %02u:%02u:%02u wday=%u valid=%d\n", t.year, t.month, t.day,
+           t.hour, t.minute, t.second, t.weekday, t.valid ? 1 : 0);
   }
-  printf("rtc: %04u-%02u-%02u %02u:%02u:%02u wday=%u valid=%d\n", t.year, t.month, t.day,
-         t.hour, t.minute, t.second, t.weekday, t.valid ? 1 : 0);
+  // 统一时间源状态（M21）：net_task 快照（含 SNTP 同步状态）+ 本地判定
+  const eego::net::NetStatusSnapshot& ns = netStatus();
+  printf("time: valid=%d now=%llu sntp_synced=%d last_sync_at=%llu\n", ns.time.valid ? 1 : 0,
+         static_cast<unsigned long long>(ns.time.now), ns.time.sntp_synced ? 1 : 0,
+         static_cast<unsigned long long>(ns.time.last_sync_at));
 }
 
 void PanelApp::diagSd() {
@@ -226,10 +231,12 @@ void PanelApp::diagSmoke() {
   check(admin::ConfigStore::instance().valid(), "config",
         admin::ConfigStore::instance().valid() ? "config.json valid" : "config invalid/bak");
 
-  // 8. NVS prefs 可读
-  printf("[PASS] prefs: lang=%s pmode=%d bpoll=%us mutes=%u\n", langCode(prefs_.lang()),
+  // 8. NVS prefs 可读 + store 静音规则数（M21：UI 级指纹表已迁移为 store 规则）
+  std::vector<alert_core::MuteRule> mute_rules;
+  eego::net::NetStack::instance().queryMuteRules(mute_rules);
+  printf("[PASS] prefs: lang=%s pmode=%d bpoll=%us mute_rules=%u\n", langCode(prefs_.lang()),
          static_cast<int>(prefs_.powerMode()), static_cast<unsigned>(prefs_.batteryPollS()),
-         static_cast<unsigned>(prefs_.mutes().size()));
+         static_cast<unsigned>(mute_rules.size()));
   pass++;
 
   printf("smoke: pass=%d warn=%d fail=%d (output carries no secrets)\n", pass, warn, fail);

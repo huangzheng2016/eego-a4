@@ -1,19 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// EEGO A4 告警/数据面板 —— FW5 组合根（M18）。
+// EEGO A4 告警/数据面板 —— FW5 组合根（M18）+ FW5B 静音规则/时间同步接线（M21）。
 //
 // 启动流程（顺序即接线合同，M12 架构）：
 //   1. board::beginStandardHardware() 板级启动合同（GPIO4 锁存 → 触控/按键 →
 //      前光探测 → 充电极性 → RTC → SD → 显示）
-//   2. NVS（CredentialStore::ensureNvs）+ AuthManager + ConfigStore(config.json)
+//   2. 统一时间源启动同步：RTC 有效 → settimeofday 设置系统时间（M21；
+//      SNTP 前的 TLS/日志/摄入都依赖系统时间）
+//   3. NVS（CredentialStore::ensureNvs）+ AuthManager + ConfigStore(config.json)
 //      + 类型覆盖应用到注册表 + AdminLog（级别取 admin.log_level）
-//   3. 字体：admin.font 指定路径 > SD 卡首个 .eefont/.bin > 内置 5x7 回退
-//   4. 告警库：SdAlertFileIo + AlertDb(/sdcard/alertpanel/alerts.db) →
+//   4. 字体：admin.font 指定路径 > SD 卡首个 .eefont/.bin > 内置 5x7 回退
+//   5. 告警库：SdAlertFileIo + AlertDb(/sdcard/alertpanel/alerts.db) →
 //      AlertStore.loadFrom 恢复 → attachDb（此后 store 写只在 net_task）
-//   5. NetStack::start（注入 SnapshotPublisher；expire 巡检与首帧快照发布
-//      由 net_task 承担）→ 按 config.sources 逐个 addSource
-//   6. admin 注入：快照源/动作 sink（薄适配）/命令处理器/事件回调
-//   7. 模式判定：无管理密码 → 配网门户 + UI 配网页；否则 startAdminApi
-//   8. diag::start（串口命令钩子全部在 app_task 上下文执行）+ PanelApp.begin
+//   6. NetStack::start（注入 SnapshotPublisher/统一时间源/RTC 回写；expire
+//      巡检与首帧快照发布由 net_task 承担）→ 按 config.sources 逐个 addSource
+//      → 恢复静音规则（config.mute_rules；FW5 NVS 指纹表一次性迁移并入）
+//   7. admin 注入：快照源/动作 sink（薄适配）/命令处理器/事件回调
+//   8. 模式判定：无管理密码 → 配网门户 + UI 配网页；否则 startAdminApi
+//   9. diag::start（串口命令钩子全部在 app_task 上下文执行）+ PanelApp.begin
 //
 // app_task 主循环（唯一 UI 属主）：
 //   触控 8ms 轮询 → 按键队列 → diag::service → admin::serviceCommands(0) →
@@ -27,7 +30,6 @@
 
 #include <cstdio>
 #include <cstring>
-#include <ctime>
 #include <strings.h>  // strcasecmp
 
 #include "admin/admin.h"
@@ -42,6 +44,7 @@
 #include "net_stack/net_stack.h"
 #include "net_stack/sd_alert_file_io.h"
 #include "panel_app.h"
+#include "time_source.h"
 
 namespace admin = eego::admin;
 namespace diag = eego::diag;
@@ -159,18 +162,8 @@ admin::AlertActionResult adaptActionResult(const eego::net::AlertActionResult& r
   return out;
 }
 
-// RTC wall-clock 时间源（net_task 上下文安全：I2C 端口级锁）：
-// RTC 有效用 RTC；否则回退 time(nullptr)（无 SNTP 时退化，记录时间戳为 0）。
-eego::Pcf8563Rtc& rtc() {
-  static eego::Pcf8563Rtc inst(I2C_NUM_0);
-  return inst;
-}
-
-uint64_t rtcTimeFn() {
-  const eego::RtcTime t = rtc().readTime();
-  if (t.valid) return static_cast<uint64_t>(rtc().toEpoch(t));
-  return static_cast<uint64_t>(time(nullptr));
-}
+// 统一时间源已收敛到 time_source.h（M21）：TimeSource::now/valid/writeRtc，
+// RTC 句柄为函数内静态（无状态驱动对象，I2C 端口级锁跨任务安全）。
 
 }  // namespace
 
@@ -180,7 +173,13 @@ extern "C" void app_main(void) {
   // 1. 板级启动合同（顺序即合同，见 board_boot.h）
   bootStatus = eego::board::beginStandardHardware(display, touch);
 
-  // 2. NVS / 认证 / 配置存储 / 类型覆盖 / 管理日志
+  // 2. 统一时间源启动同步（M21）：RTC 有效而系统时间不可信 → 设置系统时间
+  //    （SNTP 前的 TLS 证书校验/日志/摄入都依赖系统时间）
+  if (panel::TimeSource::syncSystemFromRtc()) {
+    ESP_LOGI(TAG, "system time set from RTC");
+  }
+
+  // 3. NVS / 认证 / 配置存储 / 类型覆盖 / 管理日志
   if (eego::net::CredentialStore::ensureNvs() != ESP_OK) {
     ESP_LOGE(TAG, "NVS init failed; credentials/config persistence unavailable");
   }
@@ -206,10 +205,10 @@ extern "C" void app_main(void) {
     eego::admin::AdminLog::instance().init();
   }
 
-  // 3. 字体
+  // 4. 字体
   tryLoadUiFont();
 
-  // 4. 告警库恢复（store 写自此只在 net_task；load 先于 start，首帧快照覆盖）
+  // 5. 告警库恢复（store 写自此只在 net_task；load 先于 start，首帧快照覆盖）
   if (eego::SdCard::instance().ready()) {
     const size_t loaded = store.loadFrom(alertDb);
     ESP_LOGI(TAG, "alerts.db restored: %u record(s)", static_cast<unsigned>(loaded));
@@ -218,11 +217,14 @@ extern "C" void app_main(void) {
   }
   store.attachDb(&alertDb);
 
-  // 5. net_task 启动（快照发布 + expire 巡检由 net_task 承担）
+  // 6. net_task 启动（快照发布 + expire 巡检由 net_task 承担；统一时间源 +
+  //    RTC 回写注入，M21）
   eego::net::NetStackConfig netCfg;
   netCfg.snapshot_publisher = &publisher;
+  netCfg.rtc_write_fn = &panel::TimeSource::writeRtc;
+  netCfg.time_valid_fn = &panel::TimeSource::valid;
   const esp_err_t netErr =
-      eego::net::NetStack::instance().start(netCfg, &store, &registry, rtcTimeFn);
+      eego::net::NetStack::instance().start(netCfg, &store, &registry, &panel::TimeSource::now);
   if (netErr != ESP_OK) {
     ESP_LOGE(TAG, "net_task start failed: %s", esp_err_to_name(netErr));
   }
@@ -233,7 +235,56 @@ extern "C" void app_main(void) {
     }
   }
 
-  // 6. admin 注入（M17 同构注入点 + M20 现成 functor/薄适配）
+  // 6b. 静音规则恢复（M21）：config.mute_rules → net_task（重估已恢复记录的
+  //     muted 标志 + 快照发布）。FW5 的 NVS UI 指纹表在此一次性迁移为 store
+  //     级指纹规则：合并表先落盘 config.json（与面板 persistMuteRules 同路径），
+  //     成功后才清 NVS 键——commit 失败时 NVS 是唯一副本，保留待下次启动重试。
+  {
+    std::vector<alert_core::MuteRule> mute_rules = config.muteRules();
+    panel::DevicePrefs& legacy_prefs = panel::DevicePrefs::instance();
+    legacy_prefs.load();  // 幂等重读（app.begin 会再读一次，无害）
+    size_t migrated = 0;
+    for (const std::string& fp : legacy_prefs.mutes()) {
+      bool dup = false;
+      for (const auto& r : mute_rules) {
+        if (r.match_by == alert_core::MuteRule::MatchBy::Fingerprint && r.value == fp) {
+          dup = true;
+          break;
+        }
+      }
+      if (!dup) {
+        alert_core::MuteRule rule;
+        rule.match_by = alert_core::MuteRule::MatchBy::Fingerprint;
+        rule.value = fp;
+        rule.expires_at = 0;  // 面板静音语义：不过期
+        mute_rules.push_back(std::move(rule));
+        migrated++;
+      }
+    }
+    bool persist_ok = true;
+    if (migrated > 0) {
+      alert_core::JsonValue dom = config.rawDom();
+      std::string cerr;
+      persist_ok = config.setMuteRulesInDom(dom, mute_rules) && config.commit(dom, cerr);
+      if (persist_ok) {
+        ESP_LOGI(TAG, "legacy UI mutes migrated to store rules: %u (persisted to config.json)",
+                 static_cast<unsigned>(migrated));
+      } else {
+        ESP_LOGE(TAG, "legacy mute migration persist failed, NVS copy kept (%s)",
+                 cerr.c_str());
+      }
+    }
+    if (!legacy_prefs.mutes().empty() && persist_ok) {
+      legacy_prefs.clearMutes();
+      legacy_prefs.save();
+    }
+    std::string mute_err;
+    if (!eego::net::NetStack::instance().setMuteRules(mute_rules, mute_err)) {
+      ESP_LOGW(TAG, "mute rules restore failed: %s", mute_err.c_str());
+    }
+  }
+
+  // 7. admin 注入（M17 同构注入点 + M20 现成 functor/薄适配）
   eego::net::NetStack& net = eego::net::NetStack::instance();
   admin::setAlertSnapshotSource(net.alertSnapshotSource());
   admin::setAlertActionSink(
@@ -258,7 +309,7 @@ extern "C" void app_main(void) {
   admin::setAdminEventCallback(&onAdminEvent, &app);
   net.setEventCallback(&onNetEvent, &app);
 
-  // 7. 设备模式判定（M13 bootstrap）：无管理密码 → 配网门户；否则管理 API
+  // 8. 设备模式判定（M13 bootstrap）：无管理密码 → 配网门户；否则管理 API
   if (!admin::AuthManager::instance().hasPassword()) {
     ESP_LOGI(TAG, "no admin password: opening provisioning portal");
     if (admin::ProvisionPortal::instance().open() == ESP_OK) {
@@ -273,7 +324,7 @@ extern "C" void app_main(void) {
     }
   }
 
-  // 8. 串口诊断（钩子全部在 app_task 上下文执行）+ UI 属主启动
+  // 9. 串口诊断（钩子全部在 app_task 上下文执行）+ UI 属主启动
   diag::Handlers hooks;
   hooks.status = [] { app.diagStatus(); };
   hooks.battery = [] { app.diagBattery(); };
@@ -300,7 +351,7 @@ extern "C" void app_main(void) {
   deps.registry = &registry;
   app.begin(deps);
 
-  // 9. app_task 主循环（唯一 UI 属主；input/net/httpd/serial 只经队列/快照交互）
+  // 10. app_task 主循环（唯一 UI 属主；input/net/httpd/serial 只经队列/快照交互）
   ESP_LOGI(TAG, "app_task running");
   eego::ButtonEvent bevt;
   while (true) {

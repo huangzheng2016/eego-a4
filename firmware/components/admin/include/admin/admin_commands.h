@@ -38,6 +38,7 @@ struct AdminCommand {
   static constexpr uint32_t kChangedAdmin = 1u << 0;
   static constexpr uint32_t kChangedSources = 1u << 1;
   static constexpr uint32_t kChangedOverrides = 1u << 2;
+  static constexpr uint32_t kChangedMuteRules = 1u << 3;  // M21：静音规则热生效
   uint32_t changed_sections = 0;
 
   // ApplyWifi：待写入/删除的账号（ssid + 明文密码，仅命令内存生命周期，

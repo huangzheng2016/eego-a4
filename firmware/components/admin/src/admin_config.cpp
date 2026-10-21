@@ -22,7 +22,9 @@ constexpr size_t kMaxConfigBodyBytes = 4 * 1024;  // M13：config body ≤4KB（
 constexpr size_t kMaxSources = 16;
 constexpr size_t kMaxOverrides = 64;
 constexpr size_t kMaxWifiList = 4;
+constexpr size_t kMaxMuteRules = 32;              // M21：静音规则上限
 constexpr int64_t kSchemaVersion = 1;
+constexpr int64_t kMaxMuteExpiresAt = 4102444800LL;  // 2100-01-01T00:00:00Z（规则 TTL 上限）
 
 // ---- DOM 小工具（alert_core::JsonValue 无可变查找，这里补齐）----
 const alert_core::JsonValue* objGet(const alert_core::JsonValue& obj, const char* key) {
@@ -377,6 +379,131 @@ void validateOverridesSection(const alert_core::JsonValue& obj, FieldErrors& err
   }
 }
 
+// ---- mute_rules 节（M21）----
+// JSON 形状：{"match_by": "type"|"source"|"fingerprint", "value": "...",
+//            "expires_at": <unix 秒，可选，0/缺省 = 永不过期>}
+// expires_at 用绝对 unix 秒而非相对 TTL：重启恢复后规则过期语义不变。
+// 校验与 ConfigStore::muteRules 解析共用本函数；fingerprint 值归一为小写
+// （store 指纹为小写 sha1 hex，规则必须同形才能命中）。
+
+bool isLowerHexNormalized(std::string& s, size_t len) {
+  if (s.size() != len) return false;
+  for (char& c : s) {
+    if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+  }
+  return true;
+}
+
+bool muteRuleFromJson(const alert_core::JsonValue& v, alert_core::MuteRule& out,
+                      std::string& err_field, std::string& err_msg) {
+  using alert_core::JsonValue;
+  if (v.type() != JsonValue::Type::Object) {
+    err_field.clear();
+    err_msg = "must be an object";
+    return false;
+  }
+  // 第一遍：match_by（value 的形状校验依赖它；JSON 字段顺序不保证）
+  const JsonValue* mb = objGet(v, "match_by");
+  if (mb == nullptr || mb->type() != JsonValue::Type::String) {
+    err_field = "match_by";
+    err_msg = "must be one of type|source|fingerprint";
+    return false;
+  }
+  const std::string& mbs = mb->stringValue();
+  if (mbs == "type") {
+    out.match_by = alert_core::MuteRule::MatchBy::Type;
+  } else if (mbs == "source") {
+    out.match_by = alert_core::MuteRule::MatchBy::Source;
+  } else if (mbs == "fingerprint") {
+    out.match_by = alert_core::MuteRule::MatchBy::Fingerprint;
+  } else {
+    err_field = "match_by";
+    err_msg = "must be one of type|source|fingerprint";
+    return false;
+  }
+  // 第二遍：value / expires_at / 未知字段
+  for (const auto& kv : v.objectItems()) {
+    const JsonValue& val = kv.second;
+    if (kv.first == "match_by") {
+      continue;
+    } else if (kv.first == "value") {
+      if (val.type() != JsonValue::Type::String) {
+        err_field = "value";
+        err_msg = "must be a string";
+        return false;
+      }
+      std::string s = val.stringValue();
+      if (out.match_by == alert_core::MuteRule::MatchBy::Fingerprint) {
+        if (!isLowerHexNormalized(s, alert_core::kFingerprintHexLen)) {
+          err_field = "value";
+          err_msg = "fingerprint rule value must be 40 hex chars";
+          return false;
+        }
+      } else if (s.empty() || s.size() > alert_core::kMaxTypeIdLen || !isControlFree(s)) {
+        err_field = "value";
+        err_msg = "must be 1..64 control-free chars";
+        return false;
+      }
+      out.value = std::move(s);
+    } else if (kv.first == "expires_at") {
+      if (val.type() != JsonValue::Type::Int || val.intValue() < 0 ||
+          val.intValue() > kMaxMuteExpiresAt) {
+        err_field = "expires_at";
+        err_msg = "must be an integer in [0, 4102444800] (absolute unix seconds)";
+        return false;
+      }
+      out.expires_at = static_cast<uint64_t>(val.intValue());
+    } else {
+      err_field = kv.first;
+      err_msg = "unknown field";
+      return false;
+    }
+  }
+  if (out.value.empty()) {
+    err_field = "value";
+    err_msg = "match_by and value are required";
+    return false;
+  }
+  return true;
+}
+
+alert_core::JsonValue muteRuleToJson(const alert_core::MuteRule& r) {
+  using alert_core::JsonValue;
+  const char* by = "type";
+  switch (r.match_by) {
+    case alert_core::MuteRule::MatchBy::Source: by = "source"; break;
+    case alert_core::MuteRule::MatchBy::Fingerprint: by = "fingerprint"; break;
+    default: break;
+  }
+  return JsonValue::makeObject({
+      {"match_by", JsonValue::makeString(by)},
+      {"value", JsonValue::makeString(r.value)},
+      {"expires_at", JsonValue::makeInt(static_cast<int64_t>(r.expires_at))},
+  });
+}
+
+void validateMuteRulesSection(const alert_core::JsonValue& arr, FieldErrors& errs) {
+  using alert_core::JsonValue;
+  if (arr.type() != JsonValue::Type::Array) {
+    addErr(errs, "mute_rules", "must be an array");
+    return;
+  }
+  if (arr.arrayItems().size() > kMaxMuteRules) {
+    addErr(errs, "mute_rules", "too many rules (max 32)");
+    return;
+  }
+  for (size_t i = 0; i < arr.arrayItems().size(); i++) {
+    alert_core::MuteRule tmp;
+    std::string f, m;
+    char prefix[32];
+    snprintf(prefix, sizeof(prefix), "mute_rules[%zu]", i);
+    if (!muteRuleFromJson(arr.arrayItems()[i], tmp, f, m)) {
+      addErr(errs, f.empty() ? std::string(prefix) : std::string(prefix) + "." + f, m);
+    }
+  }
+}
+
 // 从 DOM 解析 admin 域强类型视图（调用方已校验形状；这里宽容缺省）。
 AdminDomainConfig parseAdminView(const alert_core::JsonValue& dom) {
   using alert_core::JsonValue;
@@ -455,6 +582,7 @@ alert_core::JsonValue makeDefaultDom() {
       {"admin", std::move(admin)},
       {"sources", JsonValue::makeArray({})},
       {"alert_type_overrides", JsonValue::makeObject({})},
+      {"mute_rules", JsonValue::makeArray({})},
   });
 }
 
@@ -513,6 +641,11 @@ bool validateLoadedDom(const alert_core::JsonValue& dom, FieldErrors& errs) {
   if (const JsonValue* ov = objGet(dom, "alert_type_overrides")) {
     const size_t before = errs.size();
     validateOverridesSection(*ov, errs);
+    if (errs.size() != before) return false;
+  }
+  if (const JsonValue* mr = objGet(dom, "mute_rules")) {
+    const size_t before = errs.size();
+    validateMuteRulesSection(*mr, errs);
     if (errs.size() != before) return false;
   }
   return errs.empty();
@@ -639,7 +772,7 @@ bool ConfigStore::validateAndMerge(const std::string& body, alert_core::JsonValu
   // 顶层白名单（M13：未知顶层字段拒绝）；文件内未知键保留不动
   for (const auto& kv : patch.objectItems()) {
     if (kv.first != "schema_version" && kv.first != "admin" && kv.first != "sources" &&
-        kv.first != "alert_type_overrides") {
+        kv.first != "alert_type_overrides" && kv.first != "mute_rules") {
       addErr(errs, kv.first, "unknown top-level field");
     }
   }
@@ -656,6 +789,9 @@ bool ConfigStore::validateAndMerge(const std::string& body, alert_core::JsonValu
   }
   if (const JsonValue* ov = objGet(patch, "alert_type_overrides")) {
     validateOverridesSection(*ov, errs);
+  }
+  if (const JsonValue* mr = objGet(patch, "mute_rules")) {
+    validateMuteRulesSection(*mr, errs);
   }
   if (!errs.empty()) {
     xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
@@ -746,6 +882,32 @@ std::vector<net::SourceConfig> ConfigStore::sources() const {
   return out;
 }
 
+std::vector<alert_core::MuteRule> ConfigStore::muteRules() const {
+  std::vector<alert_core::MuteRule> out;
+  xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex_), portMAX_DELAY);
+  if (const alert_core::JsonValue* mr = objGet(dom_, "mute_rules")) {
+    out.reserve(mr->arrayItems().size());
+    for (const auto& item : mr->arrayItems()) {
+      alert_core::MuteRule r;
+      std::string f, m;
+      // DOM 已经过启动/PUT 校验；非法条目防御性跳过（不放大故障）
+      if (muteRuleFromJson(item, r, f, m)) out.push_back(std::move(r));
+    }
+  }
+  xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
+  return out;
+}
+
+bool ConfigStore::setMuteRulesInDom(alert_core::JsonValue& dom,
+                                    const std::vector<alert_core::MuteRule>& rules) const {
+  using alert_core::JsonValue;
+  JsonValue::Array arr;
+  arr.reserve(rules.size());
+  for (const auto& r : rules) arr.push_back(muteRuleToJson(r));
+  objSet(dom, "mute_rules", JsonValue::makeArray(std::move(arr)));
+  return true;
+}
+
 bool ConfigStore::setWifiListInDom(
     alert_core::JsonValue& dom,
     const std::vector<std::pair<std::string, std::string>>& ssid_ref_list) const {
@@ -795,7 +957,11 @@ const char* ConfigStore::schemaJson() {
     "sources": {"type": "array", "max_items": 16, "see": "net_stack SourceConfig (M11 §5)"},
     "alert_type_overrides": {"type": "object", "max_entries": 64,
       "value": {"severity": "critical|warning|info", "ttl_s": "int 0..31622400",
-                "name_zh": "string <=64B", "name_en": "string <=64B", "muted": "bool"}}
+                "name_zh": "string <=64B", "name_en": "string <=64B", "muted": "bool"}},
+    "mute_rules": {"type": "array", "max_items": 32, "description": "store-level mute rules (M21); hot-applied to net_task, restored on boot",
+      "item": {"match_by": "\"type\"|\"source\"|\"fingerprint\"",
+               "value": "type/source id (1..64B) or 40-hex fingerprint",
+               "expires_at": "absolute unix seconds, 0/absent = never expires"}}
   }
 })JSON";
 }
