@@ -266,9 +266,11 @@ struct DashboardRuntime::Impl {
   std::map<std::string, RuleState> rule_states;
   DashboardEventTracker event_tracker;
   DashboardPublicationStore published_panels;
+  std::vector<dash::MetricSample> raw_samples;
   std::map<std::string, dash::MetricSample> rule_samples;
   std::map<std::string, std::shared_ptr<const dp::SourceResult>> injected;
   std::map<std::string, std::shared_ptr<const dp::SourceResult>> source_pointers;
+  std::map<std::string, dp::SourceStatus> source_statuses;
 
   std::string page_id;
   size_t page_index = 0;
@@ -348,7 +350,7 @@ struct DashboardRuntime::Impl {
     for (const dash::Page& candidate : view.pages) {
       if (!candidate.visible) continue;
       for (const dash::PanelSpec& panel : candidate.panels) {
-        if (!panel.visible || panel.id != id) continue;
+        if (panel.id != id) continue;
         if (owner != nullptr) *owner = &candidate;
         if (subpage != nullptr) *subpage = panel.grid.y / ui::kRowsPerPage;
         return &panel;
@@ -529,8 +531,10 @@ struct DashboardRuntime::Impl {
     ready = true;
     config_error.clear();
     source_pointers.clear();
+    source_statuses.clear();
     injected.clear();
     published_panels.clear();
+    raw_samples.clear();
     rule_samples.clear();
     rule_states.clear();
     event_tracker.reset();
@@ -588,7 +592,8 @@ struct DashboardRuntime::Impl {
   bool focusPanel(const std::string& id, bool remember = true) {
     const dash::Page* owner = nullptr;
     size_t subpage = 0;
-    if (findPanel(id, &owner, &subpage) == nullptr || owner == nullptr) return false;
+    const dash::PanelSpec* target = findPanel(id, &owner, &subpage);
+    if (target == nullptr || !target->visible || owner == nullptr) return false;
     setPage(owner->id, subpage, remember);
     for (size_t i = 0; i < layout.panels.size(); ++i) {
       if (layout.panels[i].panel != nullptr && layout.panels[i].panel->id == id) {
@@ -753,8 +758,7 @@ struct DashboardRuntime::Impl {
   }
 
   bool usesSeries(const dash::PanelSpec& panel) const {
-    return panel.kind == dash::PanelKind::Card || panel.kind == dash::PanelKind::Table ||
-           panel.kind == dash::PanelKind::Chart || panel.kind == dash::PanelKind::Image;
+    return dashboardPanelRequiresPublication(panel);
   }
 
   std::shared_ptr<const dp::SourceResult> currentResult(const std::string& source_id) const {
@@ -808,13 +812,31 @@ struct DashboardRuntime::Impl {
     published_panels.publish(panel.id, panel.metric, computePanelSamples(panel));
   }
 
-  void publishPanelUpdate(const dp::PanelUpdate& update) {
-    const dash::PanelSpec* current = findPanel(update.panel_id);
+  void publishRoute(const DashboardCarouselRoute& route) {
+    const dash::PanelSpec* current = findPanel(route.owner_id);
     if (current == nullptr) return;
     dash::PanelSpec panel = *current;
-    panel.metric = published_panels.metric(update.panel_id, panel.metric);
-    panel.source_id = update.source_id;
+    panel.source_id = route.source_id;
+    panel.metric = route.metric;
     publishPanel(panel);
+  }
+
+  void publishPanelUpdate(const dp::PanelUpdate& update) {
+    auto publish_for_owner = [&](const std::string& owner_id) {
+      const auto selection = chart_selection.find(owner_id);
+      const std::string selected_id = selection == chart_selection.end() ? owner_id : selection->second;
+      const dash::PanelSpec* selected = findPanel(selected_id);
+      if (selected == nullptr) return;
+      const DashboardCarouselRoute route = dashboardCarouselRoute(
+          owner_id, selected_id, selected->source_id,
+          published_panels.metric(selected_id, selected->metric), update.panel_id, update.source_id);
+      if (route.allowed) publishRoute(route);
+    };
+    publish_for_owner(update.panel_id);
+    for (const auto& selection : chart_selection) {
+      if (selection.first != update.panel_id && selection.second == update.panel_id)
+        publish_for_owner(selection.first);
+    }
   }
 
   void rebuildRuleSamples(
@@ -877,14 +899,29 @@ struct DashboardRuntime::Impl {
       if (effective != nullptr) results.push_back(effective);
     }
 
+    raw_samples.clear();
+    std::set<std::string> raw_seen;
+    auto append_raw = [&](const dash::MetricSample& sample) {
+      if (raw_samples.size() < kMaxSamples && raw_seen.insert(sampleKey(sample)).second)
+        raw_samples.push_back(sample);
+    };
+    for (const dash::MetricSample& sample : config.samples) append_raw(sample);
+    for (const auto& result : results) {
+      for (const dash::MetricSample& sample : result->metrics) append_raw(sample);
+    }
+    for (const dash::Variable& variable : config.variables) {
+      if (variable.kind != dash::VariableKind::Query) continue;
+      for (const dp::HistoryEntry& entry : pipeline->history().entries(variable.source_id))
+        append_raw(entry.sample);
+    }
+
     view.samples.clear();
     view.events.clear();
     std::set<std::string> seen_samples;
     std::set<std::string> seen_events;
     for (dash::Page& current : view.pages) {
       for (dash::PanelSpec& panel : current.panels) {
-        if (!panel.visible || !usesSeries(panel) || panel.source_id.empty() || panel.metric.empty())
-          continue;
+        if (!usesSeries(panel)) continue;
         if (!published_panels.contains(panel.id)) publishPanel(panel);
         const auto& published = published_panels.at(panel.id);
         const std::string alias = DashboardPublicationStore::alias(panel.id);
@@ -1075,25 +1112,7 @@ struct DashboardRuntime::Impl {
     };
     if (variable.include_all) add("__all__");
     for (const dash::VariableOption& option : variable.options) add(option.value);
-    if (variable.kind == dash::VariableKind::Query) {
-      std::string_view path(variable.value_path);
-      if (path.substr(0, 2) == "$.") path.remove_prefix(2);
-      if (path.substr(0, 7) == "labels.") path.remove_prefix(7);
-      const size_t separator = path.find_last_of("./");
-      if (separator != std::string_view::npos) path.remove_prefix(separator + 1);
-      for (const dash::MetricSample& sample : view.samples) {
-        if (sample.source_id != variable.source_id) continue;
-        if (path == "metric") {
-          add(sample.metric);
-        } else if (path == "source" || path == "source_id") {
-          add(sample.source_id);
-        } else {
-          for (const dash::KeyValue& label : sample.labels) {
-            if (label.key == path) add(label.value);
-          }
-        }
-      }
-    }
+    for (const std::string& value : dashboardQueryValues(variable, raw_samples)) add(value);
     return options;
   }
 
@@ -1145,7 +1164,7 @@ struct DashboardRuntime::Impl {
     index = (index + candidates.size() + static_cast<size_t>(delta)) % candidates.size();
     chart_selection[original_id] = candidates[index]->id;
     published_panels.erase(original_id);
-    pipeline->refreshPanel(original_id);
+    pipeline->refreshPanel(candidates[index]->id);
     rebuildData();
     rebuildLayout();
     renderer.invalidatePanel(original_id);
@@ -1415,6 +1434,12 @@ struct DashboardRuntime::Impl {
 
   void tick() {
     if (!ready || pipeline == nullptr) return;
+    std::map<std::string, dp::SourceStatus> before;
+    for (const dash::Source& source : config.sources) {
+      dp::SourceStatus status;
+      if (pipeline->sourceStatus(source.id, status)) before[source.id] = std::move(status);
+    }
+
     last_tick = pipeline->tick(pipelineMs());
     last_tick_ms = monotonicMs();
     const std::vector<dp::PanelUpdate> updates = pipeline->updates();
@@ -1426,21 +1451,37 @@ struct DashboardRuntime::Impl {
       std::string id;
       std::shared_ptr<const dp::SourceResult> previous;
       std::shared_ptr<const dp::SourceResult> current;
+      bool content_changed = false;
+      bool status_changed = false;
       bool events_changed = false;
     };
     std::vector<SourceChange> changes;
     for (const dash::Source& source : config.sources) {
       const auto known = source_pointers.find(source.id);
+      const auto previous_result = known == source_pointers.end()
+                                       ? std::shared_ptr<const dp::SourceResult>()
+                                       : known->second;
       const std::shared_ptr<const dp::SourceResult> current = pipeline->sourceResult(source.id);
-      if (known == source_pointers.end() || known->second == current) continue;
-      const bool events_changed = !dashboardSourceEventsEqual(known->second.get(), current.get());
-      changes.push_back({source.id, known->second, current, events_changed});
+      dp::SourceStatus current_status;
+      if (!pipeline->sourceStatus(source.id, current_status)) continue;
+      const auto published_status = source_statuses.find(source.id);
+      const dp::SourceStatus& previous_status = published_status == source_statuses.end()
+                                                    ? before[source.id]
+                                                    : published_status->second;
+      const DashboardSourceChange signal = dashboardSourceChangeOf(
+          previous_result.get(), current.get(), previous_status, current_status);
+      source_statuses[source.id] = current_status;
+      if (!signal.content_changed && !signal.status_changed && !signal.events_changed) continue;
+      changes.push_back({source.id, previous_result, current, signal.content_changed,
+                         signal.status_changed, signal.events_changed});
     }
 
     if (!dirty_panels.empty() || !changes.empty()) {
-      rebuildData();
-      for (const std::string& id : dirty_panels) renderer.invalidatePanel(id);
+      bool rebuild_model = !dirty_panels.empty();
+      bool status_changed = false;
       for (const SourceChange& change : changes) {
+        rebuild_model = rebuild_model || change.content_changed || change.events_changed;
+        status_changed = status_changed || change.status_changed;
         if (!change.events_changed) continue;
         auto invalidate_links = [&](const std::shared_ptr<const dp::SourceResult>& result) {
           if (result == nullptr) return;
@@ -1452,8 +1493,9 @@ struct DashboardRuntime::Impl {
         invalidate_links(change.previous);
         invalidate_links(change.current);
       }
+      if (rebuild_model) rebuildData();
       dirty = true;
-      status_dirty = true;
+      if (status_changed) status_dirty = true;
     }
     force_tick = false;
     const int64_t wake = std::min<int64_t>(pipeline->nextWakeMs(pipelineMs()), 1000);
@@ -1667,7 +1709,7 @@ struct DashboardRuntime::Impl {
     drawFocus();
     drawStatus();
     deps.canvas->resetClip();
-    if (last_render.refresh_needed || status_dirty) {
+    if (dashboardShouldDisplay(last_render.refresh_needed, status_dirty)) {
       const eego::RefreshMode mode = force_full ? eego::RefreshMode::Full : last_render.refresh_mode;
       deps.canvas->display(mode);
       deps.canvas->waitRefreshComplete();

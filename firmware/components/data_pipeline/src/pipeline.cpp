@@ -210,9 +210,17 @@ bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<Sourc
     }
   }
 
+  std::set<std::string> linked_dependencies;
+  for (const Page& page : dashboard.pages) {
+    for (const PanelSpec& parent : page.panels) {
+      if (!parent.visible) continue;
+      linked_dependencies.insert(parent.linked_panel_ids.begin(), parent.linked_panel_ids.end());
+    }
+  }
   for (const Page& page : dashboard.pages) {
     for (const PanelSpec& spec : page.panels) {
-      if (!spec.visible || spec.source_id.empty()) continue;
+      if (spec.source_id.empty() || (!spec.visible && linked_dependencies.count(spec.id) == 0))
+        continue;
       if (panels_.count(spec.id) != 0) {
         error = "duplicate data panel: " + spec.id;
         return false;

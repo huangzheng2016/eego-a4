@@ -64,6 +64,88 @@ inline bool dashboardSourceEventsEqual(const eego::dashboard::pipeline::SourceRe
   return true;
 }
 
+struct DashboardSourceChange {
+  bool content_changed = false;
+  bool status_changed = false;
+  bool events_changed = false;
+};
+
+inline bool dashboardSourceStatusEqual(const eego::dashboard::pipeline::SourceStatus& left,
+                                       const eego::dashboard::pipeline::SourceStatus& right) {
+  return left.offline == right.offline && left.stale == right.stale &&
+         left.consecutive_failures == right.consecutive_failures && left.error == right.error &&
+         left.cache_error == right.cache_error;
+}
+
+inline bool dashboardMetricSamplesEqual(const eego::dashboard::MetricSample& left,
+                                        const eego::dashboard::MetricSample& right) {
+  auto labels = [](const eego::dashboard::MetricSample& sample) {
+    std::vector<eego::dashboard::KeyValue> out = sample.labels;
+    std::sort(out.begin(), out.end(), [](const eego::dashboard::KeyValue& a,
+                                         const eego::dashboard::KeyValue& b) {
+      return a.key == b.key ? a.value < b.value : a.key < b.key;
+    });
+    return out;
+  };
+  const auto a = labels(left);
+  const auto b = labels(right);
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (a[i].key != b[i].key || a[i].value != b[i].value) return false;
+  }
+  return left.source_id == right.source_id && left.metric == right.metric &&
+         left.timestamp_ms == right.timestamp_ms && left.value == right.value &&
+         left.unit == right.unit;
+}
+
+inline bool dashboardSourceResultsEqual(const eego::dashboard::pipeline::SourceResult* left,
+                                        const eego::dashboard::pipeline::SourceResult* right) {
+  if (left == nullptr || right == nullptr) return left == right;
+  if (left->source_id != right->source_id || left->reset_at_ms != right->reset_at_ms ||
+      left->has_text != right->has_text || left->has_image != right->has_image ||
+      left->metrics.size() != right->metrics.size() ||
+      !dashboardSourceEventsEqual(left, right)) {
+    return false;
+  }
+  if (left->has_text && left->text.text != right->text.text) return false;
+  if (left->has_image && (left->image.media_type != right->image.media_type ||
+                          left->image.bytes != right->image.bytes)) {
+    return false;
+  }
+  std::vector<const eego::dashboard::MetricSample*> a;
+  std::vector<const eego::dashboard::MetricSample*> b;
+  for (const auto& sample : left->metrics) a.push_back(&sample);
+  for (const auto& sample : right->metrics) b.push_back(&sample);
+  auto order = [](const eego::dashboard::MetricSample* lhs,
+                  const eego::dashboard::MetricSample* rhs) {
+    if (lhs->source_id != rhs->source_id) return lhs->source_id < rhs->source_id;
+    if (lhs->metric != rhs->metric) return lhs->metric < rhs->metric;
+    return lhs->timestamp_ms < rhs->timestamp_ms;
+  };
+  std::sort(a.begin(), a.end(), order);
+  std::sort(b.begin(), b.end(), order);
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (!dashboardMetricSamplesEqual(*a[i], *b[i])) return false;
+  }
+  return true;
+}
+
+inline DashboardSourceChange dashboardSourceChangeOf(
+    const eego::dashboard::pipeline::SourceResult* left,
+    const eego::dashboard::pipeline::SourceResult* right,
+    const eego::dashboard::pipeline::SourceStatus& left_status,
+    const eego::dashboard::pipeline::SourceStatus& right_status) {
+  DashboardSourceChange change;
+  change.events_changed = !dashboardSourceEventsEqual(left, right);
+  change.content_changed = !dashboardSourceResultsEqual(left, right);
+  change.status_changed = !dashboardSourceStatusEqual(left_status, right_status);
+  return change;
+}
+
+inline bool dashboardShouldDisplay(bool renderer_refresh_needed, bool status_dirty) {
+  return renderer_refresh_needed || status_dirty;
+}
+
 class DashboardEventTracker {
  public:
   uint64_t observe(const eego::dashboard::Event& event) {
