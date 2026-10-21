@@ -13,6 +13,23 @@
 
 namespace eego::dashboard::pipeline {
 
+inline std::set<std::string> linkedPanelDependencies(const Dashboard& dashboard) {
+  std::set<std::string> out;
+  for (const Page& page : dashboard.pages) {
+    for (const PanelSpec& panel : page.panels) {
+      if (!panel.visible) continue;
+      out.insert(panel.linked_panel_ids.begin(), panel.linked_panel_ids.end());
+    }
+  }
+  return out;
+}
+
+inline bool panelRequiresScheduling(const PanelSpec& panel,
+                                    const std::set<std::string>& linked_dependencies) {
+  return !panel.source_id.empty() &&
+         (panel.visible || linked_dependencies.count(panel.id) != 0);
+}
+
 struct PipelineConfig {
   HistoryLimits history;
   VariableValues variable_overrides;

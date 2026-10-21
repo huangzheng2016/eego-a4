@@ -228,17 +228,10 @@ bool DataPipeline::configure(const Dashboard& dashboard, const std::vector<Sourc
     }
   }
 
-  std::set<std::string> linked_dependencies;
-  for (const Page& page : dashboard.pages) {
-    for (const PanelSpec& parent : page.panels) {
-      if (!parent.visible) continue;
-      linked_dependencies.insert(parent.linked_panel_ids.begin(), parent.linked_panel_ids.end());
-    }
-  }
+  const std::set<std::string> linked_dependencies = linkedPanelDependencies(dashboard);
   for (const Page& page : dashboard.pages) {
     for (const PanelSpec& spec : page.panels) {
-      if (spec.source_id.empty() || (!spec.visible && linked_dependencies.count(spec.id) == 0))
-        continue;
+      if (!panelRequiresScheduling(spec, linked_dependencies)) continue;
       if (panels_.count(spec.id) != 0) {
         error = "duplicate data panel: " + spec.id;
         return false;
@@ -332,9 +325,9 @@ PanelUpdate DataPipeline::makeUpdate(const PanelState& panel, const SourceRuntim
     if (panel.binding.has_custom_window) {
       const ResolvedWindow window =
           resolveCustomWindow(panel.binding, now_ms, config_.timezone_offset_minutes);
-      const std::vector<MetricSample> samples = history_.query(
-          panel.binding.source_id, panel.binding.metric, panel.binding.labels, window);
-      update.aggregate = aggregateSamples(samples, panel.binding.aggregation);
+      update.aggregate = history_.aggregate(panel.binding.source_id, panel.binding.metric,
+                                            panel.binding.labels, window,
+                                            panel.binding.aggregation);
     } else {
       update.aggregate = history_.aggregate(panel.binding.source_id, panel.binding.metric,
                                             panel.binding.labels, panel.binding.window, now_ms,

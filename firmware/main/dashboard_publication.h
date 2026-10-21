@@ -103,6 +103,13 @@ inline eego::dashboard::MetricSample dashboardAggregateSample(
   return sample;
 }
 
+inline std::vector<eego::dashboard::MetricSample> dashboardAggregatePublication(
+    const eego::dashboard::PanelSpec& panel,
+    const eego::dashboard::pipeline::AggregationResult& aggregate, int64_t now_ms) {
+  if (!aggregate.valid) return {};
+  return {dashboardAggregateSample(panel, aggregate, now_ms)};
+}
+
 inline bool dashboardEvaluateValueExpression(const eego::dashboard::PanelSpec& panel,
                                              eego::dashboard::MetricSample& sample) {
   if (panel.value_expression.empty()) return true;

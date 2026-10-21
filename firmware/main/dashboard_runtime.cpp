@@ -536,10 +536,12 @@ struct DashboardRuntime::Impl {
       config_error = ui::sanitizeText(error, false, 160);
       return false;
     }
+    const std::set<std::string> linked_dependencies = dp::linkedPanelDependencies(next_config);
     for (const dash::Page& current : next_config.pages) {
       for (const dash::PanelSpec& panel : current.panels) {
         dp::Aggregation aggregation;
-        if (!dashboardPanelRequiresPublication(panel) ||
+        if (!dp::panelRequiresScheduling(panel, linked_dependencies) ||
+            !dashboardPanelRequiresPublication(panel) ||
             !dashboardAggregationForExpression(panel.value_expression, aggregation)) {
           continue;
         }
@@ -925,16 +927,15 @@ struct DashboardRuntime::Impl {
       const int64_t now = pipelineMs();
       dp::AggregationResult aggregate;
       if (dashboardPanelHasCustomWindow(panel)) {
-        const std::vector<dash::MetricSample> samples = pipeline->history().query(
-            panel.source_id, panel.metric, {}, dashboardResolvePanelWindow(panel, now));
-        aggregate = dp::aggregateSamples(samples, aggregation);
+        aggregate = pipeline->history().aggregate(panel.source_id, panel.metric, {},
+                                                  dashboardResolvePanelWindow(panel, now),
+                                                  aggregation);
       } else {
         aggregate = pipeline->history().aggregate(panel.source_id, panel.metric, {},
                                                   dashboardWindowFromPanel(panel), now,
                                                   aggregation, 0);
       }
-      if (aggregate.valid) out.push_back(dashboardAggregateSample(panel, aggregate, now));
-      return out;
+      return dashboardAggregatePublication(panel, aggregate, now);
     }
     std::set<std::string> seen;
     auto append = [&](const dash::MetricSample& sample) {
@@ -984,10 +985,9 @@ struct DashboardRuntime::Impl {
   void publishPanel(const dash::PanelSpec& panel, const dp::PanelUpdate* update = nullptr) {
     dp::Aggregation aggregation;
     if (update != nullptr && dashboardAggregationForExpression(panel.value_expression, aggregation)) {
-      if (update->aggregate.valid) {
-        published_panels.publish(panel.id, panel.metric,
-                                 {dashboardAggregateSample(panel, update->aggregate, pipelineMs())});
-      }
+      published_panels.publish(
+          panel.id, panel.metric,
+          dashboardAggregatePublication(panel, update->aggregate, pipelineMs()));
       return;
     }
     published_panels.publish(panel.id, panel.metric, computePanelSamples(panel));

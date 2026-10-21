@@ -800,18 +800,26 @@ AggregationResult MetricHistory::aggregate(const std::string& source_id,
     }
     return aggregateHistoryEntries(selected, aggregation);
   }
+  return aggregate(source_id, metric, labels, resolved, aggregation);
+}
+
+AggregationResult MetricHistory::aggregate(const std::string& source_id,
+                                           const std::string& metric,
+                                           const std::vector<KeyValue>& labels,
+                                           const ResolvedWindow& window,
+                                           Aggregation aggregation) const {
   std::vector<MetricSample> selected;
   for (const auto& item : series_) {
     const Series& series = item.second;
     if (series.source_id != source_id || series.metric != metric ||
         !labelsMatch(series.labels, labels))
       continue;
-    if (series.raw_gap_before_ms > 0 && series.raw_gap_before_ms >= resolved.from_ms &&
-        series.raw_gap_before_ms <= resolved.to_ms) {
+    if (series.raw_gap_before_ms > 0 && series.raw_gap_before_ms >= window.from_ms &&
+        series.raw_gap_before_ms <= window.to_ms) {
       return incompleteAggregate();
     }
     for (const MetricSample& raw : series.raw_points) {
-      if (raw.timestamp_ms >= resolved.from_ms && raw.timestamp_ms <= resolved.to_ms)
+      if (raw.timestamp_ms >= window.from_ms && raw.timestamp_ms <= window.to_ms)
         selected.push_back(raw);
     }
   }
