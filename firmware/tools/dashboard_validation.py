@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from expression_validation import validate_expression_syntax
+from native_numeric import parse_finite_strtod
 
 DASHBOARD_SCHEMA = "eego.dashboard/2"
 BUNDLE_SCHEMA = "eego.dashboard-bundle/1"
@@ -25,7 +26,6 @@ MAX_ENCODED_IMAGE_BYTES = 512 * 1024
 
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 VARIABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-DURATION_RE = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(ms|s|m|h|d|w)$")
 SECRET_KEYS = {"password", "passwd", "secret", "api_key", "apikey", "auth_token", "ingest_key"}
 
 REQUIRED_PRESETS = {
@@ -281,17 +281,80 @@ def _duplicates(values):
     return sorted(duplicates)
 
 
+def _utf8_size(text):
+    return len(text.encode("utf-8"))
+
+
+def _valid_http_url(url):
+    if url.startswith("http://"):
+        rest = url[7:]
+    elif url.startswith("https://"):
+        rest = url[8:]
+    else:
+        return False
+    if not rest:
+        return False
+    separator = re.search(r"[/?#]", rest)
+    authority = rest[:separator.start()] if separator else rest
+    if not authority or "@" in authority:
+        return False
+    return all(ord(char) > 32 and ord(char) != 127 for char in url)
+
+
+def _has_parent_path_segment(path):
+    return any(segment == ".." for segment in re.split(r"[/\\]", path))
+
+
+def _valid_asset_uri(uri):
+    if not uri:
+        return False
+    if _valid_http_url(uri):
+        return True
+    sd_uri = uri.startswith("sd:")
+    if not sd_uri and not uri.startswith("/"):
+        return False
+    if (sd_uri and len(uri) == 3) or len(uri) < 2:
+        return False
+    if any(ord(char) <= 32 or ord(char) == 127 for char in uri):
+        return False
+    return not _has_parent_path_segment(uri[3:] if sd_uri else uri)
+
+
+def _valid_locale(locale):
+    if not 2 <= _utf8_size(locale) <= 32:
+        return False
+    return all(char == "-" or char == "_" or "0" <= char <= "9" or
+               "A" <= char <= "Z" or "a" <= char <= "z" for char in locale)
+
+
 def _time_ms(text):
+    text = text.strip(" \t")
     if text == "now":
         return 0
-    duration = text[4:] if text.startswith("now-") else text[1:] if text.startswith("-") else text
-    match = DURATION_RE.fullmatch(duration)
-    if not match:
+    if text.startswith("now-"):
+        duration = text[4:]
+    elif text.startswith("-"):
+        duration = text[1:]
+    else:
+        duration = text
+    if not duration or _utf8_size(duration) > 32:
         return None
-    number = float(duration[:-len(match.group(1))])
-    factor = {"ms": 1, "s": 1000, "m": 60000, "h": 3600000, "d": 86400000,
-              "w": 604800000}[match.group(1)]
-    return -int(number * factor)
+    for suffix, factor in (("ms", 1.0), ("s", 1000.0), ("m", 60000.0),
+                           ("h", 3600000.0), ("d", 86400000.0), ("w", 604800000.0)):
+        if len(duration) > len(suffix) and duration.endswith(suffix):
+            number = duration[:-len(suffix)]
+            break
+    else:
+        return None
+    if not number:
+        return None
+    accepted, value = parse_finite_strtod(number)
+    if not accepted or value < 0.0:
+        return None
+    milliseconds = value * factor
+    if not math.isfinite(milliseconds) or milliseconds > float(9223372036854775807):
+        return None
+    return -int(milliseconds)
 
 
 def _validate_placeholders(text, variables, path, errors):
@@ -312,10 +375,30 @@ def _validate_placeholders(text, variables, path, errors):
         position = end + 1
 
 
+def _interpolate(text, variables):
+    output = []
+    position = 0
+    while position < len(text):
+        escaped = text.startswith("$${", position)
+        normal = text.startswith("${", position)
+        if not escaped and not normal:
+            output.append(text[position])
+            position += 1
+            continue
+        start = position + (3 if escaped else 2)
+        end = text.find("}", start)
+        if end < 0:
+            return text
+        name = text[start:end]
+        output.append("${" + name + "}" if escaped else variables.get(name, ""))
+        position = end + 1
+    return "".join(output)
+
+
 def _valid_path(path, required=False):
     if not path:
         return not required
-    if len(path) > 1024:
+    if _utf8_size(path) > 1024:
         return False
     position = 1 if path.startswith("$") else 0
     if position == 0 and path[0] in ".[":
@@ -371,7 +454,7 @@ def _valid_path(path, required=False):
                     elif ord(char) < 0x20:
                         return False
                     key += char
-                    if len(key) > 256:
+                    if _utf8_size(key) > 256:
                         return False
                 if not closed or not key or position >= len(path) or path[position] != "]":
                     return False
@@ -379,7 +462,7 @@ def _valid_path(path, required=False):
                 tokens += 1
                 continue
             start = position
-            while position < len(path) and path[position].isdigit():
+            while position < len(path) and "0" <= path[position] <= "9":
                 position += 1
             if position == start or position - start > 9 or position >= len(path) or path[position] != "]":
                 return False
@@ -440,6 +523,14 @@ def _validate_plan(plan, path, errors):
     if schema_errors or not isinstance(plan, dict):
         return
     _validate_headers(plan.get("headers", {}), path + ".headers", errors)
+    url = plan.get("url", "")
+    if plan.get("kind", "http") == "http":
+        if _utf8_size(url) > 1024:
+            errors.append(f"{path}.url: exceeds 1024 UTF-8 bytes")
+        if any(char in url for char in " \t\r\n") or not url.startswith(("http://", "https://")):
+            errors.append(f"{path}.url: HTTP source requires an http(s) URL")
+    elif url:
+        errors.append(f"{path}.url: static source URL must be empty")
     response = plan.get("response", "standard_json")
     if response in ("standard", "metrics", "events"):
         response = {"standard": "standard_json", "metrics": "metrics_json", "events": "events_json"}[response]
@@ -576,10 +667,21 @@ def validate_bundle(bundle, schema, raw_bytes=None, strict_layout=True):
                 errors.append(f"{path}.default_value: not one of the declared options")
         if variable.get("kind") == "time_range" and default and _time_ms(default) is None:
             errors.append(f"{path}.default_value: invalid relative time range")
+        if variable.get("kind") == "locale" and not _valid_locale(default):
+            errors.append(f"{path}.default_value: invalid locale identifier")
 
     for index, source in enumerate(sources):
         path = f"$.dashboard.sources[{index}]"
-        _validate_placeholders(source.get("url", ""), variable_set, path + ".url", errors)
+        url = source.get("url", "")
+        _validate_placeholders(url, variable_set, path + ".url", errors)
+        if source.get("kind", "http") == "http" and not _valid_http_url(url):
+            errors.append(f"{path}.url: must be an absolute HTTP(S) URL without userinfo")
+        if source.get("kind", "http") == "static" and url:
+            errors.append(f"{path}.url: static sources cannot have a URL")
+        expanded_url = _interpolate(url, {item["name"]: item.get("default_value", "")
+                                         for item in variables})
+        if source.get("kind", "http") == "http" and not _valid_http_url(expanded_url):
+            errors.append(f"{path}.url: URL is invalid after variable interpolation")
         _validate_headers(source.get("headers", {}), path + ".headers", errors)
         for key, value in source.get("headers", {}).items():
             _validate_placeholders(value, variable_set, f"{path}.headers.{key}", errors)
@@ -587,7 +689,10 @@ def validate_bundle(bundle, schema, raw_bytes=None, strict_layout=True):
             errors.append(f"{path}.auth_token_ref: use an NVS reference, never a literal token")
     for index, asset in enumerate(assets):
         path = f"$.dashboard.assets[{index}]"
-        _validate_placeholders(asset.get("uri", ""), variable_set, path + ".uri", errors)
+        uri = asset.get("uri", "")
+        _validate_placeholders(uri, variable_set, path + ".uri", errors)
+        if not _valid_asset_uri(uri):
+            errors.append(f"{path}.uri: expected HTTP(S) or traversal-free sd:/ URI")
         if asset.get("kind", "image") == "image" and asset.get("size_bytes", 0) > MAX_ENCODED_IMAGE_BYTES:
             errors.append(f"{path}.size_bytes: image exceeds the {MAX_ENCODED_IMAGE_BYTES}-byte decode input budget")
 

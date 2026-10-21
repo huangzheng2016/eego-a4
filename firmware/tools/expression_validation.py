@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-import math
+from native_numeric import parse_finite_strtod
 
 MAX_NODES = 128
 MAX_DEPTH = 24
@@ -141,11 +141,8 @@ class Parser:
                 self.position += 1
         if self.position < len(self.expression) and _identifier_part(self.expression[self.position]):
             return self.fail("invalid character after numeric literal")
-        try:
-            value = float(self.expression[start:self.position])
-        except ValueError:
-            return self.fail("invalid numeric literal")
-        if not math.isfinite(value):
+        accepted, _ = parse_finite_strtod(self.expression[start:self.position])
+        if not accepted:
             return self.fail("numeric literal out of range")
         return self.node()
 
