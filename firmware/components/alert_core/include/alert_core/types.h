@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 // AlertRecord / AlertEvent and the ingest validation contract (M11 §4).

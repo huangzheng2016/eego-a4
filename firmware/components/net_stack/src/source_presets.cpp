@@ -30,6 +30,7 @@ static std::vector<SourcePreset> buildPresets() {
     SourcePreset p;
     p.id = "home_assistant";
     p.label_zh = "Home Assistant";
+    p.label_en = "Home Assistant";
     p.kind_hint = "http_push";
     p.builtin_poll = false;
     p.notes =
@@ -40,6 +41,16 @@ static std::vector<SourcePreset> buildPresets() {
         "示例：alias: 面板告警 → action: rest_command.eego_alert，"
         "data: {type: \"home.water_leak\", severity: \"critical\", title: \"...\", fields: {...}}。"
         "面板侧无需 sources[] 配置，ingest key 由 admin 组件管理。";
+    p.notes_en =
+        "HA has no generic \"alert list\" query API (/api/states is full state with "
+        "per-household semantics), so polling is not faked. Standard approach: in an "
+        "HA automation action, use a REST Command / webhook to POST alerts to the "
+        "panel http_push endpoint (POST /api/v1/alerts, header X-Ingest-Key, body = "
+        "canonical event JSON: type/title/message/fields, three severity levels). "
+        "Example: alias: panel alert -> action: rest_command.eego_alert, "
+        "data: {type: \"home.water_leak\", severity: \"critical\", title: \"...\", "
+        "fields: {...}}. No sources[] config is needed on the panel; the ingest key "
+        "is managed by the admin component.";
     v.push_back(std::move(p));
   }
 
@@ -48,6 +59,7 @@ static std::vector<SourcePreset> buildPresets() {
     SourcePreset p;
     p.id = "grafana";
     p.label_zh = "Grafana Alerting";
+    p.label_en = "Grafana Alerting";
     p.kind_hint = "http_push";
     p.builtin_poll = false;
     p.notes =
@@ -57,6 +69,15 @@ static std::vector<SourcePreset> buildPresets() {
         "type←labels.alertname（或固定 svc.http_down 等注册表类型）、"
         "severity←labels.severity、title←annotations.summary、message←annotations.description、"
         "fields←labels。面板侧无需 sources[] 配置。";
+    p.notes_en =
+        "The standard Grafana Alerting integration is a Contact point webhook "
+        "pointing at the panel http_push endpoint (POST /api/v1/alerts, header "
+        "X-Ingest-Key). Grafana's default POST body is not a canonical event; "
+        "render alerts[] into canonical event JSON in the Grafana notification "
+        "template: type<-labels.alertname (or a fixed registry type such as "
+        "svc.http_down), severity<-labels.severity, title<-annotations.summary, "
+        "message<-annotations.description, fields<-labels. No sources[] config "
+        "is needed on the panel.";
     v.push_back(std::move(p));
   }
 
@@ -65,6 +86,7 @@ static std::vector<SourcePreset> buildPresets() {
     SourcePreset p;
     p.id = "prometheus";
     p.label_zh = "Prometheus 告警";
+    p.label_en = "Prometheus alerts";
     p.kind_hint = "http_poll";
     p.builtin_poll = true;
     SourceConfig c;
@@ -91,6 +113,13 @@ static std::vector<SourcePreset> buildPresets() {
         "labels 整体进 fields（≤16 键预算，超限键被跳过）；severity 经 severity_map 映射；"
         "state=inactive 经 clear_states 映射为清除（firing/pending 保持活动）。"
         "开启认证时把 token 存 NVS（admin 写 sec 命名空间）并填 auth_token_ref。";
+    p.notes_en =
+        "The Prometheus HTTP API /api/v1/alerts is a stable JSON interface; the "
+        "template works out of the box. labels go wholesale into fields (16-key "
+        "budget, excess keys skipped); severity is mapped via severity_map; "
+        "state=inactive maps to clear via clear_states (firing/pending stay "
+        "active). When auth is enabled, store the token in NVS (admin writes "
+        "the sec namespace) and fill auth_token_ref.";
     v.push_back(std::move(p));
   }
 
@@ -99,6 +128,7 @@ static std::vector<SourcePreset> buildPresets() {
     SourcePreset p;
     p.id = "nas_generic";
     p.label_zh = "NAS / 服务器（自定义脚本）";
+    p.label_en = "NAS / server (custom script)";
     p.kind_hint = "http_poll";
     p.builtin_poll = false;
     p.config_template = makeIdentityTemplate("nas-poll", "http://nas.local:8888/alerts.json")
@@ -110,6 +140,15 @@ static std::vector<SourcePreset> buildPresets() {
         "用本模板轮询（恒等映射）；也可以直接 http_push 免轮询。"
         "脚本输出契约：HTTP 200 + JSON 数组，type 必填，severity 三档，title≤120，"
         "message≤2000，fields≤16 键。";
+    p.notes_en =
+        "Synology/QNAP/TrueNAS/Windows alert APIs all differ, and most lack a "
+        "stable JSON alert endpoint, so no vendor-bound template is offered and "
+        "support is not faked. Recommended: run a custom script on the NAS "
+        "(scheduled task) that converts alerts into the canonical event array "
+        "(M11 §4 schema: [{type,severity,title,message,fields,...}]) and poll "
+        "it with this template (identity mapping); direct http_push also works. "
+        "Script output contract: HTTP 200 + JSON array, type required, three "
+        "severity tiers, title<=120, message<=2000, fields<=16 keys.";
     v.push_back(std::move(p));
   }
 
@@ -118,6 +157,7 @@ static std::vector<SourcePreset> buildPresets() {
     SourcePreset p;
     p.id = "openwrt";
     p.label_zh = "OpenWrt / 路由器（自定义脚本）";
+    p.label_en = "OpenWrt / router (custom script)";
     p.kind_hint = "http_poll";
     p.builtin_poll = false;
     p.config_template = makeIdentityTemplate("router-poll", "http://192.168.1.1:8888/alerts.json")
@@ -128,6 +168,14 @@ static std::vector<SourcePreset> buildPresets() {
         "或路由器上 SSH 到 LAN 内某主机输出。脚本契约同 nas_generic。"
         "常见类型映射参考：掉线→net.device_offline，拨号失败→net.ping_loss，"
         "CPU/内存高→host.cpu_high/host.mem_high。";
+    p.notes_en =
+        "OpenWrt has no generic alert API (ubus requires root + Lua and event "
+        "formats vary by package), so support is not faked. Recommended: run a "
+        "custom script on the router (netifd/system log events -> canonical "
+        "event array), or have the router SSH into a LAN host that emits them. "
+        "Script contract same as nas_generic. Common type mapping: link down -> "
+        "net.device_offline, dial failure -> net.ping_loss, high CPU/memory -> "
+        "host.cpu_high/host.mem_high.";
     v.push_back(std::move(p));
   }
 
@@ -136,6 +184,7 @@ static std::vector<SourcePreset> buildPresets() {
     SourcePreset p;
     p.id = "ups_nut";
     p.label_zh = "UPS / NUT（自定义脚本）";
+    p.label_en = "UPS / NUT (custom script)";
     p.kind_hint = "http_poll";
     p.builtin_poll = false;
     p.config_template = makeIdentityTemplate("ups-poll", "http://ups-host.local:8888/alerts.json")
@@ -146,6 +195,14 @@ static std::vector<SourcePreset> buildPresets() {
         "ups.on_battery（市电中断，critical）、ups.battery_low（电池低，warning/critical）、"
         "ups.overload（过载，critical）；恢复时由 clear_after_misses 自动清除，"
         "或脚本显式发 state=cleared 事件。脚本契约同 nas_generic。";
+    p.notes_en =
+        "NUT (upsc/upscmd) is a text protocol with no HTTP JSON interface; direct "
+        "connection is not faked. Recommended: run a script on the UPS server "
+        "(poll upsc <ups> -> threshold check -> emit canonical event array): "
+        "ups.on_battery (mains loss, critical), ups.battery_low (low battery, "
+        "warning/critical), ups.overload (overload, critical); recovery "
+        "auto-clears via clear_after_misses, or the script explicitly sends a "
+        "state=cleared event. Script contract same as nas_generic.";
     v.push_back(std::move(p));
   }
 
@@ -154,6 +211,7 @@ static std::vector<SourcePreset> buildPresets() {
     SourcePreset p;
     p.id = "custom_json";
     p.label_zh = "自定义 JSON 端点";
+    p.label_en = "Custom JSON endpoint";
     p.kind_hint = "http_poll";
     p.builtin_poll = true;
     p.config_template =
@@ -163,6 +221,13 @@ static std::vector<SourcePreset> buildPresets() {
         "无需 field_map/severity_map。需要字段改名/严重度映射时在管理 UI 加 field_map "
         "（canonical←源路径，'.' 分层）与 severity_map。认证用 auth_token_ref "
         "（token 存 NVS sec 命名空间）；自签 TLS 显式 tls_verify=false。";
+    p.notes_en =
+        "Generic fallback template: the endpoint returns the canonical event "
+        "array (M11 §4 schema) directly, identity mapping, no field_map/"
+        "severity_map needed. Add field_map (canonical <- source path, '.' "
+        "layered) and severity_map in the admin UI when renaming fields or "
+        "mapping severities. Auth via auth_token_ref (token stored in the NVS "
+        "sec namespace); self-signed TLS requires explicit tls_verify=false.";
     v.push_back(std::move(p));
   }
 

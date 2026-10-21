@@ -81,6 +81,7 @@ idf.py -p /dev/cu.usbmodem* flash monitor     # Linux 为 /dev/ttyACM*
 | `POST /api/v1/alerts/{id}/ack` `/clear`、`POST /alerts/ack-all` | 确认 / 清除 |
 | `GET /api/v1/types` / `PUT /api/v1/types/{id}` | 告警类型注册表查询 / 覆盖 |
 | `POST /api/v1/sources/test` | 出网测试源（限速，不回显目标 body） |
+| `GET /api/v1/sources/presets` / `GET /sources/presets/{id}` | 来源预设查询（id/中英名称/接入方式/字段映射模板/中英能力说明；未知 id 404） |
 | `POST /api/v1/config/wifi` / `DELETE` | WiFi 账号增删（密码只入 NVS） |
 | `POST /api/v1/system/reboot` `/factory-reset` | 重启（`confirm:"REBOOT"`）/ 恢复出厂（双确认） |
 | `GET /api/v1/system/logs` | RAM 环形日志（安全事件，无 secrets） |
@@ -107,13 +108,28 @@ idf.py -p /dev/cu.usbmodem* flash monitor     # Linux 为 /dev/ttyACM*
 title ≤120、message ≤2000、fields ≤16 键；违反返回字段级 400。可选 `"state":
 "cleared"` 显式清除、`"ttl_s"` 自定义存活秒数（上限 366 天）。
 
-## 来源预设（http_poll）
+## 来源预设
 
-轮询源经管理 UI 或 `PUT /api/v1/config` 的 `sources[]` 配置。net_stack 内置
-7 个来源预设（`net_stack/source_presets.cpp`，含 `config_template` 起点配置与
-中文说明），预设只是 `SourceConfig` 起点，改 url/token/interval 后校验规则与
-手写一致。**注意**：预设目前为代码内置模板，管理 API/UI 的预设展示入口尚未
-接线（已知缺口，findings 记录在案），现阶段请按下表手工填写 `sources[]`：
+net_stack 内置 7 个来源预设（`net_stack/source_presets.cpp`）。管理 UI「来源」
+页可浏览/选择预设并一键「填入配置草稿」——草稿并入 `sources[]` 后自动跳到
+「配置」页继续编辑，保存仍走 `PUT /api/v1/config` 原有校验，不绕过任何配置
+检查。API 侧经 `GET /api/v1/sources/presets`（列表）与
+`GET /api/v1/sources/presets/{id}`（单个，未知 id 404）查询，返回字段：
+`id`、`label_zh`/`label_en`（中/英文名称）、`kind_hint`（推荐接入方式
+http_poll/http_push）、`builtin_poll`（设备原生解析=true / 脚本桥接=false）、
+`config_template`（SourceConfig 起点模板，http_push 预设为 null）、
+`notes`/`notes_en`（中/英文能力说明与脚本输出契约）。管理 UI 按当前
+zh/en 语言环境渲染预设名称与说明。预设只是 `SourceConfig` 起点，
+改 url/token/interval 后校验规则与手写配置完全一致。
+
+能力边界（不伪装支持）：
+
+- **设备原生支持**（`builtin_poll=true`）：`prometheus`、`custom_json` ——
+  模板开箱即可由固件直接解析。
+- **脚本桥接支持**（`builtin_poll=false`）：`home_assistant`、`grafana` 经
+  http_push 直推（面板侧无需 `sources[]` 项）；`nas_generic`、`openwrt`、
+  `ups_nut` 需按 `notes` 的脚本契约自建桥接脚本产出规范事件数组——固件不
+  直连 NUT/SNMP/ubus/各厂 NAS 私有 API。
 
 | 预设 id | 接入方式 | 说明 |
 |---|---|---|

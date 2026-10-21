@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 // alerts.db persistence: JSONL append + compaction (M11 §4: "SD alerts.db,

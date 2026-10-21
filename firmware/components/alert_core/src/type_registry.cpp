@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "alert_core/type_registry.h"
 
 #include <algorithm>

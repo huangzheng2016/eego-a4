@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 // Alert type registry: 39 built-in preset types + generic.any fallback (M11 §3).
