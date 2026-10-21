@@ -138,6 +138,7 @@ class MetricHistory {
   void addFixed(Series& series, const MetricSample& sample);
   void addWindowSample(Series& series, WindowKind kind, int64_t from_ms,
                        const MetricSample& sample, bool coverage_lost = false);
+  void propagateCoverageLoss(Series& series, const WindowKey& key);
   void pruneFixed(Series& series, int64_t cutoff_ms);
   AggregationResult aggregateFixed(const Series& series, WindowKind kind,
                                    const ResolvedWindow& window, Aggregation aggregation) const;

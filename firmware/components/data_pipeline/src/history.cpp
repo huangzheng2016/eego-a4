@@ -20,6 +20,15 @@ int64_t floorUnit(int64_t value, int64_t unit) {
 
 int64_t floorDay(int64_t value) { return floorUnit(value, kDayMs); }
 
+int64_t windowEnd(WindowKind kind, int64_t from_ms) {
+  const int64_t duration = kind == WindowKind::Fixed5h ? 5 * kHourMs
+                           : kind == WindowKind::Fixed7d ? 7 * kDayMs
+                                                         : kDayMs;
+  return from_ms > std::numeric_limits<int64_t>::max() - duration
+             ? std::numeric_limits<int64_t>::max()
+             : from_ms + duration;
+}
+
 void appendKey(std::string& key, std::string_view value) {
   key += std::to_string(value.size());
   key.push_back(':');
@@ -265,6 +274,35 @@ AggregationResult incompleteAggregate() {
 MetricHistory::MetricHistory(HistoryLimits limits, int32_t timezone_offset_minutes)
     : limits_(sanitize(limits)), timezone_offset_minutes_(timezone_offset_minutes) {}
 
+void MetricHistory::propagateCoverageLoss(Series& series, const WindowKey& key) {
+  const auto overlaps = [](const WindowAccumulator& state, const WindowKey& window) {
+    if (state.count == 0 && state.first_timestamp_ms == 0 && state.last_timestamp_ms == 0) {
+      return false;
+    }
+    return state.first_timestamp_ms <= windowEnd(window.kind, window.from_ms) &&
+           state.last_timestamp_ms >= window.from_ms;
+  };
+  WindowAccumulator& state = series.windows.at(key);
+  bool coverage_lost = state.coverage_lost;
+  for (const auto& candidate : series.windows) {
+    if (&candidate.second == &state || !candidate.second.coverage_lost ||
+        !candidate.second.samples.empty()) {
+      continue;
+    }
+    if (overlaps(candidate.second, key)) {
+      coverage_lost = true;
+      break;
+    }
+  }
+  if (!coverage_lost) return;
+  state.coverage_lost = true;
+  if (!state.samples.empty()) return;
+  for (auto& candidate : series.windows) {
+    if (&candidate.second == &state) continue;
+    if (overlaps(state, candidate.first)) candidate.second.coverage_lost = true;
+  }
+}
+
 void MetricHistory::addWindowSample(Series& series, WindowKind kind, int64_t from_ms,
                                     const MetricSample& sample, bool coverage_lost) {
   const WindowKey key{kind, from_ms};
@@ -289,6 +327,7 @@ void MetricHistory::addWindowSample(Series& series, WindowKind kind, int64_t fro
   }
   WindowAccumulator& state = it->second;
   state.coverage_lost = state.coverage_lost || coverage_lost;
+  propagateCoverageLoss(series, key);
   auto position = std::lower_bound(state.samples.begin(), state.samples.end(), sample.timestamp_ms,
                                    [](const std::pair<int64_t, double>& point, int64_t timestamp) {
                                      return point.first < timestamp;
@@ -308,6 +347,7 @@ void MetricHistory::addWindowSample(Series& series, WindowKind kind, int64_t fro
     if (sample.timestamp_ms == state.first_timestamp_ms) state.first_value = sample.value;
     if (sample.timestamp_ms == state.last_timestamp_ms) state.last_value = sample.value;
     if (!std::isfinite(state.sum)) state.coverage_lost = true;
+    if (state.coverage_lost) propagateCoverageLoss(series, key);
     return;
   }
   // Inclusive endpoints at the fastest supported 1s cadence; faster data is explicitly incomplete.
@@ -316,6 +356,7 @@ void MetricHistory::addWindowSample(Series& series, WindowKind kind, int64_t fro
                            : kind == WindowKind::Fixed5h ? 18001 : 604801;
   if (state.samples.size() >= limit) {
     state.coverage_lost = true;
+    propagateCoverageLoss(series, key);
     return;
   }
   state.samples.insert(position, {sample.timestamp_ms, sample.value});
@@ -341,6 +382,7 @@ void MetricHistory::addWindowSample(Series& series, WindowKind kind, int64_t fro
     }
   }
   if (!std::isfinite(state.sum)) state.coverage_lost = true;
+  if (state.coverage_lost) propagateCoverageLoss(series, key);
 }
 
 void MetricHistory::addFixed(Series& series, const MetricSample& sample) {
@@ -635,6 +677,7 @@ bool MetricHistory::replaceSource(const std::string& source_id,
       series.windows[window_key] = state;
     }
     if (entry.coverage_lost) series.windows[window_key].coverage_lost = true;
+    propagateCoverageLoss(series, window_key);
     series.fixed_gap = series.fixed_gap || entry.fixed_gap;
   }
   prune(now_ms);
@@ -770,8 +813,8 @@ std::vector<HistoryEntry> MetricHistory::entries(const std::string& source_id) c
     }
     struct Coverage {
       MetricSample sample;
-      std::vector<WindowKey> windows;
-      bool coverage_lost = false;
+      std::vector<std::pair<WindowKey, bool>> windows;
+      bool conflict = false;
     };
     std::map<int64_t, Coverage> coverage;
     for (const auto& window : series.windows) {
@@ -786,10 +829,9 @@ std::vector<HistoryEntry> MetricHistory::entries(const std::string& source_id) c
           item.sample.timestamp_ms = point.first;
           item.sample.value = point.second;
         } else if (item.sample.value != point.second) {
-          item.coverage_lost = true;
+          item.conflict = true;
         }
-        item.windows.push_back(window.first);
-        item.coverage_lost = item.coverage_lost || state.coverage_lost;
+        item.windows.emplace_back(window.first, state.coverage_lost);
       }
       if (state.samples.empty()) {
         HistoryEntry entry;
@@ -819,27 +861,38 @@ std::vector<HistoryEntry> MetricHistory::entries(const std::string& source_id) c
     }
     for (const auto& item : coverage) {
       const Coverage& coverage_sample = item.second;
-      HistoryEntry entry;
-      entry.sample = coverage_sample.sample;
-      entry.reset_at_ms = series.reset_at_ms;
-      entry.count = 1;
-      entry.sum = entry.sample.value;
-      entry.min = entry.sample.value;
-      entry.max = entry.sample.value;
-      entry.first_value = entry.sample.value;
-      entry.last_value = entry.sample.value;
-      entry.first_timestamp_ms = entry.sample.timestamp_ms;
-      entry.aggregated = true;
-      entry.window_state = true;
-      entry.coverage_sample = true;
-      entry.window_kind = coverage_sample.windows.front().kind;
-      entry.window_from_ms = coverage_sample.windows.front().from_ms;
-      for (const WindowKey& window : coverage_sample.windows)
-        entry.coverage_windows.emplace_back(window.kind, window.from_ms);
-      entry.raw_gap_before_ms = series.raw_gap_before_ms;
-      entry.fixed_gap = series.fixed_gap;
-      entry.coverage_lost = coverage_sample.coverage_lost;
-      out.push_back(std::move(entry));
+      HistoryEntry healthy;
+      HistoryEntry lost;
+      const auto initialize = [&](HistoryEntry& entry, bool coverage_lost) {
+        entry.sample = coverage_sample.sample;
+        entry.reset_at_ms = series.reset_at_ms;
+        entry.count = 1;
+        entry.sum = entry.sample.value;
+        entry.min = entry.sample.value;
+        entry.max = entry.sample.value;
+        entry.first_value = entry.sample.value;
+        entry.last_value = entry.sample.value;
+        entry.first_timestamp_ms = entry.sample.timestamp_ms;
+        entry.aggregated = true;
+        entry.window_state = true;
+        entry.coverage_sample = true;
+        entry.raw_gap_before_ms = series.raw_gap_before_ms;
+        entry.fixed_gap = series.fixed_gap;
+        entry.coverage_lost = coverage_lost;
+      };
+      initialize(healthy, false);
+      initialize(lost, true);
+      for (const auto& window : coverage_sample.windows) {
+        const bool coverage_lost = window.second || coverage_sample.conflict;
+        HistoryEntry& entry = coverage_lost ? lost : healthy;
+        if (entry.coverage_windows.empty()) {
+          entry.window_kind = window.first.kind;
+          entry.window_from_ms = window.first.from_ms;
+        }
+        entry.coverage_windows.emplace_back(window.first.kind, window.first.from_ms);
+      }
+      if (!healthy.coverage_windows.empty()) out.push_back(std::move(healthy));
+      if (!lost.coverage_windows.empty()) out.push_back(std::move(lost));
     }
   }
   return out;
