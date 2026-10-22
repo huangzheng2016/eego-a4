@@ -12,9 +12,11 @@
 #include "admin/admin.h"
 #include "admin/provision_portal.h"
 #include "alert_core/types.h"
+#include "ble/ble_manager.h"
 #include "driver/gpio.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -42,7 +44,7 @@ constexpr uint32_t kNetBitSource = 1u << 1;
 constexpr uint32_t kPollWaitMs = 45000;
 constexpr uint32_t kRenderThrottleMs = 250;
 constexpr uint32_t kClockRenderMs = 30000;
-constexpr size_t kSettingsRowCount = 28;
+constexpr size_t kSettingsRowCount = 30;
 constexpr size_t kSettingsPageRows = 8;
 
 constexpr uint32_t kDashboardPollWaitMs = 130000;
@@ -154,6 +156,12 @@ void PanelApp::applySettings(uint32_t changed) {
       awakeDeadlineMs_ = nowMs() + static_cast<int64_t>(settings_.idle_sleep_s) * 1000;
     }
   }
+  if ((changed & eego::settings::kChangedBle) != 0) {
+    eego::ble::BleManager::instance().configure(settings_);
+  }
+  if ((changed & (eego::settings::kChangedPower | eego::settings::kChangedBle)) != 0) {
+    eego::ble::BleManager::instance().onPowerMode(mains_);
+  }
   markDirty((changed & (eego::settings::kChangedLanguage |
                         eego::settings::kChangedTimezone)) != 0);
 }
@@ -166,7 +174,10 @@ void PanelApp::onSettingsChanged(const eego::settings::Settings& values, uint32_
 }
 
 uint64_t PanelApp::nextWakeAt(int64_t now_ms) const {
-  if (admin::ProvisionPortal::instance().apActive()) return 0;
+  if (admin::ProvisionPortal::instance().apActive() ||
+      eego::ble::BleManager::instance().sleepBlocked()) {
+    return 0;
+  }
   const uint64_t now_unix = TimeSource::now();
   uint64_t wake_at = 0;
   uint32_t remaining = 0;
@@ -277,11 +288,25 @@ void PanelApp::service() {
   const bool wantMains = computeMains();
   if (wantMains != mains_) onModeChange(wantMains);
   dashboard_.service(mains_);
+  eego::ble::BleManager::instance().service(mains_);
+  const eego::ble::Status ble_status = eego::ble::BleManager::instance().status();
+  if (ble_status.role != eego::ble::Role::Provisioning) {
+    clearBlePop();
+    if (bleProvisionWasActive_) {
+      bleProvisionWasActive_ = false;
+      showBanner(ble_status.provisioning == eego::ble::ProvisionState::Succeeded
+                     ? tr(Str::BleProvSuccess)
+                     : tr(Str::BleProvFailed),
+                 5000);
+    }
+  }
   if (page_ == Page::Dashboard && dashboard_.consumeExitRequest()) gotoPage(Page::Overview);
 
   if (now - lastScheduleCheckMs_ > 1000) {
     lastScheduleCheckMs_ = now;
-    if (!admin::ProvisionPortal::instance().apActive()) {
+    if (ble_status.role == eego::ble::Role::Provisioning) markDirty();
+    if (!admin::ProvisionPortal::instance().apActive() &&
+        !eego::ble::BleManager::instance().sleepBlocked()) {
       uint64_t wake_at = 0;
       uint32_t remaining = 0;
       if (eego::settings::scheduledSleep(settings_, nowUnix(), wake_at, remaining)) {
@@ -1085,7 +1110,16 @@ void PanelApp::activateSettingRow(size_t row) {
     }
     case 1: armConfirm(ConfirmKind::NetworkRecovery); break;
     case 2: armConfirm(ConfirmKind::WifiReset); break;
-    case 3: showBanner(tr(Str::Unavailable), 3000); break;
+    case 3:
+      if (eego::ble::BleManager::instance().provisioningActive()) {
+        eego::ble::BleManager::instance().cancelProvisioning();
+        clearBlePop();
+        bleProvisionWasActive_ = false;
+        showBanner(tr(Str::BleProvFailed), 3000);
+      } else {
+        armConfirm(ConfirmKind::BleProvision);
+      }
+      break;
     case 4:
       next.language = settings_.language == "zh" ? "en" : "zh";
       updateSettings(next);
@@ -1231,6 +1265,11 @@ void PanelApp::activateSettingRow(size_t row) {
       gotoPage(Page::Help);
       break;
     case 27: resetInputBindings(); break;
+    case 28:
+      next.ble_observer_enabled = !settings_.ble_observer_enabled;
+      updateSettings(next);
+      break;
+    case 29: armConfirm(ConfirmKind::BleUnbind); break;
     default: break;
   }
 }
@@ -1240,12 +1279,57 @@ void PanelApp::doOpenRecovery() {
   if (!admin::ProvisionPortal::instance().apActive()) {
     err = admin::ProvisionPortal::instance().openApFallback();
   }
-  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+  if (err != ESP_OK &&
+      !(err == ESP_ERR_INVALID_STATE && admin::ProvisionPortal::instance().apActive())) {
     showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), esp_err_to_name(err));
     return;
   }
   awakeDeadlineMs_ = nowMs() + 600000;
   showBanner(tr(Str::RecoveryApStarted), 7000);
+  markDirty(true);
+}
+
+void PanelApp::clearBlePop() {
+  if (blePop_.empty()) return;
+  volatile uint8_t* data = reinterpret_cast<volatile uint8_t*>(blePop_.data());
+  for (size_t i = 0; i < blePop_.size(); i++) data[i] = 0;
+  blePop_.clear();
+  markDirty();
+}
+
+void PanelApp::doStartBleProvision() {
+  if (admin::ProvisionPortal::instance().apActive()) {
+    showBanner(tr(Str::Unavailable), 3000);
+    return;
+  }
+  char pop[9];
+  std::snprintf(pop, sizeof(pop), "%08lu",
+                static_cast<unsigned long>(esp_random() % 100000000UL));
+  blePop_ = pop;
+  volatile uint8_t* data = reinterpret_cast<volatile uint8_t*>(pop);
+  for (size_t i = 0; i < sizeof(pop); i++) data[i] = 0;
+  const esp_err_t err = eego::ble::BleManager::instance().startProvisioningFromLocal(blePop_);
+  if (err != ESP_OK) {
+    clearBlePop();
+    showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), esp_err_to_name(err));
+    return;
+  }
+  bleProvisionWasActive_ = true;
+  focus_ = 3;
+  awakeDeadlineMs_ = nowMs() + 180000;
+  showBanner(tr(Str::BleProvStarted), 7000);
+  markDirty(true);
+}
+
+void PanelApp::doClearBleBonds() {
+  bleProvisionWasActive_ = false;
+  const esp_err_t err = eego::ble::BleManager::instance().clearBonds();
+  if (err == ESP_OK) {
+    clearBlePop();
+    showBanner(tr(Str::BleUnbindDone), 4000);
+  } else {
+    showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), esp_err_to_name(err));
+  }
   markDirty(true);
 }
 
@@ -1355,6 +1439,8 @@ void PanelApp::executeArmedConfirm() {
     case ConfirmKind::NetworkRecovery: doOpenRecovery(); break;
     case ConfirmKind::WifiReset: doWifiReset(); break;
     case ConfirmKind::FactoryReset: doFactoryReset(); break;
+    case ConfirmKind::BleProvision: doStartBleProvision(); break;
+    case ConfirmKind::BleUnbind: doClearBleBonds(); break;
     default: break;
   }
   clearConfirm();
@@ -1485,6 +1571,8 @@ void PanelApp::onModeChange(bool mains) {
   dashboard_.setMains(mains);
   ESP_LOGI(TAG, "power mode -> %s", mains ? "mains" : "battery");
   NetStack::instance().wifi().setPowerSave(mains);  // 常供电 modem-sleep
+  eego::ble::BleManager::instance().onPowerMode(mains);
+  eego::ble::BleManager::instance().setBatteryScanWindow(false);
   if (mains) {
     battPhase_ = BattPhase::Mains;
     batteryPollStarted_ = false;
@@ -1501,7 +1589,8 @@ void PanelApp::onModeChange(bool mains) {
 }
 
 void PanelApp::batteryFsm(int64_t now) {
-  if (admin::ProvisionPortal::instance().apActive()) {
+  if (admin::ProvisionPortal::instance().apActive() ||
+      eego::ble::BleManager::instance().provisioningActive()) {
     if (battPhase_ == BattPhase::Serving) awakeDeadlineMs_ = now + 60000;
     return;
   }
@@ -1533,6 +1622,7 @@ void PanelApp::batteryFsm(int64_t now) {
         }
       }
       battPhase_ = BattPhase::Serving;
+      eego::ble::BleManager::instance().setBatteryScanWindow(true);
       awakeDeadlineMs_ = now + static_cast<int64_t>(settings_.idle_sleep_s) * 1000;
       markDirty(true);
       return;
@@ -1574,6 +1664,15 @@ void PanelApp::enterSleep(int64_t now, int64_t durationMs) {
   if (!NetStack::instance().waitIdle(10000) &&
       !NetStack::instance().waitIdle(5000)) {
     ESP_LOGW(TAG, "net not idle after retries, sleep aborted this round");
+    battPhase_ = mains_ ? BattPhase::Mains : BattPhase::Serving;
+    awakeDeadlineMs_ = now + 30000;
+    lastScheduleCheckMs_ = now + 30000;
+    applySettings(eego::settings::kChangedFrontlight);
+    markDirty();
+    return;
+  }
+  if (eego::ble::BleManager::instance().beforeSleep() != ESP_OK) {
+    ESP_LOGW(TAG, "BLE stop failed; sleep aborted this round");
     battPhase_ = mains_ ? BattPhase::Mains : BattPhase::Serving;
     awakeDeadlineMs_ = now + 30000;
     lastScheduleCheckMs_ = now + 30000;
@@ -2158,7 +2257,16 @@ void PanelApp::buildS4(S4Model& m) {
     add(Str::SetRecoveryAp, tr(Str::Off), true);
   }
   add(Str::SetWifiReset, "", true);
-  add(Str::SetBluetooth, tr(Str::Unavailable), false);
+  const eego::ble::Status ble_runtime = eego::ble::BleManager::instance().status();
+  if (!ble_runtime.compiled) {
+    add(Str::SetBluetooth, tr(Str::Unavailable), false);
+  } else if (ble_runtime.role == eego::ble::Role::Provisioning) {
+    snprintf(buf, sizeof(buf), "%s  %us", blePop_.c_str(),
+             static_cast<unsigned>(ble_runtime.provisioning_remaining_s));
+    add(Str::SetBluetooth, buf, true);
+  } else {
+    add(Str::SetBluetooth, tr(Str::Off), true);
+  }
   add(Str::SetLanguage, settings_.language == "zh" ? tr(Str::LangZh) : tr(Str::LangEn), false);
   const int offset = settings_.timezone_offset_min;
   snprintf(buf, sizeof(buf), "UTC%c%02d:%02d", offset < 0 ? '-' : '+', abs(offset) / 60,
@@ -2234,6 +2342,19 @@ void PanelApp::buildS4(S4Model& m) {
   add(Str::Version, esp_app_get_description()->version, false);
   add(Str::SetInputHelp, "", false);
   add(Str::SetInputReset, "", true);
+  if (!ble_runtime.compiled) {
+    add(Str::SetBleObserver, tr(Str::Unavailable), false);
+    add(Str::SetBleUnbind, tr(Str::Unavailable), false);
+  } else {
+    if (ble_runtime.role == eego::ble::Role::Observer) {
+      snprintf(buf, sizeof(buf), "%s %us", tr(Str::On),
+               static_cast<unsigned>(ble_runtime.observer_remaining_s));
+      add(Str::SetBleObserver, buf, false);
+    } else {
+      add(Str::SetBleObserver, settings_.ble_observer_enabled ? tr(Str::On) : tr(Str::Off), false);
+    }
+    add(Str::SetBleUnbind, "", true);
+  }
 
   m.pageCount = (m.rows.size() + kSettingsPageRows - 1) / kSettingsPageRows;
   m.page = focus_ / kSettingsPageRows;

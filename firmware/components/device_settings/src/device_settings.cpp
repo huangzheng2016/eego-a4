@@ -17,7 +17,7 @@ constexpr char kTag[] = "settings";
 constexpr char kNvsNamespace[] = "device";
 constexpr char kNvsRecordKey[] = "prefs";
 constexpr char kLegacyNamespace[] = "ui";
-constexpr size_t kMaxRecordBytes = 2048;
+constexpr size_t kMaxRecordBytes = 4000;
 
 esp_err_t ensureNvs() {
   const esp_err_t err = nvs_flash_init();
@@ -206,6 +206,11 @@ bool DeviceSettings::update(const Settings& candidate, uint32_t* changed, std::s
   }
   if ((mask & kChangedFrontlight) != 0 && !capabilities_.frontlight) {
     error = "frontlight hardware is unavailable";
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
+    return false;
+  }
+  if (candidate.ble_observer_enabled && !capabilities_.ble_observer) {
+    error = "BLE observer is unavailable in this firmware";
     xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
     return false;
   }

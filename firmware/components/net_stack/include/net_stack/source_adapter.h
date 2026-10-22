@@ -7,9 +7,9 @@
 // 过期语义全部在 alert_core）；适配器不碰 UI、不做渲染、不直接调
 // esp_http_client（出站一律经 HttpPool）。
 //
-// 扩展点（首版只注册 http_poll；其余 kind 保留注册位，实现后装不触碰 net_task）：
-//   * ble_scan      —— NimBLE observer 解析广播 → AlertEvent（跑独立任务，
-//                      只经 NetStack::ingestExternal 投递，无需 HTTP 会话）
+// 扩展点（轮询适配器与外部摄入后装均不触碰 net_task 属主边界）：
+//   * ble_scan      —— ble 组件 NimBLE observer 解析广播 → AlertEvent；
+//                      只经 NetStack::ingestExternal 投递，无需 HTTP 会话
 //   * web_chart     —— 产 ChartSeries 而非 AlertRecord 的姊妹接口（DataSource），
 //                      由 UI 侧消费，不经告警 ingest
 //   * serial_inject —— 串口注入告警（诊断/主机 mock），不是轮询适配器：

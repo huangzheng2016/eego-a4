@@ -10,6 +10,7 @@
 
 #include "admin_internal.h"
 #include "admin/input_bindings.h"
+#include "ble/ble_manager.h"
 #include "config_transaction.h"
 #include "device_settings/device_settings.h"
 #include "esp_timer.h"
@@ -387,6 +388,11 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
     }
 
     case AdminCommandType::WifiReset: {
+      if (ble::BleManager::instance().provisioningActive()) {
+        res.ok = false;
+        res.err = "close BLE provisioning before WiFi reset";
+        return;
+      }
       ADMIN_LOG_WARN("wifi-only reset executing");
       if (net::CredentialStore::clearWifiAccounts() != ESP_OK) {
         res.ok = false;
@@ -400,7 +406,8 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       }
       net::NetStack::instance().reconnectNow();
       const esp_err_t ap_err = ProvisionPortal::instance().openApFallback();
-      if (ap_err != ESP_OK && ap_err != ESP_ERR_INVALID_STATE) {
+      if (ap_err != ESP_OK &&
+          !(ap_err == ESP_ERR_INVALID_STATE && ProvisionPortal::instance().apActive())) {
         res.ok = false;
         res.err = "wifi credentials cleared but recovery AP failed";
         return;
@@ -416,9 +423,13 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
         return;
       }
       ADMIN_LOG_WARN("factory reset executing");
-      net::NetStack::instance().stop();
       bool ok = true;
-      for (const char* ns : {"sec", "wifi", "ui", "ble", "dashboard"}) {
+      if (ble::BleManager::instance().clearBonds() != ESP_OK) {
+        ADMIN_LOG_ERROR("factory reset: BLE stop/bond clear failed");
+        ok = false;
+      }
+      net::NetStack::instance().stop();
+      for (const char* ns : {"sec", "wifi", "ui", "ble", "nimble_bond", "dashboard"}) {
         if (net::CredentialStore::clearNamespace(ns) != ESP_OK) {
           ADMIN_LOG_ERROR("factory reset: clear namespace failed: %s", ns);
           ok = false;
@@ -444,6 +455,13 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       }
       res.ok = true;
       scheduleReboot(cmd.delay_ms > 0 ? cmd.delay_ms : 2000);
+      return;
+    }
+
+    case AdminCommandType::BleClearBonds: {
+      const esp_err_t err = ble::BleManager::instance().clearBonds();
+      res.ok = err == ESP_OK;
+      if (!res.ok) res.err = "BLE stop/bond clear failed";
       return;
     }
 

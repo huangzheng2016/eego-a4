@@ -126,7 +126,13 @@ enum class Lang : uint8_t {
   X(SetNetwork, "网络", "NETWORK") \
   X(SetRecoveryAp, "网络恢复 AP", "RECOVERY AP") \
   X(SetWifiReset, "仅重置 WiFi", "WIFI-ONLY RESET") \
-  X(SetBluetooth, "蓝牙状态", "BLUETOOTH") \
+  X(SetBluetooth, "BLE 配网 / PoP", "BLE SETUP / POP") \
+  X(SetBleObserver, "BLE 传感扫描", "BLE SENSOR SCAN") \
+  X(SetBleUnbind, "BLE 解绑 / 清 bond", "BLE CLEAR BONDS") \
+  X(BleProvStarted, "手机 BLE 配网；输入本机 PoP", "USE BLE APP; ENTER LOCAL POP") \
+  X(BleProvSuccess, "BLE 配网成功", "BLE PROVISIONING SUCCEEDED") \
+  X(BleProvFailed, "BLE 配网失败或已取消", "BLE PROVISIONING FAILED/CLOSED") \
+  X(BleUnbindDone, "BLE bond 已清除", "BLE BONDS CLEARED") \
   X(SetTimezone, "时区", "TIMEZONE") \
   X(SetBrightness, "前光亮度", "BRIGHTNESS") \
   X(SetWarmth, "前光色温", "WARMTH") \

@@ -23,6 +23,7 @@
 //   * 电池唤醒：reconnectNow() → pollNow("") → waitIdle() → 读结果 → powerOff。
 //     轮询/缓存/清除语义完全一致（cache/<source>.json 离线缓存两模式共用）。
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -114,6 +115,9 @@ class NetStack {
   bool setDataRefreshInterval(uint32_t interval_ms, uint32_t wait_ms = 5000);
   // 电池唤醒：立即重置 WiFi 退避并发起连接（不等待结果）
   bool reconnectNow(uint32_t wait_ms = 1000);
+  // BLE wifi_prov 验证新凭据期间暂停自动重连，释放后立即恢复既有调度。
+  void setWifiProvisioningHold(bool active) { wifi_provisioning_hold_.store(active); }
+  bool wifiProvisioningHold() const { return wifi_provisioning_hold_.load(); }
 
   // ---- 查询（线程安全快照）----
   bool queryStatus(NetStatusSnapshot& out, uint32_t wait_ms = 1000);
@@ -168,7 +172,7 @@ class NetStack {
   PushResult pushIngest(const std::string& body, const std::string& sender,
                         uint32_t wait_ms = 5000);
 
-  // ---- 外部摄入统一入口（serial inject / ble_scan 预留注册点）----
+  // ---- 外部摄入统一入口（serial inject / ble_scan observer）----
   // 事件已经 alert_core::eventsFromJsonText 或等价校验；net_task 执行 ingest。
   bool ingestExternal(const std::vector<alert_core::AlertEvent>& events,
                       const alert_core::AlertSource& source, uint32_t wait_ms = 5000);
@@ -222,6 +226,7 @@ class NetStack {
   NetEventCallback event_cb_ = nullptr;
   void* event_ctx_ = nullptr;
   bool running_ = false;
+  std::atomic<bool> wifi_provisioning_hold_{false};
 
   // 命令入队（payload 共享所有权，net_task 处理完才释放最后引用）。
   bool sendCmdAndWait(CmdType type, const std::shared_ptr<void>& payload, uint32_t wait_ms);

@@ -35,6 +35,7 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES
         alert_core
+        ble
         dashboard_core
         data_pipeline
         device_settings

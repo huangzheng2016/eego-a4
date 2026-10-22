@@ -14,6 +14,7 @@
 #include "admin_internal.h"
 #include "admin/admin_auth.h"
 #include "admin/admin_log.h"
+#include "ble/ble_manager.h"
 #include "esp_http_server.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
@@ -488,11 +489,14 @@ esp_err_t ProvisionPortal::open() {
   if (portal_running_) return ESP_ERR_INVALID_STATE;
   // 80 端口互斥（防御性检查；模式判定本就在 app_task 上下文）
   if (adminApiRunning()) return ESP_ERR_INVALID_STATE;
+  if (!ble::BleManager::instance().beginRecoveryAp()) return ESP_ERR_INVALID_STATE;
 
   esp_err_t err = AuthManager::instance().init();  // NVS 就绪（幂等）
-  if (err != ESP_OK) return err;
-  err = startAp();
-  if (err != ESP_OK) return err;
+  if (err == ESP_OK) err = startAp();
+  if (err != ESP_OK) {
+    ble::BleManager::instance().endRecoveryAp();
+    return err;
+  }
 
   // 注册配网 STA 事件（与 WifiManager 并存，互不干扰）
   esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &wifiEventHandler,
@@ -530,6 +534,7 @@ esp_err_t ProvisionPortal::open() {
       sta_handler_registered_ = false;
     }
     stopAp();
+    ble::BleManager::instance().endRecoveryAp();
     return err;
   }
 
@@ -569,6 +574,7 @@ void ProvisionPortal::close(const char* reason) {
     sta_handler_registered_ = false;
   }
   stopAp();
+  ble::BleManager::instance().endRecoveryAp();
   prov_wifi_pass_.clear();   // 明文密码不滞留
   prov_admin_pass_.clear();
   ADMIN_LOG_WARN("provision portal closed (%s)", reason != nullptr ? reason : "");
@@ -580,8 +586,12 @@ void ProvisionPortal::close(const char* reason) {
 // ---------------------------------------------------------------------------
 esp_err_t ProvisionPortal::openApFallback() {
   if (fallback_running_ || portal_running_) return ESP_ERR_INVALID_STATE;
-  esp_err_t err = startAp();
-  if (err != ESP_OK) return err;
+  if (!ble::BleManager::instance().beginRecoveryAp()) return ESP_ERR_INVALID_STATE;
+  const esp_err_t err = startAp();
+  if (err != ESP_OK) {
+    ble::BleManager::instance().endRecoveryAp();
+    return err;
+  }
   fallback_running_ = true;
   startWindowTimer(false);  // 固定 10 分钟窗口，无活动重置（M13 F2）
   ADMIN_LOG_WARN("ap fallback opened (window 10min, ssid=%s)", kApSsid);
@@ -594,6 +604,7 @@ void ProvisionPortal::closeApFallback(const char* reason) {
   fallback_running_ = false;
   stopWindowTimer();
   stopAp();
+  ble::BleManager::instance().endRecoveryAp();
   ADMIN_LOG_WARN("ap fallback closed (%s)", reason != nullptr ? reason : "");
   emitAdminEvent({AdminEventType::ApFallbackClosed, reason != nullptr ? reason : "", 0});
 }

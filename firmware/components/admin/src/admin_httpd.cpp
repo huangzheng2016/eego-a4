@@ -30,6 +30,7 @@
 
 #include "admin_internal.h"
 #include "admin/input_bindings.h"
+#include "ble/ble_manager.h"
 #include "admin_page.h"
 #include "dashboard_api.h"
 #include "dashboard_page.h"
@@ -1061,6 +1062,7 @@ esp_err_t h_settings_get(httpd_req_t* req) {
   using alert_core::JsonValue;
   const settings::Snapshot snap = settings::DeviceSettings::instance().snapshot();
   const settings::Capabilities& cap = snap.capabilities;
+  const ble::Status ble_state = ble::BleManager::instance().status();
   uint64_t wake_at = 0;
   uint32_t remaining = 0;
   const int64_t now = static_cast<int64_t>(time(nullptr));
@@ -1075,15 +1077,38 @@ esp_err_t h_settings_get(httpd_req_t* req) {
       {"recovery_ap_active", JsonValue::makeBool(ProvisionPortal::instance().apActive())},
       {"recovery_window_remaining_s",
        JsonValue::makeInt(ProvisionPortal::instance().windowRemainingMs() / 1000)},
-      {"auto_sleep_suspended", JsonValue::makeBool(ProvisionPortal::instance().apActive())},
+      {"auto_sleep_suspended",
+       JsonValue::makeBool(ProvisionPortal::instance().apActive() || ble_state.stack_active)},
   });
   const JsonValue capabilities = JsonValue::makeObject({
       {"frontlight", JsonValue::makeBool(cap.frontlight)},
       {"battery", JsonValue::makeBool(cap.battery)},
       {"bluetooth", JsonValue::makeBool(cap.bluetooth)},
+      {"ble_provisioning", JsonValue::makeBool(cap.ble_provisioning)},
+      {"ble_observer", JsonValue::makeBool(cap.ble_observer)},
       {"display", JsonValue::makeBool(cap.display)},
       {"sd", JsonValue::makeBool(cap.sd)},
       {"rtc", JsonValue::makeBool(cap.rtc)},
+  });
+  const JsonValue ble_json = JsonValue::makeObject({
+      {"compiled", JsonValue::makeBool(ble_state.compiled)},
+      {"stack_active", JsonValue::makeBool(ble_state.stack_active)},
+      {"role", JsonValue::makeString(ble::roleName(ble_state.role))},
+      {"provisioning_state", JsonValue::makeString(ble::provisionStateName(ble_state.provisioning))},
+      {"provisioning_remaining_s", JsonValue::makeInt(ble_state.provisioning_remaining_s)},
+      {"observer_enabled", JsonValue::makeBool(snap.values.ble_observer_enabled)},
+      {"observer_remaining_s", JsonValue::makeInt(ble_state.observer_remaining_s)},
+      {"recovery_ap_active", JsonValue::makeBool(ble_state.recovery_ap_active)},
+      {"deep_sleep_realtime", JsonValue::makeBool(false)},
+      {"dropped_advertisements", JsonValue::makeInt(ble_state.dropped_advertisements)},
+      {"duplicate_advertisements", JsonValue::makeInt(ble_state.duplicate_advertisements)},
+      {"malformed_advertisements", JsonValue::makeInt(ble_state.malformed_advertisements)},
+      {"emitted_events", JsonValue::makeInt(ble_state.emitted_events)},
+      {"ingest_errors", JsonValue::makeInt(ble_state.ingest_errors)},
+      {"diram_free_bytes", JsonValue::makeInt(ble_state.diram_free_bytes)},
+      {"diram_min_free_bytes", JsonValue::makeInt(ble_state.diram_min_free_bytes)},
+      {"psram_free_bytes", JsonValue::makeInt(ble_state.psram_free_bytes)},
+      {"last_error", JsonValue::makeString(ble_state.last_error)},
   });
   return sendJson(req, 200,
                   JsonValue::makeObject({
@@ -1093,8 +1118,28 @@ esp_err_t h_settings_get(httpd_req_t* req) {
                       {"settings", settings::toJson(snap.values)},
                       {"capabilities", capabilities},
                       {"power", power},
+                      {"ble", ble_json},
                   })
                       .toString());
+}
+
+esp_err_t h_ble_unbind(httpd_req_t* req) {
+  if (!contentTypeJsonOk(req)) {
+    return sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
+  }
+  std::string body;
+  if (readBodyBudget(req, kBodyBudgetLogin, body) != 0) return ESP_OK;
+  alert_core::JsonValue root;
+  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (root.type() != alert_core::JsonValue::Type::Object || !root.objectItems().empty()) {
+    return sendError(req, 400, errc::kInvalidRequest, "unbind requires an empty object");
+  }
+  AdminCommand cmd;
+  cmd.type = AdminCommandType::BleClearBonds;
+  AdminResult res;
+  if (!runCommand(req, cmd, res)) return ESP_OK;
+  ADMIN_LOG_WARN("BLE bonds cleared via api");
+  return sendJson(req, 200, "{\"status\":\"cleared\"}");
 }
 
 esp_err_t h_settings_schema(httpd_req_t* req) {
@@ -1122,6 +1167,10 @@ esp_err_t h_settings_put(httpd_req_t* req) {
   if ((settings::changedFields(snap.values, candidate) & settings::kChangedFrontlight) != 0 &&
       !snap.capabilities.frontlight) {
     FieldErrors errors = fieldErr("frontlight_enabled", "frontlight hardware is unavailable");
+    return sendError(req, 400, errc::kValidationFailed, "settings validation failed", &errors);
+  }
+  if (candidate.ble_observer_enabled && !snap.capabilities.ble_observer) {
+    FieldErrors errors = fieldErr("ble_observer_enabled", "BLE observer is unavailable");
     return sendError(req, 400, errc::kValidationFailed, "settings validation failed", &errors);
   }
 
@@ -1697,6 +1746,11 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
       if (!bearer()) return ESP_OK;
       if (!rateLimit(req, "input-write:" + token.substr(0, 8), 60, 30)) return ESP_OK;
       return h_input_bindings_write(req, true);
+    }
+    if (strcmp(path, "settings/ble/unbind") == 0) {
+      if (!bearer()) return ESP_OK;
+      if (!rateLimit(req, "ble-unbind:" + token.substr(0, 8), 60, 5)) return ESP_OK;
+      return h_ble_unbind(req);
     }
     if (strcmp(path, "system/reboot") == 0) {
       if (!bearer()) return ESP_OK;
