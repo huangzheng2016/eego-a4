@@ -1,86 +1,158 @@
-# EEGO A4 Hardware Template Firmware
+# EEGO A4 Configurable Alert and Data Panel
 
-[中文 README](README.md)
+[中文](README.md) · [Full firmware guide](firmware/README.md) ·
+[English integrated guide](firmware/README.md#english-integrated-guide) ·
+[Documentation map](docs/README.md)
 
-An independent ESP32-S3 hardware-support, diagnostics, and development baseline for
-the EEGO A4 e-paper reader. It combines the official firmware's touch
-calibration and key mapping with the faster UC8279C refresh behavior recovered
-from CrossLink firmware.
+The primary product in this repository is the **ESP-IDF configurable alert/data-panel
+firmware** under `firmware/`, for the EEGO A4 (ESP32-S3 + 7.8-inch UC8279C e-paper).
+It integrates HTTP sources, declarative parsing, variables, panel layouts, alert
+styles, independent refresh, touch/custom input, WiFi/BLE, frontlight, storage,
+diagnostics, sleep, and recovery. It has no Arduino dependency and does not execute
+arbitrary scripts.
 
-This is not an everyday reading application. It is a hardware template for
-developers who need a known-good boot path, reusable drivers, non-destructive
-diagnostics, examples, safe flashing, and recovery documentation.
+The legacy Arduino diagnostic template remains available as a **hardware reference
+and driver-development baseline**, not as the current product. Its examples and
+physical-device results must not be transferred to the new ESP-IDF firmware.
 
 ## Quick start
 
+Install Python 3 and ESP-IDF 5.5.1, then run host checks and a complete build:
+
 ```sh
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
-python scripts/validate_project.py --quick
-pio run -e eego_a4_quickstart
+python3 firmware/tools/validate_firmware.py
+python3 firmware/tools/preset_tool.py validate-library
+idf.py -C firmware -B .tmp/firmware-build build
+idf.py -C firmware -B .tmp/firmware-build size
+idf.py -C firmware -B .tmp/firmware-build size-components
 ```
 
-Start with the [documentation map](docs/README.md) and
-[getting-started guide](docs/GETTING_STARTED.md). The detailed documentation
-is currently Chinese-first; source identifiers, commands, tables, and examples
-are language-independent.
+Flashing is USB-only. Make a full backup and verify partitions and image hashes first;
+see the [recovery reference](docs/RECOVERY.md) and [firmware guide](firmware/README.md).
+Remote OTA is not included in this release.
 
-## Included
+First boot and configuration:
 
-- UC8279C full, fast, and four-level grayscale refresh
-- full GSLX680 controller upload and calibrated portrait touch mapping
-- physical Up, Down, and Power buttons plus short/long front capacitive key
-- microSD, PCF8563 RTC, battery ADC, charge-state input
-- Wi-Fi and BLE scanning, native USB CDC, 16 MiB Flash and 8 MiB PSRAM checks
-- optional LM3630A frontlight probing without writing to absent hardware
-- CPFONT v4 Chinese and English rendering tests from microSD
-- five independently buildable examples and a complete diagnostic app
-- guarded flashing with mandatory backup, target confirmation, and verification
+1. With no admin password, join `EEGO-A4-Setup` and open `http://192.168.4.1/`.
+2. Select WiFi and set an admin password of at least eight characters. The device
+   saves only after the STA connection succeeds, then reboots.
+3. Open `http://<device-ip>/`, sign in, and use Dashboard → import → validate → apply.
+4. To start from a preset, expand it into the device-native bundle first:
 
-Unsupported or unconfirmed components are not guessed into existence. Current
-evidence does not establish an onboard speaker, microphone, LED, IMU, or
-environment sensor.
+   ```sh
+   python3 firmware/tools/preset_tool.py list
+   python3 firmware/tools/preset_tool.py export chart-kpi \
+     --mock-host 192.168.1.20:8978 --output .tmp/chart-kpi.json
+   python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
+   ```
 
-## Safety contracts
+See the [preset guide](firmware/presets/README.md) for 30 starting points and complete
+TOKEN-usage, weather, server-metrics, and security-event scenarios. On a physical
+device, `mock_host` must be the mock computer's LAN address, not `127.0.0.1`.
 
-- GPIO 4 is asserted at the first hardware operation to keep power latched.
-- Automatic sleep is disabled. Explicit deep sleep is clamped to 3–60 seconds
-  and always configures timer wake.
-- Ordinary UI uses the tested `28,28 496×712 R0` rectangle inside the rounded
-  `12,12 528×744 R48` safe area.
-- Full-flash installation changes the partition table. Always preserve a new
-  16 MiB backup first.
-- Build and package commands never flash a connected device.
+## Product capabilities
 
-See [safe flashing and recovery](docs/RECOVERY.md) before writing hardware.
+- **Dashboard:** card, chart, table, text, image, button, and alert panels; standard
+  JSON, bounded JSONPath, Prometheus, text, and PNG/JPEG; variables, thresholds, alert
+  surfaces, linked panels, time windows, and independent source/panel schedules.
+- **HTTP configuration:** bilingual UI, Bearer login, unsaved-draft protection, schema
+  validation, import/export, revision conflicts, normalized source tests, and atomic
+  apply. Complex transformation belongs in your server-side scripts, not on the device.
+- **Input:** tap/swipe, Up/Down/Front gestures, fixed Power/Home safety slots, and up
+  to 24 sparse custom bindings. Dangerous actions require a fresh hold of the same
+  control for at least 700 ms within five seconds; recovery and BLE actions require
+  physical Power.
+- **Whole-device settings:** language, WiFi, power, frontlight, data/EPD refresh,
+  RTC/timezone, SD, diagnostics, network recovery, and factory reset. Local settings
+  and the typed DeviceSettings API share validation and live application.
+- **BLE:** local PoP/Security 1 provisioning after initialization and an opt-in passive
+  manufacturer/service observer with bounded scan windows. Persistent phone GATT,
+  Bluetooth Classic, audio, and generic Bluetooth networking are out of scope.
 
-## Project layout
+See the [complete English integrated guide](firmware/README.md#english-integrated-guide)
+for fields, APIs, interaction details, limitations, and recovery procedures.
+
+## Current limits and validation status
+
+- No remote OTA in this release. HTTP and BLE are unreachable during deep sleep;
+  battery mode serves requests only during wake windows.
+- The runtime resolves NVS `auth_token_ref` values, but there is no public UI/API/serial
+  workflow for writing an arbitrary source token into NVS. The Bearer provisioning chain
+  is therefore incomplete and not accepted.
+- Ordinary custom headers are for non-secret values only. Sensitive headers are masked
+  in API responses but currently persisted verbatim to SD; do not use them for secrets.
+  Servers should return the minimum required data and never unnecessary credentials.
+- Host/static/mock/native-C++/DOM checks and the full ESP-IDF build pass on the final
+  baseline, including all 30 presets and four scenarios. **These are not physical-device
+  acceptance.** Display, touch/electrical behavior, live device networking, BLE/RF
+  coexistence, power consumption, and long-term stability still require the categorized
+  [physical acceptance checklist](firmware/README.md#真机验收清单当前全部未执行), tied to
+  the exact flashed image hash.
+
+## Documentation
+
+Start with:
+
+1. [English integrated firmware guide](firmware/README.md#english-integrated-guide)
+2. [完整中文固件指南](firmware/README.md)
+3. [Preset catalog and examples](firmware/presets/README.md)
+4. [Repository documentation map](docs/README.md)
+
+Project governance: [contributing](CONTRIBUTING.md), [security](SECURITY.md),
+[support](SUPPORT.md), [changelog](CHANGELOG.md), and
+[third-party notices](THIRD_PARTY_NOTICES.md).
+
+## Legacy Arduino hardware reference (not the primary product)
+
+`src/`, `lib/`, `examples/`, and most files under `docs/` belong to the legacy
+Arduino/PlatformIO hardware template. Use them for pinout, buses, drivers, display safe
+areas, diagnostics, and safe-recovery reference only. They do not describe the new
+firmware architecture or validate it on hardware. The legacy template has its own
+version, 1.0.18; do not confuse its images or version with the ESP-IDF product.
+
+- [Hardware reference](docs/HARDWARE_REFERENCE.md)
+- [Legacy drivers and API](docs/DRIVER_GUIDE.md)
+- [Legacy architecture and bus ownership](docs/ARCHITECTURE.md)
+- [Legacy examples](examples/README.md)
+- [Legacy diagnostics](docs/DIAGNOSTICS_GUIDE.md)
+- [Legacy physical-validation scope](docs/VALIDATION.md)
+- [Display safe area](docs/SAFE_AREA.md)
+- [Backup, flashing, and recovery reference](docs/RECOVERY.md)
+
+Run the legacy template's full regression, which also builds its diagnostic firmware
+and five examples:
+
+```sh
+python3 scripts/validate_project.py
+```
+
+Run only repository structure, text, and Markdown-link checks:
+
+```sh
+python3 scripts/validate_project.py --quick
+```
+
+## Repository layout
 
 ```text
-src/                    diagnostic application
-lib/EegoA4Support/      board contract, bootstrap, coordinate and power policy
-lib/EegoA4Ui/           portrait canvas and CPFONT renderer
-lib/*                   reusable FreeInk hardware drivers
-examples/               five minimal applications
-scripts/                validation, packaging, capture, extraction, safe flash
-docs/                   developer, hardware, recovery, and maintainer docs
+firmware/                 Primary ESP-IDF alert/data-panel product
+  components/             Dashboard, pipeline, admin, BLE, settings, hardware
+  main/                   Application, runtime, input, and recovery composition
+  presets/                30 host presets and four complete bundle examples
+  tools/                  Validation, preset, mock, and serial-smoke tools
+src/  lib/  examples/     Legacy Arduino hardware template (reference)
+docs/                     Product navigation and legacy hardware/recovery material
+scripts/                  Repository checks and legacy packaging/safety tools
 ```
 
-Generated `.pio/`, `release/`, and `captures/` directories are intentionally
-excluded from source control. Publish release binaries as GitHub Release assets.
+`.tmp/`, `.pio/`, `release/`, and `captures/` are generated directories and must not be
+committed. Build, validation, and packaging commands never flash a device automatically.
+Distribute release binaries as Release assets rather than source-tree artifacts.
 
-## Validation
+## Licensing and provenance
 
-Version 1.0.18 was built in all six PlatformIO environments and tested on a
-physical no-frontlight EEGO A4. See the [validation summary](docs/VALIDATION.md)
-for exact scope, hashes, framebuffer evidence, and limitations.
-
-## Contributing and licensing
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md),
-[NOTICE.md](NOTICE.md), and
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before submitting
-hardware-derived data. Source code is MIT licensed. Third-party firmware,
-fonts, trademarks, and binary-derived interoperability data require separate
-provenance review as described in the notice.
+The legacy Arduino template is under the root [MIT License](LICENSE). The new
+`firmware/` product is a [GPL-3.0-or-later](firmware/LICENSE) derivative. See
+[NOTICE.md](NOTICE.md), [firmware NOTICE](firmware/NOTICE.md), and the respective
+third-party notices for provenance, trademarks, extracted data, and licensing boundaries.
+The project is not affiliated with or endorsed by EEGO, Xteink, CrossLink, or their owners.

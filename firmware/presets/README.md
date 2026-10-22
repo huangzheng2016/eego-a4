@@ -19,7 +19,9 @@ python3 firmware/tools/preset_tool.py validate-library
 
 `--mock-host` 只写演示变量默认值，不带 scheme、路径或凭据。接入真实服务时，在
 HTTP 编辑器中同时修改 source URL 和对应 source plan；编辑器的 source 表单会保持二者
-连接字段同步。不要把真实 token 写进这些 JSON。
+连接字段同步。不要把真实 token 写进这些 JSON 或普通 headers。最终基线的 NVS
+`auth_token_ref` 只有运行时读取端，尚无公开 token 写入流程；敏感自定义 headers 当前
+会原值写入 SD。详见[认证与存储限制](../README.md#http-headers-与-nvs-secret-引用当前限制)。
 
 ## 30 个预设
 
@@ -48,7 +50,7 @@ HTTP 编辑器中同时修改 source URL 和对应 source plan；编辑器的 so
 | 内容 | `image` | image panel + image asset + `response=image` |
 | 内容 | `image-text` | 图片与动态说明文字复合布局 |
 | 动作 | `button` | 单按钮数据刷新 |
-| 动作 | `button-group` | 刷新、页面跳转、变量设置、二次确认 ack |
+| 动作 | `button-group` | 刷新、页面跳转、变量设置、fresh-hold 确认 ack |
 | 布局 | `chart-kpi` | 三个 KPI + 全宽趋势图 |
 | 布局 | `chart-alerts` | 趋势图 + 告警流 |
 | 布局 | `kpi-2x2` | 四个独立指标的 2x2 卡片 |
