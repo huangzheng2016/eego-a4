@@ -99,6 +99,7 @@ Provisioning 的客户端，以 Security 1 连接 `EEGO-A4-XXXX`（XXXX 为 MAC 
 | `POST /api/v1/alerts/{id}/ack` `/clear`、`POST /alerts/ack-all` | 确认 / 清除 |
 | `GET /api/v1/types` / `PUT /api/v1/types/{id}` | 告警类型注册表查询 / 覆盖 |
 | `POST /api/v1/sources/test` | 出网测试源（限速，不回显目标 body） |
+| `GET/PUT/DELETE /api/v1/sources/credentials` | 数据源凭据元数据查询 / 写入或轮换 / 删除未引用项；秘密值 write-only，只入 NVS `source` |
 | `GET /api/v1/sources/presets` / `GET /sources/presets/{id}` | 来源预设查询（id/中英名称/接入方式/字段映射模板/中英能力说明；未知 id 404） |
 | `POST /api/v1/config/wifi` / `DELETE` | WiFi 账号增删（密码只入 NVS） |
 | `POST /api/v1/system/reboot` `/factory-reset` | 重启（`confirm:"REBOOT"`）/ 恢复出厂（双确认） |
@@ -138,7 +139,7 @@ http_poll/http_push）、`builtin_poll`（设备原生解析=true / 脚本桥接
 `config_template`（SourceConfig 起点模板，http_push 预设为 null）、
 `notes`/`notes_en`（中/英文能力说明与脚本输出契约）。管理 UI 按当前
 zh/en 语言环境渲染预设名称与说明。预设只是 `SourceConfig` 起点，
-改 url/token/interval 后校验规则与手写配置完全一致。
+改 URL、凭据引用或 interval 后校验规则与手写配置完全一致。
 
 能力边界（不伪装支持）：
 
@@ -160,12 +161,12 @@ zh/en 语言环境渲染预设名称与说明。预设只是 `SourceConfig` 起�
 | `custom_json` | http_poll（恒等映射） | 端点直接返回规范事件数组的通用兜底 |
 
 通用 `SourceConfig` 字段：`id`（[a-z0-9_-]{1,64}）、`url`、`interval_ms`
-（10s–1h，默认 60s）、`auth_token_ref`（token 存 NVS，`nvs:<key>` 引用）、
+（10s–1h，默认 60s）、`auth_token_ref`（Bearer token 的 `nvs:source/<key>` 引用）、
 `tls_verify`（自签显式关闭）、`clear_after_misses`（默认 3，0=从不）、
 `array_path`、`field_map`、`severity_map`、`clear_states`、`dedup_key`、
-`headers`、`timeout_ms`、`max_body_bytes`（默认 64KB，解析预算，超限记源错误
-不硬吃）。响应 2xx 原始 body 落 SD `cache/<source>.json`；连续 miss 达标自动
-清除在册活动记录。
+`headers`（普通非秘密值）、`header_secret_refs`（头名到 `nvs:source/<key>`）、
+`timeout_ms`、`max_body_bytes`（默认 64KB，解析预算，超限记源错误不硬吃）。
+响应 2xx 原始 body 落 SD `cache/<source>.json`；连续 miss 达标自动清除在册活动记录。
 
 ## 数据面板与预设库
 
@@ -203,7 +204,8 @@ zh/en 语言环境渲染预设名称与说明。预设只是 `SourceConfig` 起�
    导入只替换草稿，应用后才原子生效。编辑器可维护 dashboard、页面、panel、source、
    变量、告警规则和布局；高级 JSON 区可编辑 assets/samples/events。修改 source 时，
    编辑器同步对应 plan 的连接字段；手工编辑时必须自行保持 `id/kind/enabled/url/
-   refresh_ms/timeout_ms/max_response_bytes/tls_verify/auth_token_ref/headers` 一致。
+   refresh_ms/timeout_ms/max_response_bytes/tls_verify/auth_token_ref/headers/
+   header_secret_refs` 一致。需要认证时先按下一节写入凭据，再在这里选择引用。
 4. 在 source 表单先做「测试」。结果只含归一化指标/事件/文本/图片元数据，不回显原始
    响应。应用前运行主机全量检查：
 
@@ -237,19 +239,64 @@ curl -X PUT -H "Authorization: Bearer $EEGO_TOKEN" -H 'If-Match: *' \
   http://192.168.1.30/api/v1/dashboard
 ```
 
-#### HTTP headers 与 NVS secret 引用（当前限制）
+#### HTTP headers 与 NVS secret 引用
 
-- dashboard source 和对应 plan 都必须保存相同的连接字段。`headers` 只放**非秘密**值；
-  `Authorization`、`Host`、`Content-Length` 由运行层保留并拒绝手工配置。不要把管理
-  token、数据源 token 或其他秘密写进 preset、bundle、mock、命令历史或日志。
-- 运行层能把 `auth_token_ref: "nvs:<key>"`（默认 `sec` 命名空间）或
-  `nvs:<ns>/<key>` 解析为临时 `Authorization: Bearer ...`，bundle 只应保存引用。
-  **但最终集成基线没有公开 UI/API/串口把任意数据源 token 写入 NVS 的流程**；现有
-  内部写入只覆盖管理密码哈希和 ingest key。因此 Bearer 的“写入 secret → 引用 →
-  在线测试”尚未形成用户可完成的闭环，不能标为已验收。
-- 普通自定义 headers 也不是安全的替代品：API 读取会把敏感值掩码，但当前 dashboard
-  持久化会把它们原值写入 SD `dashboard.json`。在此问题修复前，禁止把秘密放入
-  `X-API-Key`、Cookie 等普通 headers；旧告警 `sources[].headers` 同样只放非秘密值。
+**推荐顺序是“写入凭据 → 保存引用 → 测试并应用”，不要把秘密写进 bundle。**
+
+1. 登录后进入「数据面板 → 凭据」，输入 key 和秘密值并选择「写入或轮换凭据」。秘密输入框
+   在成功后清空；列表只显示 key/ref 元数据，UI、API 均不提供秘密读回。随后在「数据源」
+   表单的 Bearer 凭据引用中选择该 ref，或在高级 JSON 中配置秘密头引用。等价的 Bearer
+   管理 API（写操作要求 `Content-Type: application/json`）为：
+
+   | 操作 | 请求体 / 结果 |
+   |---|---|
+   | `GET /api/v1/sources/credentials` | 200：`{"namespace":"source","credentials":[{"key":"weather","ref":"nvs:source/weather"}]}`；无秘密值 |
+   | `PUT /api/v1/sources/credentials` | `{"key":"weather","value":"<source-secret>"}`；新建或对同 key 轮换，成功返回 key/ref 和 `deleted:false` |
+   | `DELETE /api/v1/sources/credentials` | `{"key":"weather"}`；删除未引用项，成功返回 key/ref 和 `deleted:true` |
+
+   key 为 1–15 位 `[A-Za-z0-9_-]`，保留设备键会被拒绝；value 为 1–1024 字节且不得含
+   控制字符。API 固定写 NVS `source` 命名空间，body 不能另选 namespace/ref。写/删共享
+   每管理令牌 30 次/分钟的限速；NVS/队列失败返回错误，不能当作写入成功。
+
+2. dashboard source 与对应 plan 必须保存相同连接字段；旧告警 `sources[]` 也使用同一
+   引用模型。例如：
+
+   ```json
+   {
+     "auth_token_ref": "nvs:source/weather",
+     "headers": {"X-Trace": "daily"},
+     "header_secret_refs": {
+       "X-Credential": "nvs:source/api",
+       "X-Opaque": "nvs:source/opaque"
+     }
+   }
+   ```
+
+   `auth_token_ref` 在请求时生成 `Authorization: Bearer <秘密值>`；`header_secret_refs`
+   把头名映射到 NVS 引用，发送时替换成原始秘密值，适用于 `X-Credential`、`X-Opaque`、
+   Cookie、API key 等。`Authorization` 必须走 `auth_token_ref`，不能与
+   `header_secret_refs` 混用；`Host`、`Content-Length` 也由运行层保留。普通与秘密
+   headers 合计最多 16 个，重名或仅大小写不同的冲突会被拒绝。
+3. 普通 `headers` 只接受**非秘密字面值**；`Authorization`、`Proxy-Authorization`、
+   Cookie，以及名称含 auth/key/token/pass/secret/cookie/credential 等敏感语义的 headers
+   不得保存字面值，必须改用引用。不要把管理 token、数据源 token 或其他秘密写进 preset、
+   URL、bundle、mock、命令历史或日志。
+4. 同 key PUT 即轮换，下一次数据源请求立即解析新值，无需重写 bundle。删除会检查活跃
+   告警 `sources[]`、dashboard sources 和 plans；仍被任一引用时返回 409，必须先从配置
+   移除引用并应用，再 DELETE。引用缺失、不可读或值非法时，请求构造失败并记源错误，
+   **不会降级成无认证请求**。
+5. 外部数据源只接受 `nvs:source/<key>`。`nvs:wifi/...`、`nvs:sec/...`、`nvs:<key>` 等
+   跨 namespace 或旧形式引用会在校验时拒绝；须通过凭据 API/UI 重建秘密并更新引用，不能
+   读取 WiFi、管理密码或 ingest key 作为数据源凭据。
+
+**旧配置迁移与失败语义**：自动迁移只处理设备启动加载的既有 SD `config.json` /
+`dashboard.json`，不是新 HTTP 导入秘密的通道。旧 `Authorization: Bearer ...` 和敏感
+headers 字面值会写入 NVS `source`，活动配置原子改写为生成的 `nvs:source/mig_...` 引用；
+dashboard source/plan 的对应秘密必须一致。新提交中的敏感字面值仍直接校验拒绝。
+非 Bearer Authorization、与既有 ref 冲突、plain/ref 同名冲突、source/plan 秘密不一致、
+非法值或 NVS/SD 写入与回读失败都会使迁移失败且配置不加载。替换活动文件前失败会保留
+原文件并回滚本次新建 NVS 项；修复存储或旧配置后重新加载，不得把失败迁移当成成功。
+迁移也不能保证擦除存储介质、备份或 coredump 中的历史副本。
 
 ### 数据映射与服务器脚本边界
 
@@ -365,10 +412,10 @@ DeviceSettings schema v1 统一保存非秘密本机偏好（语言、电源、�
 
 设置页提供限时网络恢复 AP、WiFi-only 重置和全量恢复出厂。首次激活只布防，三类操作
 都必须在 5 秒内重新按住**实体 Power** 至少 700ms，触屏不能确认。WiFi-only 只清 WiFi
-账号并打开恢复 AP，不清管理密码；忘记管理密码仍需全量恢复。全量恢复清除
-`sec/wifi/ui/ble/nimble_bond/dashboard` 命名空间、DeviceSettings、input bindings 以及
-config/alerts/dashboard 等明确列出的 SD 文件，保留字体和未知用户文件；SD 不可用或
-任一清除失败都不会安排“成功”重启。
+账号并打开恢复 AP，不清管理密码或数据源凭据；忘记管理密码仍需全量恢复。全量恢复清除
+`sec/source/wifi/ui/ble/nimble_bond/dashboard` 命名空间、DeviceSettings、input bindings
+以及 config/alerts/dashboard 等明确列出的 SD 文件，保留字体和未知用户文件；SD 不可用
+或任一清除失败都不会安排“成功”重启。此处是逻辑清除，不作历史介质副本绝对擦除承诺。
 
 ### BLE 配网、observer 与共存边界
 
@@ -411,20 +458,20 @@ config/alerts/dashboard 等明确列出的 SD 文件，保留字体和未知用�
 ## 安全边界
 
 - **刷写**：仅 USB；无远程 OTA/上传端点（一切未知路径 404）。
-- **secrets**：WiFi 密码、管理密码哈希和 ingest key 只存 NVS（`wifi`/`sec`）；
-  会话令牌 RAM only（重启即清，最多 3 个 LRU）。管理响应和串口日志应掩码/省略秘密，
-  但**普通 headers 会明文写 SD 的已知限制不能以“响应已掩码”掩盖**。数据源 NVS 引用
-  缺少公开写入流程，普通 headers 又不得存秘密，详见上文；在这两项闭环前，不宣称
-  任意认证数据源或“所有 SD 文件无秘密”已验收。
+- **secrets**：WiFi 密码、管理密码哈希和 ingest key 只存 NVS（`wifi`/`sec`）；数据源
+  凭据值只写 NVS `source`，SD 配置与导出仅保存 `nvs:source/<key>` 引用。会话令牌
+  RAM only（重启即清，最多 3 个 LRU）。凭据 API 只返回 key/ref，source test 只返回
+  归一化预览；管理响应和串口日志不得输出秘密值。认证请求本身会按配置携带秘密 header。
 - **串口（UART0 diag）**：视为物理可信（有 USB 接触即可整片刷写，加锁无
   意义），但 diag 命令只输出状态/计数/标识，不读取不打印任何凭据；
   `inject` 只经 net_task 命令队列入队。
 - **局域网 HTTP**：明文 + Host/Origin 白名单 + 无 CORS + JSON Content-Type
   强制 + 登录/端点限速 + CSP（管理页告警内容一律 textContent 渲染，防存储型
-  XSS 偷令牌）。
-- **残余风险（记录在案）**：首版未开 flash encryption / secure boot v2——
-  有物理 flash 读权限者可提取 secrets；是否启用列为待用户决策（影响
-  RECOVERY.md 备份/读回工作流）。
+  XSS 偷令牌）。凭据 PUT 和管理登录同样经由明文 HTTP，只在可信局域网操作。
+- **删除与残余风险（记录在案）**：删除凭据或工厂恢复是逻辑清除，不承诺对 NVS 磨损
+  均衡旧页、备份或 coredump 历史副本做绝对物理擦除。首版未开 flash encryption /
+  secure boot v2——有物理 flash 读权限者可提取 secrets；是否启用列为待用户决策
+  （影响 RECOVERY.md 备份/读回工作流）。
 - **许可边界**：复用 eego-a4-weread（GPL-3.0）代码，衍生作品整体
   GPL-3.0-or-later；weread 协议/登录/加密代码、boot_logo 商标素材、miniz
   **未复用/未采用**；细节见 NOTICE.md / THIRD_PARTY_NOTICES.md。
@@ -432,8 +479,8 @@ config/alerts/dashboard 等明确列出的 SD 文件，保留字体和未知用�
 ## SD 卡布局
 
 ```
-/sdcard/alertpanel/config.json      # 非秘密管理配置；普通 headers 不得存秘密
-/sdcard/alertpanel/dashboard.json   # bundle + revision；敏感 headers 当前会原值保存
+/sdcard/alertpanel/config.json      # 非秘密管理配置与 nvs:source/<key> 引用
+/sdcard/alertpanel/dashboard.json   # bundle + revision；秘密 headers 仅保存 NVS 引用
 /sdcard/alertpanel/alerts.db        # 告警库（JSONL，原子持久化）
 /sdcard/alertpanel/cache/<src>.json # 告警轮询源 2xx 原始响应缓存
 /sdcard/alertpanel/dashboard_cache/ # dashboard 历史、归一化快照和图片缓存
@@ -441,8 +488,9 @@ config/alerts/dashboard 等明确列出的 SD 文件，保留字体和未知用�
 ```
 
 SD 未挂载时：告警库降级为内存运行（重启丢失），状态页如实显示；dashboard 持久缓存
-不可用不能被报告为已保存。用户必须避免在 headers、URL、事件字段或服务器响应中下放
-凭据；原始 2xx 响应会按设计缓存，服务器应只返回面板所需的最小数据集。
+不可用不能被报告为已保存。用户必须避免在 URL、事件字段或服务器响应中下放凭据；
+原始 2xx 响应会按设计缓存，服务器应只返回面板所需的最小数据集。配置只存引用并不意味着
+所有响应缓存、备份或历史转储都绝无秘密。
 
 ## 主机工具（firmware/tools/）
 
@@ -471,13 +519,16 @@ python3 firmware/tools/smoke_serial_test.py --port /dev/cu.usbmodem* \
 
 ## 本次主机与构建证据（不是实体设备验收）
 
-在最终集成基线上，以下检查已通过：`validate_firmware.py` 51 项；30 个预设 + 4 个
-场景的 host 校验；34 个 bundle 的设备同源 C++ dashboard/source parser 与
-DataPipeline configure/tick；mock loopback HTTP 11 项；输入状态机 71 项；
-DeviceSettings/BLE observer schema 合法与非法边界；BLE 角色/安全/恢复源码检查；
-typed settings + dashboard editor DOM 检查；完整 ESP-IDF v5.5.1 build/size/
-size-components。应用 bin 为 0x2418e0 字节，分区余量 66%，DIRAM 剩余 186885 字节。
-这些结果证明主机可复现路径和可构建性，不证明实体显示、射频、电气或在线设备行为。
+在最终集成基线上，以下检查已通过：`validate_firmware.py` 51 项；完整
+`scripts/validate_project.py` 静态检查与 6 个旧 Arduino/PlatformIO 环境；30 个预设 + 4 个
+场景的 host/canonical schema 校验；34 个 bundle 的设备同源 C++ dashboard/source parser
+与 DataPipeline configure/tick；fake NVS 凭据写入/轮换/删除、跨 namespace 与缺失 ref
+负例、迁移及失败回滚、可控请求头到达和 SD/导出/响应/日志/缓存秘密检查；mock loopback
+HTTP 11 项；输入状态机 71 项；DeviceSettings/BLE observer schema 合法与非法边界；BLE
+角色/安全/恢复源码检查；typed settings 与 dashboard editor 原生 DOM 检查；完整
+ESP-IDF v5.5.1 build/size/size-components。应用 bin 为 0x246f00 字节，分区余量 66%，
+DIRAM 剩余 186821 字节。这些结果证明主机可复现路径和可构建性，不证明实体显示、射频、
+电气、凭据在线写入或认证源真机行为。
 
 ## 真机验收清单（当前全部未执行）
 
@@ -513,8 +564,12 @@ size-components。应用 bin 为 0x2418e0 字节，分区余量 66%，DIRAM 剩�
       linked panel、独立 source/panel 刷新、revision 409 和离线/stale/缓存恢复。
 - [ ] 验证轮询 normal/batch/dup/clear/ttl/oversize/badlen/slow、http_push 单条/批量、
       ack/clear/mute 的触控/串口/API 一致性、重启后告警恢复和响应大小预算。
-- [ ] 对认证源单独记录当前阻塞：通用 NVS token 写入流程缺失，不能验收 Bearer 全链；
-      不将秘密放普通 headers，并检查 SD/导出/日志/缓存无新增秘密泄漏。
+- [ ] 通过 UI 和 API 完成凭据写入、元数据查询、同 key 轮换与重启后持久化；用可控认证
+      服务器确认真实请求收到新的 `Authorization: Bearer ...`、`X-Credential`、`X-Opaque`
+      和普通非秘密 header，且 GET/导出/管理响应/日志/SD 配置不回显秘密值。
+- [ ] 验证敏感字面值与跨 namespace 引用被拒绝、缺失 ref 不发无认证请求；活跃引用删除
+      返回 409，解除引用后可删除。分别覆盖旧配置迁移成功及 NVS/SD 失败不加载的恢复路径，
+      不把逻辑删除或主机 fake NVS 结果当成物理擦除/真机持久化证明。
 
 ### WiFi/BLE 配网、observer 与射频共存
 
@@ -602,8 +657,9 @@ stale writes return 409.
 Configure in this order:
 
 - **Connection:** give each HTTP source and its source plan the same id, URL, refresh,
-  timeout, response budget, TLS flag, token reference, and headers. The form keeps these
-  fields synchronized; manual JSON editing must preserve them.
+  timeout, response budget, TLS flag, `auth_token_ref`, plain `headers`, and
+  `header_secret_refs`. The form keeps these fields synchronized; manual JSON editing
+  must preserve them. Write credentials before selecting their references as described below.
 - **Declarative parsing:** use `standard_json`, `metrics_json`, `events_json`,
   `generic_json` with bounded JSONPath mappings, `prometheus`, `text`, or `image`.
   Expressions are a whitelist for arithmetic, comparison, conditionals, and conversion;
@@ -619,16 +675,69 @@ Configure in this order:
   legacy alert `http_poll` sources only, while `epd_full_refresh_s` is a separate display
   policy. Runtime panel scheduling is at least one minute; avoid animations.
 
-### Secret limitation that must not be skipped
+### Source credentials and secret headers
 
-The runtime can resolve `auth_token_ref: "nvs:<key>"` or `nvs:<ns>/<key>` into a Bearer
-header. The final baseline has **no public UI/API/serial workflow for writing an arbitrary
-source token into NVS**, so the Bearer store-reference-test chain is not complete or
-accepted. Do not put secrets in presets, URLs, bundles, mocks, shell history, or logs.
-Use ordinary headers only for non-secret values. Sensitive custom headers are masked in
-API responses but are currently persisted verbatim to SD `dashboard.json`; therefore
-`X-API-Key`, Cookie, and similar headers must not hold secrets. Raw 2xx responses are
-also cached, so servers should return only the minimum data required by the panel.
+Use this order: **write the credential, save its reference, then test and apply**. In
+Dashboard → Credentials, enter a key and value and choose Write or rotate. The value field
+is cleared after success. The UI lists only key/ref metadata and never reads the value back.
+The equivalent Bearer-authenticated API is:
+
+- `GET /api/v1/sources/credentials` returns
+  `{"namespace":"source","credentials":[{"key":"weather","ref":"nvs:source/weather"}]}`.
+- `PUT /api/v1/sources/credentials` with `{"key":"weather","value":"<source-secret>"}`
+  creates or rotates a value and returns only key/ref plus `deleted:false`.
+- `DELETE /api/v1/sources/credentials` with `{"key":"weather"}` deletes an unreferenced
+  value and returns `deleted:true`. JSON content type is required for writes.
+
+Keys contain 1–15 `[A-Za-z0-9_-]` characters and must not be reserved device keys. Values
+are 1–1024 bytes without control characters. The API always uses the NVS `source`
+namespace; callers cannot select another namespace. Writes and deletes share a limit of
+30 requests per minute per management token. NVS or queue failures return an error rather
+than a success response.
+
+A dashboard source and its plan must carry the same connection fields. Legacy alert
+`sources[]` uses the same model:
+
+```json
+{
+  "auth_token_ref": "nvs:source/weather",
+  "headers": {"X-Trace": "daily"},
+  "header_secret_refs": {
+    "X-Credential": "nvs:source/api",
+    "X-Opaque": "nvs:source/opaque"
+  }
+}
+```
+
+`auth_token_ref` produces `Authorization: Bearer <secret>` at request time.
+`header_secret_refs` maps other header names to NVS references and resolves their raw values
+only for the outbound request. Authorization must use `auth_token_ref`; Host and
+Content-Length are also runtime-managed. Plain and secret headers together are limited to
+16, with duplicate and case-variant conflicts rejected. Ordinary `headers` accepts only
+non-secret literal values: sensitive names, including Cookie and names containing auth, key,
+token, pass, secret, cookie, or credential, must use references instead. Never put secrets
+in presets, URLs, bundles, mocks, shell history, or logs.
+
+PUT to the same key rotates the value for the next source request without rewriting the
+bundle. DELETE checks active alert sources, dashboard sources, and plans; a referenced
+credential returns 409. Remove and apply every reference before deleting it. A missing,
+unreadable, or invalid reference fails request construction and marks the source erroneous;
+it never falls back to an unauthenticated request. Only `nvs:source/<key>` is accepted:
+`nvs:wifi/...`, `nvs:sec/...`, legacy `nvs:<key>`, and other namespaces are rejected.
+Re-create such credentials through the API/UI and update the reference.
+
+Automatic migration applies only to existing on-device SD `config.json` and `dashboard.json`
+when they are loaded, not to new HTTP imports. Legacy `Authorization: Bearer ...` and
+sensitive literal headers are moved into NVS `source`, and the active file is atomically
+rewritten with generated `nvs:source/mig_...` references. Corresponding dashboard source and
+plan secrets must match. New imports containing sensitive literals are still rejected.
+Non-Bearer Authorization, conflicts with existing refs, ambiguous plain/ref headers,
+source/plan secret mismatches, invalid values, or NVS/SD write and read-back failures make
+the migration fail and leave the configuration unloaded. A failure before replacing the
+active file preserves that file and rolls back newly created NVS entries. Fix the storage or
+legacy configuration and reload; never report a failed migration as successful. Migration
+does not guarantee erasure of historical copies in media, backups, or coredumps. Raw 2xx
+responses are cached by design, so servers should return only the minimum data required.
 
 ## 3. Input, BLE observer, settings, and recovery
 
@@ -666,16 +775,19 @@ phone GATT, and remote OTA are outside this release. HTTP and BLE are unreachabl
 deep sleep.
 
 Local recovery AP, WiFi-only reset, and factory reset all use physical-Power fresh hold.
-WiFi-only reset preserves the admin password; forgetting that password requires factory
-reset. Factory reset clears the documented NVS namespaces, DeviceSettings, input bindings,
-and listed config/alerts/dashboard files while preserving fonts and unknown user files.
-Unavailable SD or incomplete erasure prevents a success reboot.
+WiFi-only reset preserves the admin password and source credentials; forgetting that password
+requires factory reset. Factory reset logically clears `sec`, `source`, `wifi`, `ui`, `ble`,
+`nimble_bond`, and `dashboard` NVS namespaces, DeviceSettings, input bindings, and listed
+config/alerts/dashboard files while preserving fonts and unknown user files. Unavailable SD
+or incomplete erasure prevents a success reboot. This is not a guarantee of absolute physical
+erasure of old flash pages, backups, or historical coredumps.
 
 ## 4. Acceptance status
 
 Host/static/mock/native-C++/DOM checks and the full ESP-IDF build pass on the final
-baseline, including all 30 presets and four scenarios. They are not physical-device
-acceptance. Display/fonts/grayscale, touch and electrical timing, online device HTTP,
-BLE/RF coexistence, SD/RTC/frontlight, deep-sleep current/wake behavior, and 72-hour
-stability remain explicitly unverified. Use the categorized checklist above and bind
-any future physical sign-off to the exact flashed firmware SHA-256.
+baseline, including all 30 presets and four scenarios plus credential positive/negative and
+controlled-request checks. They are not physical-device acceptance. Display/fonts/grayscale,
+touch and electrical timing, live credential API/UI and authenticated HTTP behavior, other
+online device HTTP, BLE/RF coexistence, SD/RTC/frontlight, deep-sleep current/wake behavior,
+and 72-hour stability remain explicitly unverified. Use the categorized checklist above and
+bind any future physical sign-off to the exact flashed firmware SHA-256.

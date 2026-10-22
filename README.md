@@ -67,10 +67,12 @@ idf.py -C firmware -B .tmp/firmware-build size-components
 ## 当前限制与验收口径
 
 - 首版不提供远程 OTA；深睡时 HTTP/BLE 均不可实时访问，电池模式只在唤醒窗口工作。
-- 运行层支持 `auth_token_ref` 的 NVS 引用解析，但当前没有公开 UI/API/串口把任意
-  数据源 token 写入 NVS 的完整流程，Bearer 认证链不能标为已验收。
-- 普通自定义 headers 只能放非秘密值。敏感 headers 虽在 API 响应中掩码，当前仍会
-  原值持久化到 SD；在修复前不得用它们保存秘密。服务器响应也应最小化，避免下发凭据。
+- 数据源凭据可在「数据面板 → 凭据」或 `GET/PUT/DELETE /api/v1/sources/credentials`
+  管理；秘密值 write-only，只写 NVS `source` 命名空间，配置、SD 和导出仅保存
+  `nvs:source/<key>` 引用。Bearer 使用 `auth_token_ref`，其他秘密 headers 使用
+  `header_secret_refs`，普通 `headers` 只接受非秘密值；完整轮换、删除和迁移规则见固件指南。
+- 认证源的真实在线行为仍须真机验收。服务器响应应按设计最小化：原始 2xx 响应会缓存，
+  不能用“配置只存引用”推导出响应、缓存或 coredump 历史副本绝无秘密。
 - 最终基线已通过主机静态/mock/同源 C++/DOM 检查和完整 ESP-IDF 构建，包括 30 个
   预设与四个场景；**这些不是实体设备验收**。显示、触控、电气、真实网络、BLE/RF
   共存、功耗和长期运行仍须按[分类真机清单](firmware/README.md#真机验收清单当前全部未执行)
