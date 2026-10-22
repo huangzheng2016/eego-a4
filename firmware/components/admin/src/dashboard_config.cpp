@@ -53,10 +53,7 @@ bool sensitiveKey(const std::string& key) {
 }
 
 bool sensitiveHeader(const std::string& key) {
-  const std::string k = lower(key);
-  return k.find("auth") != std::string::npos || k.find("key") != std::string::npos ||
-         k.find("token") != std::string::npos || k.find("pass") != std::string::npos ||
-         k.find("secret") != std::string::npos || k.find("cookie") != std::string::npos;
+  return net::CredentialStore::sensitiveHeaderName(key);
 }
 
 bool isTableColumnMappingKey(const std::string& path) {

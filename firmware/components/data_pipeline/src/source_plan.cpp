@@ -596,9 +596,7 @@ std::string sourceRequestKey(const net::NetRequest& request) {
   appendKeyPart(key, request.url);
   for (const net::NetHeader& header : request.headers) {
     appendKeyPart(key, header.name);
-    appendKeyPart(key, net::CredentialStore::sensitiveHeaderName(header.name)
-                           ? alert_core::sha1Hex(header.value)
-                           : header.value);
+    appendKeyPart(key, alert_core::sha1Hex(header.value));
   }
   appendKeyPart(key, request.body);
   appendKeyPart(key, request.tls_verify ? "1" : "0");

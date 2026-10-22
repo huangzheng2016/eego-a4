@@ -248,12 +248,15 @@ class Validator {
       std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
       });
+      // Keep in sync with net::CredentialStore::sensitiveHeaderName; dashboard_core
+      // deliberately has no net_stack dependency. Cross-classifier tests cover both.
       const bool sensitive = lowered.find("auth") != std::string::npos ||
                              lowered.find("key") != std::string::npos ||
                              lowered.find("token") != std::string::npos ||
                              lowered.find("pass") != std::string::npos ||
                              lowered.find("secret") != std::string::npos ||
-                             lowered.find("cookie") != std::string::npos;
+                             lowered.find("cookie") != std::string::npos ||
+                             lowered.find("credential") != std::string::npos;
       check(validHeaderName(values[i].key), field, "invalid HTTP header name");
       check(!asciiEqual(values[i].key, "authorization") && !asciiEqual(values[i].key, "host") &&
                 !asciiEqual(values[i].key, "content-length"),

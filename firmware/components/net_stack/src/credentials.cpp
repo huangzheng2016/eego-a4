@@ -208,7 +208,8 @@ bool CredentialStore::sensitiveHeaderName(const std::string& name) {
          lower == "cookie" || lower == "set-cookie" || lower == "x-api-key" ||
          lower.find("auth") != std::string::npos || lower.find("key") != std::string::npos ||
          lower.find("token") != std::string::npos || lower.find("pass") != std::string::npos ||
-         lower.find("secret") != std::string::npos || lower.find("cookie") != std::string::npos;
+         lower.find("secret") != std::string::npos || lower.find("cookie") != std::string::npos ||
+         lower.find("credential") != std::string::npos;
 }
 
 std::string CredentialStore::sourceRef(const std::string& key) {

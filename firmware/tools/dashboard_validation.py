@@ -222,6 +222,8 @@ def _plan_schema():
         "max_response_bytes": {"type": "integer", "minimum": 1024, "maximum": 262144},
         "tls_verify": {"type": "boolean"}, "auth_token_ref": string,
         "headers": {"type": "object", "maxProperties": 16, "additionalProperties": string},
+        "header_secret_refs": {"type": "object", "maxProperties": 16,
+                               "additionalProperties": string},
         "response": {"enum": ["generic_json", "prometheus", "standard_json", "metrics_json",
                                 "events_json", "image", "text", "standard", "metrics", "events"]},
         "method": {"enum": ["GET", "POST", "HEAD"]}, "body": string, "static_body": string,
@@ -241,6 +243,7 @@ PLAN_VALIDATOR = SchemaValidator(PLAN_SCHEMA)
 SOURCE_DEFAULTS = {
     "kind": "http", "enabled": True, "url": "", "refresh_ms": 60000, "timeout_ms": 10000,
     "max_response_bytes": 65536, "tls_verify": True, "auth_token_ref": "", "headers": {},
+    "header_secret_refs": {},
 }
 
 
@@ -491,6 +494,16 @@ def _validate_expression(expression, path, errors):
         errors.append(f"{path}: {message}")
 
 
+def _sensitive_header_name(name):
+    lowered = name.lower()
+    return any(marker in lowered for marker in
+               ("auth", "key", "token", "pass", "secret", "cookie", "credential"))
+
+
+def _valid_source_ref(value):
+    return isinstance(value, str) and re.fullmatch(r"nvs:source/[A-Za-z0-9_-]{1,15}", value) is not None
+
+
 def _validate_headers(headers, path, errors):
     seen = set()
     for key, value in headers.items():
@@ -500,6 +513,8 @@ def _validate_headers(headers, path, errors):
         lowered = key.lower()
         if lowered in ("authorization", "host", "content-length"):
             errors.append(f"{field}: header is managed by the runtime and cannot be configured")
+        if _sensitive_header_name(key):
+            errors.append(f"{field}: sensitive values must use header_secret_refs")
         if lowered in seen:
             errors.append(f"{field}: duplicate HTTP header")
         seen.add(lowered)
@@ -507,6 +522,27 @@ def _validate_headers(headers, path, errors):
             errors.append(f"{field}: HTTP header value contains a forbidden control character")
         if len(value) > 512:
             errors.append(f"{field}: exceeds 512 code points")
+
+
+def _validate_secret_headers(headers, plain_headers, path, errors):
+    if not isinstance(headers, dict):
+        errors.append(f"{path}: expected an object of source credential refs")
+        return
+    if len(headers) + len(plain_headers) > 16:
+        errors.append(f"{path}: too many plain and secret HTTP headers")
+    seen = {key.lower() for key in plain_headers}
+    for key, value in headers.items():
+        field = f"{path}.{key}"
+        if re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}", key) is None:
+            errors.append(f"{field}: invalid HTTP header name")
+        lowered = key.lower()
+        if lowered in ("authorization", "host", "content-length"):
+            errors.append(f"{field}: Authorization must use auth_token_ref; header is runtime-managed")
+        if lowered in seen:
+            errors.append(f"{field}: duplicate or ambiguous HTTP header")
+        seen.add(lowered)
+        if not _valid_source_ref(value):
+            errors.append(f"{field}: expected nvs:source/<key> with 1..15 safe key characters")
 
 
 def _valid_variant(kind, variant):
@@ -526,6 +562,10 @@ def _validate_plan(plan, path, errors):
     if schema_errors or not isinstance(plan, dict):
         return
     _validate_headers(plan.get("headers", {}), path + ".headers", errors)
+    _validate_secret_headers(plan.get("header_secret_refs", {}), plan.get("headers", {}),
+                             path + ".header_secret_refs", errors)
+    if plan.get("auth_token_ref") and not _valid_source_ref(plan["auth_token_ref"]):
+        errors.append(f"{path}.auth_token_ref: expected nvs:source/<key>, never another namespace")
     url = plan.get("url", "")
     if plan.get("kind", "http") == "http":
         if _utf8_size(url) > 1024:
@@ -686,10 +726,12 @@ def validate_bundle(bundle, schema, raw_bytes=None, strict_layout=True):
         if source.get("kind", "http") == "http" and not _valid_http_url(expanded_url):
             errors.append(f"{path}.url: URL is invalid after variable interpolation")
         _validate_headers(source.get("headers", {}), path + ".headers", errors)
+        _validate_secret_headers(source.get("header_secret_refs", {}), source.get("headers", {}),
+                                 path + ".header_secret_refs", errors)
         for key, value in source.get("headers", {}).items():
             _validate_placeholders(value, variable_set, f"{path}.headers.{key}", errors)
-        if source.get("auth_token_ref") and not source["auth_token_ref"].startswith("nvs:"):
-            errors.append(f"{path}.auth_token_ref: use an NVS reference, never a literal token")
+        if source.get("auth_token_ref") and not _valid_source_ref(source["auth_token_ref"]):
+            errors.append(f"{path}.auth_token_ref: expected nvs:source/<key>, never another namespace")
     for index, asset in enumerate(assets):
         path = f"$.dashboard.assets[{index}]"
         uri = asset.get("uri", "")
@@ -820,7 +862,7 @@ def validate_bundle(bundle, schema, raw_bytes=None, strict_layout=True):
         normalized.update(source)
         normalized["id"] = source["id"]
         for key in ("kind", "enabled", "url", "refresh_ms", "timeout_ms", "max_response_bytes",
-                    "tls_verify", "auth_token_ref", "headers"):
+                    "tls_verify", "auth_token_ref", "headers", "header_secret_refs"):
             if plan.get(key, SOURCE_DEFAULTS[key]) != normalized[key]:
                 errors.append(f"{path}.{key}: must match the dashboard source connection field")
         _validate_placeholders(plan.get("body", ""), variable_set, path + ".body", errors)

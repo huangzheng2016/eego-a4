@@ -277,7 +277,8 @@
         "max_response_bytes": {"type": "integer", "minimum": 1024, "maximum": 262144, "default": 65536},
         "tls_verify": {"type": "boolean", "default": true},
         "auth_token_ref": {"type": "string", "maxLength": 128, "default": ""},
-        "headers": {"$ref": "#/$defs/headers"}
+        "headers": {"$ref": "#/$defs/headers"},
+        "header_secret_refs": {"$ref": "#/$defs/headers", "default": {}}
       },
       "allOf": [
         {

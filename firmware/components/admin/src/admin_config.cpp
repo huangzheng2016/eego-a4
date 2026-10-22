@@ -97,11 +97,7 @@ bool isSensitiveKey(const std::string& key_lower) {
 }
 
 bool isSensitiveHeaderName(const std::string& name_lower) {
-  return name_lower.find("auth") != std::string::npos ||
-         name_lower.find("key") != std::string::npos ||
-         name_lower.find("token") != std::string::npos ||
-         name_lower.find("pass") != std::string::npos ||
-         name_lower.find("secret") != std::string::npos;
+  return net::CredentialStore::sensitiveHeaderName(name_lower);
 }
 
 // 深拷贝 + secrets 掩码（M13：远程响应 secrets 省略或 "********"）。
