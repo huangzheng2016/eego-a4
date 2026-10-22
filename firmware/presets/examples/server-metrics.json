@@ -1,0 +1,390 @@
+{
+  "schema": "eego.dashboard-bundle/1",
+  "schema_version": 1,
+  "revision": 0,
+  "dashboard": {
+    "schema": "eego.dashboard/2",
+    "schema_version": 2,
+    "id": "server-metrics",
+    "title": "Server CPU and memory",
+    "default_page_id": "main",
+    "refresh_ms": 60000,
+    "sources": [
+      {
+        "id": "server",
+        "kind": "http",
+        "enabled": true,
+        "url": "http://${mock_host}/server?host=${server_name}",
+        "refresh_ms": 60000,
+        "timeout_ms": 10000,
+        "max_response_bytes": 65536,
+        "tls_verify": true,
+        "auth_token_ref": "",
+        "headers": {}
+      }
+    ],
+    "variables": [
+      {
+        "name": "mock_host",
+        "label": "Mock host:port",
+        "kind": "text",
+        "default_value": "127.0.0.1:8978",
+        "options": [],
+        "source_id": "",
+        "value_path": "",
+        "multi": false,
+        "include_all": false
+      },
+      {
+        "name": "server_name",
+        "label": "Server",
+        "kind": "constant",
+        "default_value": "srv-demo",
+        "options": [
+          {
+            "label": "Demo server",
+            "value": "srv-demo"
+          },
+          {
+            "label": "Backup server",
+            "value": "srv-backup"
+          }
+        ],
+        "source_id": "",
+        "value_path": "",
+        "multi": false,
+        "include_all": false
+      }
+    ],
+    "pages": [
+      {
+        "id": "main",
+        "title": "Overview",
+        "visible": true,
+        "grid_columns": 24,
+        "row_height": 16,
+        "panels": [
+          {
+            "id": "cpu",
+            "kind": "card",
+            "grid": {
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 3
+            },
+            "title": "CPU / ${server_name}",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "server",
+            "metric": "server.cpu",
+            "style": {
+              "variant": "default",
+              "precision": 1,
+              "unit": "%"
+            },
+            "thresholds": [
+              {
+                "value": 80,
+                "severity": "warning",
+                "label": "High"
+              },
+              {
+                "value": 95,
+                "severity": "critical",
+                "label": "Critical"
+              }
+            ]
+          },
+          {
+            "id": "memory",
+            "kind": "card",
+            "grid": {
+              "x": 12,
+              "y": 0,
+              "w": 12,
+              "h": 3
+            },
+            "title": "Memory",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "server",
+            "metric": "server.memory",
+            "style": {
+              "variant": "default",
+              "precision": 1,
+              "unit": "%"
+            },
+            "thresholds": [
+              {
+                "value": 85,
+                "severity": "warning",
+                "label": "High"
+              },
+              {
+                "value": 95,
+                "severity": "critical",
+                "label": "Critical"
+              }
+            ]
+          },
+          {
+            "id": "cpu_chart",
+            "kind": "chart",
+            "grid": {
+              "x": 0,
+              "y": 3,
+              "w": 12,
+              "h": 4
+            },
+            "title": "CPU window",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "server",
+            "metric": "server.cpu",
+            "chart": {
+              "kind": "line",
+              "show_points": false,
+              "fill": false,
+              "y_min": 0,
+              "y_max": 100
+            },
+            "style": {
+              "unit": "%",
+              "precision": 1,
+              "line_width": 2
+            },
+            "time_window": {
+              "from": "-1h",
+              "to": "now"
+            }
+          },
+          {
+            "id": "memory_chart",
+            "kind": "chart",
+            "grid": {
+              "x": 12,
+              "y": 3,
+              "w": 12,
+              "h": 4
+            },
+            "title": "Memory window",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "server",
+            "metric": "server.memory",
+            "chart": {
+              "kind": "line",
+              "show_points": false,
+              "fill": true,
+              "y_min": 0,
+              "y_max": 100
+            },
+            "style": {
+              "unit": "%",
+              "precision": 1,
+              "line_width": 2
+            },
+            "time_window": {
+              "from": "-1h",
+              "to": "now"
+            }
+          },
+          {
+            "id": "server_details_button",
+            "kind": "button",
+            "grid": {
+              "x": 0,
+              "y": 7,
+              "w": 24,
+              "h": 1
+            },
+            "title": "Details",
+            "visible": true,
+            "refresh_ms": 60000,
+            "actions": [
+              {
+                "id": "details",
+                "kind": "goto_page",
+                "label": "Details",
+                "target": "details",
+                "value": "",
+                "confirm": false
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "details",
+        "title": "Server details",
+        "visible": true,
+        "grid_columns": 24,
+        "row_height": 16,
+        "panels": [
+          {
+            "id": "server_status",
+            "kind": "table",
+            "grid": {
+              "x": 0,
+              "y": 0,
+              "w": 24,
+              "h": 4
+            },
+            "title": "Server status",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "server",
+            "metric": "server.health",
+            "columns": [
+              {
+                "key": "name",
+                "title": "Server",
+                "width": 10
+              },
+              {
+                "key": "value",
+                "title": "Health",
+                "width": 4
+              },
+              {
+                "key": "status",
+                "title": "State",
+                "width": 8
+              }
+            ],
+            "style": {
+              "variant": "status_grid",
+              "precision": 0
+            },
+            "thresholds": [
+              {
+                "value": 1,
+                "severity": "warning",
+                "label": "Degraded"
+              },
+              {
+                "value": 2,
+                "severity": "critical",
+                "label": "Down"
+              }
+            ]
+          },
+          {
+            "id": "server_table",
+            "kind": "table",
+            "grid": {
+              "x": 0,
+              "y": 4,
+              "w": 24,
+              "h": 3
+            },
+            "title": "CPU samples",
+            "visible": true,
+            "refresh_ms": 60000,
+            "source_id": "server",
+            "metric": "server.cpu",
+            "columns": [
+              {
+                "key": "name",
+                "title": "Server",
+                "width": 8
+              },
+              {
+                "key": "value",
+                "title": "CPU %",
+                "width": 5
+              },
+              {
+                "key": "timestamp_ms",
+                "title": "Timestamp",
+                "width": 10
+              }
+            ],
+            "style": {
+              "precision": 1
+            }
+          },
+          {
+            "id": "server_actions",
+            "kind": "button",
+            "grid": {
+              "x": 0,
+              "y": 7,
+              "w": 24,
+              "h": 1
+            },
+            "title": "Actions",
+            "visible": true,
+            "refresh_ms": 60000,
+            "actions": [
+              {
+                "id": "back",
+                "kind": "back",
+                "label": "Back",
+                "target": "",
+                "value": "",
+                "confirm": false
+              },
+              {
+                "id": "refresh",
+                "kind": "refresh",
+                "label": "Refresh",
+                "target": "server",
+                "value": "",
+                "confirm": false
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "alert_rules": [
+      {
+        "id": "cpu_high",
+        "title": "High CPU",
+        "enabled": true,
+        "source_id": "server",
+        "metric": "server.cpu",
+        "expression": "value > 80",
+        "for_ms": 0,
+        "message": "CPU exceeds 80 percent",
+        "style": {
+          "surfaces": [
+            "banner",
+            "card",
+            "table_row"
+          ],
+          "severity": "warning",
+          "linked_panel_id": "cpu"
+        }
+      }
+    ],
+    "assets": [],
+    "samples": [],
+    "events": []
+  },
+  "source_plans": [
+    {
+      "id": "server",
+      "kind": "http",
+      "enabled": true,
+      "url": "http://${mock_host}/server?host=${server_name}",
+      "refresh_ms": 60000,
+      "timeout_ms": 10000,
+      "max_response_bytes": 65536,
+      "tls_verify": true,
+      "auth_token_ref": "",
+      "headers": {},
+      "response": "standard_json",
+      "method": "GET",
+      "body": "",
+      "static_body": "",
+      "text_path": "",
+      "reset_at_path": "$.reset_at",
+      "stale_after_ms": 300000,
+      "conditional_get": true,
+      "max_json_depth": 16
+    }
+  ]
+}

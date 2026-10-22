@@ -1,0 +1,187 @@
+{
+  "schema": "eego.dashboard-preset-catalog/1",
+  "schema_version": 1,
+  "description": "Host-side presets. Expand to an eego.dashboard-bundle/1 before HTTP import.",
+  "presets": [
+    {
+      "id": "metric-single",
+      "kind": "panel",
+      "title": "Single metric",
+      "file": "panels/metric-single.json"
+    },
+    {
+      "id": "metric-dual",
+      "kind": "panel",
+      "title": "Dual metric",
+      "file": "panels/metric-dual.json"
+    },
+    {
+      "id": "metric-triple",
+      "kind": "panel",
+      "title": "Triple metric",
+      "file": "panels/metric-triple.json"
+    },
+    {
+      "id": "progress",
+      "kind": "panel",
+      "title": "Progress",
+      "file": "panels/progress.json"
+    },
+    {
+      "id": "line-chart",
+      "kind": "panel",
+      "title": "Line chart",
+      "file": "panels/line-chart.json"
+    },
+    {
+      "id": "area-chart",
+      "kind": "panel",
+      "title": "Area chart",
+      "file": "panels/area-chart.json"
+    },
+    {
+      "id": "bar-chart",
+      "kind": "panel",
+      "title": "Bar chart",
+      "file": "panels/bar-chart.json"
+    },
+    {
+      "id": "sparkline",
+      "kind": "panel",
+      "title": "Sparkline",
+      "file": "panels/sparkline.json"
+    },
+    {
+      "id": "table",
+      "kind": "panel",
+      "title": "Table",
+      "file": "panels/table.json"
+    },
+    {
+      "id": "key-value",
+      "kind": "panel",
+      "title": "Key / value text",
+      "file": "panels/key-value.json"
+    },
+    {
+      "id": "log-tail",
+      "kind": "panel",
+      "title": "Log tail",
+      "file": "panels/log-tail.json"
+    },
+    {
+      "id": "event-stream",
+      "kind": "panel",
+      "title": "Event stream",
+      "file": "panels/event-stream.json"
+    },
+    {
+      "id": "alert-count",
+      "kind": "panel",
+      "title": "Alert count",
+      "file": "panels/alert-count.json"
+    },
+    {
+      "id": "alert-banner",
+      "kind": "panel",
+      "title": "Alert banner",
+      "file": "panels/alert-banner.json"
+    },
+    {
+      "id": "alert-table",
+      "kind": "panel",
+      "title": "Alert table",
+      "file": "panels/alert-table.json"
+    },
+    {
+      "id": "status-grid",
+      "kind": "panel",
+      "title": "Status grid",
+      "file": "panels/status-grid.json"
+    },
+    {
+      "id": "heatmap",
+      "kind": "panel",
+      "title": "Heatmap",
+      "file": "panels/heatmap.json"
+    },
+    {
+      "id": "timeline",
+      "kind": "panel",
+      "title": "Timeline",
+      "file": "panels/timeline.json"
+    },
+    {
+      "id": "text-single",
+      "kind": "panel",
+      "title": "Single-line text",
+      "file": "panels/text-single.json"
+    },
+    {
+      "id": "text-multiline",
+      "kind": "panel",
+      "title": "Multiline text",
+      "file": "panels/text-multiline.json"
+    },
+    {
+      "id": "image",
+      "kind": "panel",
+      "title": "Image",
+      "file": "panels/image.json"
+    },
+    {
+      "id": "image-text",
+      "kind": "layout",
+      "title": "Image and text",
+      "file": "layouts/image-text.json"
+    },
+    {
+      "id": "button",
+      "kind": "panel",
+      "title": "Button",
+      "file": "panels/button.json"
+    },
+    {
+      "id": "button-group",
+      "kind": "panel",
+      "title": "Button group",
+      "file": "panels/button-group.json"
+    },
+    {
+      "id": "chart-kpi",
+      "kind": "layout",
+      "title": "Chart + KPI",
+      "file": "layouts/chart-kpi.json"
+    },
+    {
+      "id": "chart-alerts",
+      "kind": "layout",
+      "title": "Chart + alerts",
+      "file": "layouts/chart-alerts.json"
+    },
+    {
+      "id": "kpi-2x2",
+      "kind": "layout",
+      "title": "2x2 KPI",
+      "file": "layouts/kpi-2x2.json"
+    },
+    {
+      "id": "three-row-stack",
+      "kind": "layout",
+      "title": "Three-row information stack",
+      "file": "layouts/three-row-stack.json"
+    },
+    {
+      "id": "comparison",
+      "kind": "layout",
+      "title": "Comparison",
+      "file": "layouts/comparison.json"
+    },
+    {
+      "id": "mosaic",
+      "kind": "layout",
+      "title": "Mosaic",
+      "file": "layouts/mosaic.json"
+    }
+  ]
+}
