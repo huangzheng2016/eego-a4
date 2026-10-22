@@ -465,6 +465,9 @@ void validate(const Settings& s, FieldErrors& errors) {
       const auto& field = rule.fields[j];
       const std::string field_path = path + ".fields[" + std::to_string(j) + "]";
       if (!validIdentifier(field.name, 24)) addError(errors, field_path + ".name", "invalid field name");
+      if (field.name == "device" || field.name == "rule" || field.name == "rssi") {
+        addError(errors, field_path + ".name", "reserved BLE observer metadata name");
+      }
       for (size_t k = 0; k < j; k++) {
         if (rule.fields[k].name == field.name) {
           addError(errors, field_path + ".name", "must be unique within a rule");
@@ -681,7 +684,7 @@ const char* schemaJson() {
       "required":["id","fields"],"id":{"type":"string","max_bytes":24},"event_type":{"type":"string","default":"ble.sensor","max_bytes":64},"title":{"type":"string","default":"BLE sensor","max_bytes":48},
       "match":{"one_of":[{"manufacturer_id":{"type":"int","range":[0,65535]}},{"service_uuid":{"type":"string","format":"16/32/128-bit UUID"}}]},
       "payload_offset":{"type":"int","range":[0,255],"default":0,"note":"relative to payload after company ID or service UUID"},"payload_match":{"type":"hex","max_bytes":12,"default":""},
-      "fields":{"type":"array","min_items":1,"max_items":4,"item":{"name":{"type":"string","max_bytes":24},"offset":{"type":"int","range":[0,255]},"type":{"enum":["u8","i8","u16le","i16le","u32le","i32le","f32le"]},"scale":{"type":"number","default":1,"nonzero":true,"max_abs":1000000}}},
+      "fields":{"type":"array","min_items":1,"max_items":4,"item":{"name":{"type":"string","max_bytes":24,"forbidden_values":["device","rule","rssi"]},"offset":{"type":"int","range":[0,255]},"type":{"enum":["u8","i8","u16le","i16le","u32le","i32le","f32le"]},"scale":{"type":"number","default":1,"nonzero":true,"max_abs":1000000}}},
       "ttl_s":{"type":"int","range":[60,604800],"default":86400}
     }}
   },

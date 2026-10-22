@@ -416,7 +416,6 @@ esp_err_t BleManager::startProvisioningFromLocal(const std::string& pop) {
   esp_err_t err = wifi_prov_mgr_init(config);
   const bool manager_initialized = err == ESP_OK;
   if (err == ESP_OK) err = wifi_prov_mgr_disable_auto_stop(1000);
-  if (err == ESP_OK) err = wifi_prov_mgr_keep_ble_on(0);
   if (err == ESP_OK) {
     err = wifi_prov_mgr_start_provisioning(WIFI_PROV_SECURITY_1, pop_.c_str(),
                                            service_name_.c_str(), nullptr);
