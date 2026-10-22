@@ -374,7 +374,8 @@ void parseSource(Reader& reader, const JsonValue& value, const std::string& path
   if (!reader.object(value, path, "source")) return;
   reader.known(value, path,
                {"id", "kind", "enabled", "url", "refresh_ms", "timeout_ms",
-                "max_response_bytes", "tls_verify", "auth_token_ref", "headers"});
+                "max_response_bytes", "tls_verify", "auth_token_ref", "headers",
+                "header_secret_refs"});
   reader.string(value, "id", path, out.id, kMaxIdCodePoints, true);
   reader.enumeration(value, "kind", path, out.kind, sourceKindFromString);
   reader.boolean(value, "enabled", path, out.enabled);
@@ -385,6 +386,7 @@ void parseSource(Reader& reader, const JsonValue& value, const std::string& path
   reader.boolean(value, "tls_verify", path, out.tls_verify);
   reader.string(value, "auth_token_ref", path, out.auth_token_ref, 128);
   reader.keyValues(value, "headers", path, out.headers, kMaxHeaders);
+  reader.keyValues(value, "header_secret_refs", path, out.header_secret_refs, kMaxHeaders);
 }
 
 void parseVariable(Reader& reader, const JsonValue& value, const std::string& path, Variable& out,

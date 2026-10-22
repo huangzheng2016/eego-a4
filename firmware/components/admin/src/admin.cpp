@@ -17,6 +17,7 @@
 #include "net_stack/credentials.h"
 #include "net_stack/net_task.h"
 #include "sd_card.h"
+#include "source_credential_usage.h"
 
 namespace eego::admin {
 
@@ -293,6 +294,32 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       return;
     }
 
+    case AdminCommandType::WriteSourceCredential: {
+      if (!net::CredentialStore::validSourceKeyForWrite(cmd.credential_key) ||
+          !net::CredentialStore::validSourceValue(cmd.credential_value)) {
+        res.err = "invalid source credential key or value";
+        return;
+      }
+      const esp_err_t err = net::CredentialStore::saveSourceCredential(
+          cmd.credential_key, cmd.credential_value);
+      res.ok = err == ESP_OK;
+      if (!res.ok) res.err = "failed to persist source credential";
+      return;
+    }
+
+    case AdminCommandType::DeleteSourceCredential: {
+      bool in_use = false;
+      const esp_err_t err = internal::deleteSourceCredentialIfUnreferenced(
+          cmd.credential_key, in_use);
+      res.ok = err == ESP_OK;
+      res.conflict = in_use;
+      if (!res.ok) {
+        res.err = in_use ? "credential is referenced by an active source configuration"
+                         : "failed to delete source credential";
+      }
+      return;
+    }
+
     case AdminCommandType::ApplySettings: {
       const settings::Snapshot snap = settings::DeviceSettings::instance().snapshot();
       settings::Settings candidate;
@@ -429,7 +456,7 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
         ok = false;
       }
       net::NetStack::instance().stop();
-      for (const char* ns : {"sec", "wifi", "ui", "ble", "nimble_bond", "dashboard"}) {
+      for (const char* ns : {"sec", "source", "wifi", "ui", "ble", "nimble_bond", "dashboard"}) {
         if (net::CredentialStore::clearNamespace(ns) != ESP_OK) {
           ADMIN_LOG_ERROR("factory reset: clear namespace failed: %s", ns);
           ok = false;

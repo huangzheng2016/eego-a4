@@ -165,6 +165,7 @@ struct Source {
   bool tls_verify = true;
   std::string auth_token_ref;
   std::vector<KeyValue> headers;
+  std::vector<KeyValue> header_secret_refs;
 };
 
 struct VariableOption {

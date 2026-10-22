@@ -28,12 +28,14 @@ enum class AdminCommandType : uint8_t {
   ApplyWifi,        // WiFi 账号变更（NVS 权威 + config wifi_list 同步 + 重连）
   ApplySettings,    // typed patch → app_task 对最新快照合并 + NVS commit
   WifiReset,        // 仅清 WiFi 凭据并打开限时恢复 AP（保留管理密码和偏好）
-  FactoryReset,     // 清 sec/wifi/ui/ble/nimble_bond/device + 指定 SD 配置 → 重启
+  FactoryReset,     // 清 sec/source/wifi/ui/ble/nimble_bond/device + 指定 SD 配置 → 重启
   Reboot,           // delay_ms 后 esp_restart
   ApplyDashboard,   // 完整 dashboard bundle：校验 + revision 检查 + 原子持久化
   DeleteDashboard,  // 删除 dashboard；同样支持 revision 冲突检查
   ApplyInputBindings,  // 稀疏输入覆盖或本地/远程 reset；app_task 重验并原子写 NVS
   BleClearBonds,       // 停止 BLE 角色并清 NimBLE bond/NVS；不开放远程配网
+  WriteSourceCredential,  // 写入/轮换 source 命名空间凭据；值仅命令内存持有
+  DeleteSourceCredential, // 删除未被任何活动配置引用的 source 凭据
 };
 
 struct AdminCommand {
@@ -70,6 +72,10 @@ struct AdminCommand {
   std::string wifi_ssid;
   std::string wifi_password;
   bool wifi_remove = false;
+
+  // Write/DeleteSourceCredential：固定 source 命名空间内的 key；value 仅写入时携带。
+  std::string credential_key;
+  std::string credential_value;
 
   // Reboot：重启前延迟（毫秒，M13：≥2s 让 202 响应发出）。
   uint32_t delay_ms = 2000;

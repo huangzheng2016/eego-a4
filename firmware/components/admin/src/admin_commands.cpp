@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "net_stack/credentials.h"
 
 namespace eego::admin {
 
@@ -22,6 +23,8 @@ struct RawCmd {
   AdminResult res;
   SemaphoreHandle_t done = nullptr;
   ~RawCmd() {
+    net::CredentialStore::secureErase(cmd.credential_value);
+    net::CredentialStore::secureErase(cmd.wifi_password);
     if (done != nullptr) vSemaphoreDelete(done);
   }
 };

@@ -112,14 +112,14 @@ static std::vector<SourcePreset> buildPresets() {
         "Prometheus HTTP API /api/v1/alerts 是稳定 JSON 接口，模板开箱可用。"
         "labels 整体进 fields（≤16 键预算，超限键被跳过）；severity 经 severity_map 映射；"
         "state=inactive 经 clear_states 映射为清除（firing/pending 保持活动）。"
-        "开启认证时把 token 存 NVS（admin 写 sec 命名空间）并填 auth_token_ref。";
+        "开启认证时把 token 存 NVS（admin 写 source 命名空间）并填 auth_token_ref。";
     p.notes_en =
         "The Prometheus HTTP API /api/v1/alerts is a stable JSON interface; the "
         "template works out of the box. labels go wholesale into fields (16-key "
         "budget, excess keys skipped); severity is mapped via severity_map; "
         "state=inactive maps to clear via clear_states (firing/pending stay "
         "active). When auth is enabled, store the token in NVS (admin writes "
-        "the sec namespace) and fill auth_token_ref.";
+        "the source namespace) and fill auth_token_ref.";
     v.push_back(std::move(p));
   }
 
@@ -220,14 +220,14 @@ static std::vector<SourcePreset> buildPresets() {
         "通用兜底模板：端点直接返回规范事件数组（M11 §4 schema），恒等映射，"
         "无需 field_map/severity_map。需要字段改名/严重度映射时在管理 UI 加 field_map "
         "（canonical←源路径，'.' 分层）与 severity_map。认证用 auth_token_ref "
-        "（token 存 NVS sec 命名空间）；自签 TLS 显式 tls_verify=false。";
+        "（token 存 NVS source 命名空间）；自签 TLS 显式 tls_verify=false。";
     p.notes_en =
         "Generic fallback template: the endpoint returns the canonical event "
         "array (M11 §4 schema) directly, identity mapping, no field_map/"
         "severity_map needed. Add field_map (canonical <- source path, '.' "
         "layered) and severity_map in the admin UI when renaming fields or "
         "mapping severities. Auth via auth_token_ref (token stored in the NVS "
-        "sec namespace); self-signed TLS requires explicit tls_verify=false.";
+        "source namespace); self-signed TLS requires explicit tls_verify=false.";
     v.push_back(std::move(p));
   }
 

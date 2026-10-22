@@ -192,7 +192,11 @@ bool NetStackTransport::asyncIdle() const {
 }
 
 TokenResolver makeNetStackTokenResolver() {
-  return [](const std::string& ref) { return net::CredentialStore::resolveToken(ref); };
+  return [](const std::string& ref) {
+    std::string value;
+    if (net::CredentialStore::resolveSourceCredential(ref, value) != ESP_OK) return std::string();
+    return value;
+  };
 }
 
 }  // namespace eego::dashboard::pipeline

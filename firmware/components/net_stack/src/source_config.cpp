@@ -4,7 +4,26 @@
 
 #include <cctype>
 
+#include "net_stack/credentials.h"
+
 namespace eego::net {
+
+namespace {
+
+std::string lowerAscii(const std::string& text) {
+  std::string out = text;
+  for (char& c : out) {
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  }
+  return out;
+}
+
+bool reservedHeader(const std::string& name) {
+  const std::string lower = lowerAscii(name);
+  return lower == "authorization" || lower == "host" || lower == "content-length";
+}
+
+}  // namespace
 
 using alert_core::JsonValue;
 using alert_core::ValidationError;
@@ -168,9 +187,9 @@ bool SourceConfig::fromJson(const JsonValue& obj, SourceConfig& out, ValidationE
 
   const JsonValue* hd = obj.find("headers");
   if (hd) {
-    if (hd->type() != JsonValue::Type::Object) {
+    if (hd->type() != JsonValue::Type::Object || hd->objectItems().size() > 16) {
       err.field = "headers";
-      err.message = "must be an object";
+      err.message = "must be a bounded object";
       return false;
     }
     for (const auto& kv : hd->objectItems()) {
@@ -179,14 +198,30 @@ bool SourceConfig::fromJson(const JsonValue& obj, SourceConfig& out, ValidationE
         err.message = "must be a string";
         return false;
       }
-      // Authorization 一律由 auth_token_ref 注入，配置头不允许伪造（M13 边界）
-      if (kv.first == "Authorization" || kv.first == "Host" ||
-          kv.first == "Content-Length") {
+      if (reservedHeader(kv.first) || CredentialStore::sensitiveHeaderName(kv.first)) {
         err.field = "headers." + kv.first;
-        err.message = "header not allowed";
+        err.message = "sensitive header values must use auth_token_ref or header_secret_refs";
         return false;
       }
       out.headers.push_back({kv.first, kv.second.stringValue()});
+    }
+  }
+
+  const JsonValue* secret_headers = obj.find("header_secret_refs");
+  if (secret_headers) {
+    if (secret_headers->type() != JsonValue::Type::Object ||
+        secret_headers->objectItems().size() > 16) {
+      err.field = "header_secret_refs";
+      err.message = "must be a bounded object of source credential refs";
+      return false;
+    }
+    for (const auto& kv : secret_headers->objectItems()) {
+      if (kv.second.type() != JsonValue::Type::String) {
+        err.field = "header_secret_refs." + kv.first;
+        err.message = "must be a source credential ref";
+        return false;
+      }
+      out.header_secret_refs.push_back({kv.first, kv.second.stringValue()});
     }
   }
 
@@ -205,6 +240,36 @@ std::string SourceConfig::validate() const {
   if (kind == "http_poll") {
     if (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0) {
       return "url must start with http:// or https://";
+    }
+  }
+  if (!auth_token_ref.empty() && !CredentialStore::validSourceRef(auth_token_ref)) {
+    return "auth_token_ref must use nvs:source/<key>; re-create legacy refs via credentials API";
+  }
+  if (headers.size() + header_secret_refs.size() > 16) return "too many HTTP headers";
+  for (size_t i = 0; i < headers.size(); ++i) {
+    const auto& header = headers[i];
+    if (!CredentialStore::validHeaderName(header.name) || reservedHeader(header.name) ||
+        CredentialStore::sensitiveHeaderName(header.name) ||
+        !CredentialStore::safeHeaderValue(header.value) || header.value.size() > 1024) {
+      return "plain headers must be non-sensitive and safely bounded";
+    }
+    for (size_t j = 0; j < i; ++j) {
+      if (lowerAscii(header.name) == lowerAscii(headers[j].name)) return "duplicate HTTP header";
+    }
+  }
+  for (size_t i = 0; i < header_secret_refs.size(); ++i) {
+    const auto& header = header_secret_refs[i];
+    if (!CredentialStore::validHeaderName(header.name) || reservedHeader(header.name) ||
+        !CredentialStore::validSourceRef(header.value)) {
+      return "header_secret_refs requires safe names and nvs:source/<key> refs";
+    }
+    for (size_t j = 0; j < i; ++j) {
+      if (lowerAscii(header.name) == lowerAscii(header_secret_refs[j].name)) {
+        return "duplicate secret HTTP header";
+      }
+    }
+    for (const auto& plain : headers) {
+      if (lowerAscii(header.name) == lowerAscii(plain.name)) return "ambiguous HTTP header";
     }
   }
   return {};
@@ -249,9 +314,50 @@ JsonValue SourceConfig::toJson() const {
     for (const auto& h : headers) m.emplace_back(h.name, JsonValue::makeString(h.value));
     o.emplace_back("headers", JsonValue::makeObject(std::move(m)));
   }
+  if (!header_secret_refs.empty()) {
+    JsonValue::Object m;
+    for (const auto& h : header_secret_refs) m.emplace_back(h.name, JsonValue::makeString(h.value));
+    o.emplace_back("header_secret_refs", JsonValue::makeObject(std::move(m)));
+  }
   o.emplace_back("timeout_ms", JsonValue::makeInt(timeout_ms));
   o.emplace_back("max_body_bytes", JsonValue::makeInt(max_body_bytes));
   return JsonValue::makeObject(std::move(o));
+}
+
+bool buildSourceRequest(const SourceConfig& cfg, NetRequest& out, std::string& error) {
+  error = cfg.validate();
+  if (!error.empty()) return false;
+  out = NetRequest{};
+  out.method = "GET";
+  out.url = cfg.url;
+  out.timeout_ms = cfg.timeout_ms;
+  out.tls_verify = cfg.tls_verify;
+  out.conditional_get = true;
+  out.headers = cfg.headers;
+  const auto resolve = [&](const std::string& ref, std::string& value) {
+    const esp_err_t err = CredentialStore::resolveSourceCredential(ref, value);
+    if (err != ESP_OK) error = "configured source credential is unavailable";
+    return err == ESP_OK;
+  };
+  if (!cfg.auth_token_ref.empty()) {
+    std::string token;
+    if (!resolve(cfg.auth_token_ref, token)) {
+      CredentialStore::secureErase(token);
+      return false;
+    }
+    out.headers.push_back({"Authorization", "Bearer " + token});
+    CredentialStore::secureErase(token);
+  }
+  for (const auto& header : cfg.header_secret_refs) {
+    std::string secret;
+    if (!resolve(header.value, secret)) {
+      CredentialStore::secureErase(secret);
+      return false;
+    }
+    out.headers.push_back({header.name, std::move(secret)});
+    CredentialStore::secureErase(secret);
+  }
+  return true;
 }
 
 }  // namespace eego::net

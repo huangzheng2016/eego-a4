@@ -48,9 +48,9 @@ class DashboardStore {
 
   std::shared_ptr<const DashboardDocument> snapshot() const;
 
-  // Accepts a bundle or a raw v1/v2 dashboard. Masked secrets are resolved only
-  // against current, never logged or returned. The input revision is informational;
-  // commit() assigns the next authoritative revision.
+  // Accepts a bundle or a raw v1/v2 dashboard. Plain sensitive headers are rejected;
+  // credential refs remain metadata and are never resolved into serialized output.
+  // The input revision is informational; commit() assigns the next authoritative revision.
   static DashboardParseResult parse(const std::string& json,
                                     const DashboardDocument* current = nullptr);
   static bool validate(DashboardDocument& candidate, const DashboardDocument* current,
