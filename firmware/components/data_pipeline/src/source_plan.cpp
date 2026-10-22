@@ -5,9 +5,11 @@
 #include <cctype>
 #include <set>
 
+#include "alert_core/sha1.h"
 #include "dashboard_core/expression.h"
 #include "dashboard_core/json.h"
 #include "data_pipeline/json_path.h"
+#include "net_stack/credentials.h"
 
 namespace eego::dashboard::pipeline {
 namespace {
@@ -21,12 +23,7 @@ bool validId(std::string_view id) {
 }
 
 bool validHeaderName(std::string_view name) {
-  if (name.empty() || name.size() > 64) return false;
-  static constexpr std::string_view kExtra = "!#$%&'*+.^_`|~-";
-  return std::all_of(name.begin(), name.end(), [](char c) {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-           (c >= '0' && c <= '9') || kExtra.find(c) != std::string_view::npos;
-  });
+  return net::CredentialStore::validHeaderName(std::string(name));
 }
 
 std::string lower(std::string_view text) {
@@ -120,7 +117,8 @@ bool knownFields(const JsonValue& object, std::initializer_list<std::string_view
   return true;
 }
 
-bool parseHeaders(const JsonValue& value, std::vector<KeyValue>& out, std::string& error) {
+bool parseHeaders(const JsonValue& value, std::vector<KeyValue>& out, bool secrets,
+                  std::string& error) {
   if (value.type() != JsonValue::Type::Object || value.objectItems().size() > kMaxHeaders) {
     error = "headers must be a bounded object";
     return false;
@@ -128,9 +126,18 @@ bool parseHeaders(const JsonValue& value, std::vector<KeyValue>& out, std::strin
   out.clear();
   for (const auto& member : value.objectItems()) {
     if (!validHeaderName(member.first) || reservedHeader(member.first) ||
-        member.second.type() != JsonValue::Type::String ||
-        !safeHeaderValue(member.second.stringValue())) {
+        member.second.type() != JsonValue::Type::String) {
       error = "invalid or reserved HTTP header";
+      return false;
+    }
+    if (secrets) {
+      if (!net::CredentialStore::validSourceRef(member.second.stringValue())) {
+        error = "secret headers require nvs:source/<key> references";
+        return false;
+      }
+    } else if (net::CredentialStore::sensitiveHeaderName(member.first) ||
+               !safeHeaderValue(member.second.stringValue())) {
+      error = "plain headers must contain only non-sensitive safe values";
       return false;
     }
     out.push_back({member.first, member.second.stringValue()});
@@ -364,15 +371,47 @@ bool validateSourcePlan(const SourcePlan& plan, std::string& error) {
     error = "static source URL must be empty";
     return false;
   }
-  if (source.headers.size() > kMaxHeaders) {
+  if (!source.auth_token_ref.empty() &&
+      !net::CredentialStore::validSourceRef(source.auth_token_ref)) {
+    error = "auth_token_ref must use nvs:source/<key>; re-create legacy refs via credentials API";
+    return false;
+  }
+  if (source.headers.size() + source.header_secret_refs.size() > kMaxHeaders) {
     error = "too many HTTP headers";
     return false;
   }
-  for (const KeyValue& header : source.headers) {
+  for (size_t i = 0; i < source.headers.size(); ++i) {
+    const KeyValue& header = source.headers[i];
     if (!validHeaderName(header.key) || reservedHeader(header.key) ||
-        !safeHeaderValue(header.value)) {
-      error = "invalid or reserved HTTP header";
+        net::CredentialStore::sensitiveHeaderName(header.key) || !safeHeaderValue(header.value)) {
+      error = "plain headers must contain only non-sensitive safe values";
       return false;
+    }
+    for (size_t j = 0; j < i; ++j) {
+      if (lower(header.key) == lower(source.headers[j].key)) {
+        error = "duplicate HTTP header";
+        return false;
+      }
+    }
+  }
+  for (size_t i = 0; i < source.header_secret_refs.size(); ++i) {
+    const KeyValue& header = source.header_secret_refs[i];
+    if (!validHeaderName(header.key) || reservedHeader(header.key) ||
+        !net::CredentialStore::validSourceRef(header.value)) {
+      error = "header_secret_refs requires safe names and nvs:source/<key> refs";
+      return false;
+    }
+    for (size_t j = 0; j < i; ++j) {
+      if (lower(header.key) == lower(source.header_secret_refs[j].key)) {
+        error = "duplicate secret HTTP header";
+        return false;
+      }
+    }
+    for (const KeyValue& plain : source.headers) {
+      if (lower(header.key) == lower(plain.key)) {
+        error = "ambiguous HTTP header";
+        return false;
+      }
     }
   }
   if (!checkPath(plan.reset_at_path, false, error) ||
@@ -402,7 +441,7 @@ bool sourcePlanFromJson(const JsonValue& value, SourcePlan& out, std::string& er
   if (!knownFields(value,
                    {"id", "kind", "enabled", "url", "refresh_ms", "timeout_ms",
                     "max_response_bytes", "tls_verify", "auth_token_ref", "headers",
-                    "response", "method", "body", "static_body", "metrics", "events",
+                    "header_secret_refs", "response", "method", "body", "static_body", "metrics", "events",
                     "text_path", "reset_at_path", "stale_after_ms", "conditional_get",
                     "max_json_depth"},
                    error) ||
@@ -445,7 +484,10 @@ bool sourcePlanFromJson(const JsonValue& value, SourcePlan& out, std::string& er
     }
   }
   if (const JsonValue* headers = value.find("headers")) {
-    if (!parseHeaders(*headers, out.source.headers, error)) return false;
+    if (!parseHeaders(*headers, out.source.headers, false, error)) return false;
+  }
+  if (const JsonValue* headers = value.find("header_secret_refs")) {
+    if (!parseHeaders(*headers, out.source.header_secret_refs, true, error)) return false;
   }
   if (const JsonValue* metrics = value.find("metrics")) {
     if (metrics->type() != JsonValue::Type::Array || metrics->arrayItems().size() > 64) {
@@ -515,17 +557,36 @@ bool buildSourceRequest(const SourcePlan& plan, const VariableValues& variables,
     }
     out.headers.push_back({header.key, std::move(value)});
   }
-  if (!plan.source.auth_token_ref.empty() && token_resolver) {
-    const std::string token = token_resolver(plan.source.auth_token_ref);
-    if (!token.empty()) {
-      if (!safeHeaderValue(token)) {
-        error = "resolved credential contains invalid header characters";
-        return false;
-      }
-      out.headers.push_back({"Authorization", "Bearer " + token});
-    }
-  }
   if (!interpolateVariables(plan.body, variables, out.body, error, 64 * 1024)) return false;
+  const auto failCredential = [&]() {
+    for (auto& header : out.headers) net::CredentialStore::secureErase(header.value);
+    out.headers.clear();
+    error = "configured source credential is unavailable or invalid";
+    return false;
+  };
+  const auto resolve = [&](const std::string& ref, std::string& secret) {
+    if (!token_resolver) return false;
+    secret = token_resolver(ref);
+    return net::CredentialStore::validSourceValue(secret);
+  };
+  if (!plan.source.auth_token_ref.empty()) {
+    std::string token;
+    if (!resolve(plan.source.auth_token_ref, token)) {
+      net::CredentialStore::secureErase(token);
+      return failCredential();
+    }
+    out.headers.push_back({"Authorization", "Bearer " + token});
+    net::CredentialStore::secureErase(token);
+  }
+  for (const KeyValue& header : plan.source.header_secret_refs) {
+    std::string secret;
+    if (!resolve(header.value, secret)) {
+      net::CredentialStore::secureErase(secret);
+      return failCredential();
+    }
+    out.headers.push_back({header.key, std::move(secret)});
+    net::CredentialStore::secureErase(secret);
+  }
   return true;
 }
 
@@ -535,7 +596,7 @@ std::string sourceRequestKey(const net::NetRequest& request) {
   appendKeyPart(key, request.url);
   for (const net::NetHeader& header : request.headers) {
     appendKeyPart(key, header.name);
-    appendKeyPart(key, header.value);
+    appendKeyPart(key, alert_core::sha1Hex(header.value));
   }
   appendKeyPart(key, request.body);
   appendKeyPart(key, request.tls_verify ? "1" : "0");

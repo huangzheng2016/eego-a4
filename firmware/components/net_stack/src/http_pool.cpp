@@ -68,6 +68,13 @@ static ParsedUrl parseUrl(const std::string& url) {
 // ---------------------------------------------------------------------------
 // NetResponse 所有权
 // ---------------------------------------------------------------------------
+NetRequest::~NetRequest() {
+  for (auto& header : headers) {
+    volatile char* data = header.value.empty() ? nullptr : header.value.data();
+    for (size_t i = 0; i < header.value.size(); ++i) data[i] = 0;
+  }
+}
+
 NetResponse::~NetResponse() {
   if (psbuf_) heap_caps_free(psbuf_);
 }

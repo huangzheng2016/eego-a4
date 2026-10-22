@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// NVS 凭据存储实现（wifi/sec 命名空间，自管读写）。
+// NVS 凭据存储实现（wifi/sec/source 命名空间，自管读写）。
 #include "net_stack/credentials.h"
 
 #include <cstdio>
@@ -129,6 +129,180 @@ esp_err_t CredentialStore::saveToken(const std::string& ns, const std::string& k
   if (err == ESP_OK) err = nvs_commit(h);
   nvs_close(h);
   return err;
+}
+
+namespace {
+
+std::string lowerAscii(const std::string& text) {
+  std::string out = text;
+  for (char& c : out) {
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  }
+  return out;
+}
+
+bool reservedSourceKey(const std::string& key) {
+  const std::string lower = lowerAscii(key);
+  if (lower == "pw_hash" || lower == "ingest_key" || lower == "count" ||
+      lower == "wifi" || lower == "ble" || lower == "nimble_bond" || lower == "sec") {
+    return true;
+  }
+  const auto indexed = [&lower](const char* prefix) {
+    const std::string p(prefix);
+    if (lower.rfind(p, 0) != 0 || lower.size() == p.size()) return false;
+    for (size_t i = p.size(); i < lower.size(); ++i) {
+      if (lower[i] < '0' || lower[i] > '9') return false;
+    }
+    return true;
+  };
+  return indexed("pass") || indexed("ssid");
+}
+
+}  // namespace
+
+bool CredentialStore::validSourceKey(const std::string& key) {
+  if (key.empty() || key.size() > kSourceKeyMaxBytes) return false;
+  for (const unsigned char c : key) {
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+          (c >= '0' && c <= '9') || c == '_' || c == '-')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool CredentialStore::validSourceKeyForWrite(const std::string& key) {
+  return validSourceKey(key) && !reservedSourceKey(key);
+}
+
+bool CredentialStore::safeHeaderValue(const std::string& value) {
+  for (const unsigned char c : value) {
+    if (c != '\t' && (c < 0x20 || c == 0x7f)) return false;
+  }
+  return true;
+}
+
+bool CredentialStore::validSourceValue(const std::string& value) {
+  if (value.empty() || value.size() > kSourceValueMaxBytes) return false;
+  for (const unsigned char c : value) {
+    if (c < 0x20 || c == 0x7f) return false;
+  }
+  return true;
+}
+
+bool CredentialStore::validHeaderName(const std::string& name) {
+  if (name.empty() || name.size() > 64) return false;
+  static const std::string extra = "!#$%&'*+.^_`|~-";
+  for (const unsigned char c : name) {
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+          (c >= '0' && c <= '9') || extra.find(static_cast<char>(c)) != std::string::npos)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool CredentialStore::sensitiveHeaderName(const std::string& name) {
+  const std::string lower = lowerAscii(name);
+  return lower == "authorization" || lower == "proxy-authorization" ||
+         lower == "cookie" || lower == "set-cookie" || lower == "x-api-key" ||
+         lower.find("auth") != std::string::npos || lower.find("key") != std::string::npos ||
+         lower.find("token") != std::string::npos || lower.find("pass") != std::string::npos ||
+         lower.find("secret") != std::string::npos || lower.find("cookie") != std::string::npos ||
+         lower.find("credential") != std::string::npos;
+}
+
+std::string CredentialStore::sourceRef(const std::string& key) {
+  if (!validSourceKey(key)) return {};
+  return "nvs:source/" + key;
+}
+
+std::string CredentialStore::sourceKey(const std::string& ref) {
+  static const std::string prefix = "nvs:source/";
+  if (ref.rfind(prefix, 0) != 0) return {};
+  const std::string key = ref.substr(prefix.size());
+  return validSourceKey(key) ? key : std::string();
+}
+
+bool CredentialStore::validSourceRef(const std::string& ref) {
+  return !sourceKey(ref).empty();
+}
+
+esp_err_t CredentialStore::saveSourceCredential(const std::string& key,
+                                                const std::string& value) {
+  if (!validSourceKeyForWrite(key) || !validSourceValue(value)) return ESP_ERR_INVALID_ARG;
+  return saveToken(kSourceNamespace, key, value);
+}
+
+esp_err_t CredentialStore::deleteSourceCredential(const std::string& key) {
+  if (!validSourceKeyForWrite(key)) return ESP_ERR_INVALID_ARG;
+  if (ensureNvs() != ESP_OK) return ESP_FAIL;
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(kSourceNamespace, NVS_READWRITE, &h);
+  if (err != ESP_OK) return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+  err = nvs_erase_key(h, key.c_str());
+  if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  return err;
+}
+
+esp_err_t CredentialStore::resolveSourceCredential(const std::string& ref, std::string& value) {
+  value.clear();
+  const std::string key = sourceKey(ref);
+  if (key.empty()) return ESP_ERR_INVALID_ARG;
+  if (ensureNvs() != ESP_OK) return ESP_FAIL;
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(kSourceNamespace, NVS_READONLY, &h);
+  if (err != ESP_OK) return err;
+  size_t length = 0;
+  err = nvs_get_str(h, key.c_str(), nullptr, &length);
+  std::string temporary;
+  if (err == ESP_OK && (length <= 1 || length > kSourceValueMaxBytes + 1)) {
+    err = ESP_ERR_INVALID_SIZE;
+  }
+  if (err == ESP_OK) {
+    temporary.resize(length - 1);
+    size_t read_length = length;
+    err = nvs_get_str(h, key.c_str(), temporary.data(), &read_length);
+  }
+  nvs_close(h);
+  if (err != ESP_OK || !validSourceValue(temporary)) {
+    secureErase(temporary);
+    return err == ESP_OK ? ESP_ERR_INVALID_RESPONSE : err;
+  }
+  value = std::move(temporary);
+  return ESP_OK;
+}
+
+esp_err_t CredentialStore::listSourceCredentials(std::vector<SourceCredentialMetadata>& out) {
+  out.clear();
+  if (ensureNvs() != ESP_OK) return ESP_FAIL;
+  nvs_iterator_t iterator = nullptr;
+  esp_err_t err = nvs_entry_find("nvs", kSourceNamespace, NVS_TYPE_STR, &iterator);
+  if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
+  while (err == ESP_OK) {
+    nvs_entry_info_t info;
+    err = nvs_entry_info(iterator, &info);
+    if (err != ESP_OK) break;
+    const std::string key(info.key);
+    if (validSourceKey(key)) out.push_back({key, sourceRef(key)});
+    err = nvs_entry_next(&iterator);
+  }
+  nvs_release_iterator(iterator);
+  if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+  if (err != ESP_OK) out.clear();
+  return err;
+}
+
+esp_err_t CredentialStore::clearSourceCredentials() {
+  return clearNamespace(kSourceNamespace);
+}
+
+void CredentialStore::secureErase(std::string& value) {
+  volatile char* data = value.empty() ? nullptr : value.data();
+  for (size_t i = 0; i < value.size(); ++i) data[i] = 0;
+  value.clear();
 }
 
 esp_err_t CredentialStore::clearNamespace(const std::string& ns) {

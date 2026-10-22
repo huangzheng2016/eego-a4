@@ -32,6 +32,8 @@ idf_component_register(
         "src/dashboard_page.cpp"
         "src/provision_portal.cpp"
         "src/portal_page.cpp"
+        "src/source_secret_migration.cpp"
+        "src/source_credential_usage.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
         alert_core

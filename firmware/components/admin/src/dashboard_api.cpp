@@ -318,7 +318,8 @@ JsonValue* findPanel(JsonValue& page, const std::string& id) {
 
 void syncPlanWithSource(JsonValue& plan, const JsonValue& source) {
   static const char* kFields[] = {"id", "kind", "enabled", "url", "refresh_ms", "timeout_ms",
-                                  "max_response_bytes", "tls_verify", "auth_token_ref", "headers"};
+                                  "max_response_bytes", "tls_verify", "auth_token_ref", "headers",
+                                  "header_secret_refs"};
   for (const char* field : kFields) {
     if (const JsonValue* value = source.find(field)) set(plan, field, *value);
   }
@@ -786,19 +787,20 @@ const char* schemaInfo() {
   return R"JSON({
   "bundle":{"schema":"eego.dashboard-bundle/1","schema_version":1,"max_bytes":196608,"fields":["schema","schema_version","revision","dashboard","source_plans"]},
   "dashboard":{"schema":"eego.dashboard/2","schema_version":2,"accepted_versions":[1,2],"canonical_schema_file":"dashboard_core/schema/eego-dashboard-v2.schema.json"},
-  "source_plan":{"max_bytes":32768,"max_items":12,"script_execution":false,"responses":["generic_json","prometheus","standard_json","metrics_json","events_json","image","text"]},
+  "source_plan":{"max_bytes":32768,"max_items":12,"script_execution":false,"auth_token_ref":"nvs:source/<key>","headers":"non-secret literal values only","header_secret_refs":"header name -> nvs:source/<key>","responses":["generic_json","prometheus","standard_json","metrics_json","events_json","image","text"]},
   "resources":{
     "dashboard":"/api/v1/dashboard",
     "pages":"/api/v1/dashboard/pages",
     "panels":"/api/v1/dashboard/pages/{page}/panels",
     "actions":"/api/v1/dashboard/pages/{page}/panels/{panel}/actions",
     "sources":"/api/v1/dashboard/sources",
+    "source_credentials":"/api/v1/sources/credentials",
     "variables":"/api/v1/dashboard/variables",
     "alerts":"/api/v1/dashboard/alerts",
     "layout":"/api/v1/dashboard/pages/{page}/layout"
   },
   "concurrency":"Send If-Match: <revision> on mutations; stale revisions return 409.",
-  "security":"Bearer required; JSON writes enforce same-origin and content type. Secrets are masked and raw response bodies are never returned."
+  "security":"Bearer required; JSON writes enforce same-origin and content type. Credentials are write-only in NVS source; SD and exports carry refs only. Raw response bodies are never returned."
 })JSON";
 }
 

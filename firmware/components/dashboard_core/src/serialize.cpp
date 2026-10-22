@@ -136,6 +136,7 @@ JsonValue sourceToJson(const Source& source) {
   object.emplace_back("tls_verify", boolean(source.tls_verify));
   object.emplace_back("auth_token_ref", string(source.auth_token_ref));
   object.emplace_back("headers", keyValuesToJson(source.headers));
+  object.emplace_back("header_secret_refs", keyValuesToJson(source.header_secret_refs));
   return JsonValue::makeObject(std::move(object));
 }
 

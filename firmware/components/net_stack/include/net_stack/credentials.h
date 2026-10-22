@@ -9,10 +9,9 @@
 //   * SD config.json 只放非机密配置与 "*_ref" 引用（admin 组件契约，M17）；
 //   * 本组件任何日志不得输出凭据值（M13：secrets 仅允许前 4 位掩码，这里一律不打印）。
 //
-// 引用格式（config.json 中的 *_ref）：
-//   * "nvs:<key>"            → 默认命名空间 "sec"，键 <key>
-//   * "nvs:<ns>/<key>"       → 命名空间 <ns>，键 <key>（如 "nvs:wifi/0"）
-//   非 "nvs:" 前缀、缺段或读取失败一律解析为空串（调用方按"无凭据"处理）。
+// 数据源公开引用固定为 "nvs:source/<key>"，只允许 source 命名空间；
+// 内部管理认证仍可解析 "nvs:<key>"（默认 sec）或 "nvs:<ns>/<key>"，
+// 但不得把该内部能力用于外部数据源配置。
 
 #include <string>
 #include <vector>
@@ -26,8 +25,17 @@ struct WifiAccount {
   std::string password;  // 仅内存使用；禁止写入日志/SD/告警字段
 };
 
+struct SourceCredentialMetadata {
+  std::string key;
+  std::string ref;
+};
+
 class CredentialStore {
  public:
+  static constexpr const char* kSourceNamespace = "source";
+  static constexpr size_t kSourceKeyMaxBytes = 15;
+  static constexpr size_t kSourceValueMaxBytes = 1024;
+
   // 确保 nvs_flash 已初始化（幂等）。返回 ESP_OK 或初始化错误；
   // 无空闲页/版本变化时执行一次 erase 重建（IDF 标准恢复路径）。
   static esp_err_t ensureNvs();
@@ -39,13 +47,29 @@ class CredentialStore {
   static esp_err_t saveWifiAccounts(const std::vector<WifiAccount>& in);
   static esp_err_t clearWifiAccounts();
 
-  // ---- 源认证 token / 任意机密（默认命名空间 "sec"）----
-  // resolveToken 解析 "*_ref" 引用；读不到返回空串（不区分不存在与读取失败，
-  // 避免把 NVS 状态细节泄漏给上层）。
+  // 仅供管理认证等内部调用方使用；数据源不得用此接口解析外部配置中的 ref。
   static std::string resolveToken(const std::string& ref);
   static esp_err_t saveToken(const std::string& ns, const std::string& key,
                              const std::string& value);
   static esp_err_t clearNamespace(const std::string& ns);
+
+  // ---- 数据源凭据（固定 NVS 命名空间 "source"）----
+  static bool validSourceKey(const std::string& key);
+  static bool validSourceKeyForWrite(const std::string& key);
+  static bool validSourceValue(const std::string& value);
+  static bool validSourceRef(const std::string& ref);
+  static std::string sourceRef(const std::string& key);
+  static std::string sourceKey(const std::string& ref);
+  static esp_err_t saveSourceCredential(const std::string& key, const std::string& value);
+  static esp_err_t deleteSourceCredential(const std::string& key);
+  static esp_err_t resolveSourceCredential(const std::string& ref, std::string& value);
+  static esp_err_t listSourceCredentials(std::vector<SourceCredentialMetadata>& out);
+  static esp_err_t clearSourceCredentials();
+
+  static bool validHeaderName(const std::string& name);
+  static bool safeHeaderValue(const std::string& value);
+  static bool sensitiveHeaderName(const std::string& name);
+  static void secureErase(std::string& value);
 
   // 供管理端/日志使用的安全标识：仅说明 ref 指向的 命名空间/键，绝不返回值。
   static std::string describeRef(const std::string& ref);

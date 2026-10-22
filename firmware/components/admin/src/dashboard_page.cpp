@@ -19,7 +19,7 @@ const char kDashboardCss[] = R"CSS(#pane_dashboard{max-width:1180px}
 
 const char kDashboardJs[] = R"JS((function(){
 'use strict';
-var S={current:null,draft:null,sample:null,dirty:false,view:'dashboard',selected:{},ready:false,jsonBuffers:{}};
+var S={current:null,draft:null,sample:null,credentials:[],dirty:false,view:'dashboard',selected:{},ready:false,jsonBuffers:{}};
 function tr(zh,en){return LANG==='zh'?zh:en;}
 function clone(v){return v==null?v:JSON.parse(JSON.stringify(v));}
 function el(tag,cls,text){var n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;}
@@ -61,13 +61,14 @@ function normalizePanel(p){
  if(p.kind==='image')p.image=p.image||{asset_id:'',alt_text:'',fit:'contain'};
  return p;
 }
-function normalizeSource(s){s.headers=s.headers||{};s.kind=s.kind||'http';s.enabled=s.enabled!==false;s.refresh_ms=s.refresh_ms||60000;s.timeout_ms=s.timeout_ms||10000;s.max_response_bytes=s.max_response_bytes||65536;s.tls_verify=s.tls_verify!==false;s.auth_token_ref=s.auth_token_ref||'';return s;}
-function defaultPlan(s){return {id:s.id,kind:s.kind,enabled:s.enabled,url:s.url||'',refresh_ms:s.refresh_ms,timeout_ms:s.timeout_ms,max_response_bytes:s.max_response_bytes,tls_verify:s.tls_verify,auth_token_ref:s.auth_token_ref,headers:clone(s.headers),response:'standard_json',method:'GET',body:'',static_body:'',text_path:'',reset_at_path:'$.reset_at',stale_after_ms:300000,conditional_get:true,max_json_depth:16};}
-function syncPlanFields(p,s){['id','kind','enabled','url','refresh_ms','timeout_ms','max_response_bytes','tls_verify','auth_token_ref','headers'].forEach(function(k){p[k]=clone(s[k]);});}
+function normalizeSource(s){s.headers=s.headers||{};s.header_secret_refs=s.header_secret_refs||{};s.kind=s.kind||'http';s.enabled=s.enabled!==false;s.refresh_ms=s.refresh_ms||60000;s.timeout_ms=s.timeout_ms||10000;s.max_response_bytes=s.max_response_bytes||65536;s.tls_verify=s.tls_verify!==false;s.auth_token_ref=s.auth_token_ref||'';return s;}
+function defaultPlan(s){return {id:s.id,kind:s.kind,enabled:s.enabled,url:s.url||'',refresh_ms:s.refresh_ms,timeout_ms:s.timeout_ms,max_response_bytes:s.max_response_bytes,tls_verify:s.tls_verify,auth_token_ref:s.auth_token_ref,headers:clone(s.headers),header_secret_refs:clone(s.header_secret_refs),response:'standard_json',method:'GET',body:'',static_body:'',text_path:'',reset_at_path:'$.reset_at',stale_after_ms:300000,conditional_get:true,max_json_depth:16};}
+function syncPlanFields(p,s){['id','kind','enabled','url','refresh_ms','timeout_ms','max_response_bytes','tls_verify','auth_token_ref','headers','header_secret_refs'].forEach(function(k){p[k]=clone(s[k]);});}
 function syncPlan(s){var p=byId(plans(),'id',s.id);if(p)syncPlanFields(p,s);}
 function items(){
  var d=dash(),out=[];
  if(S.view==='dashboard')return [{id:'dashboard',label:tr('仪表盘设置','Dashboard settings')}];
+ if(S.view==='credentials')return [{id:'credentials',label:tr('数据源凭据','Source credentials')}];
  if(S.view==='pages'||S.view==='layout')(d.pages||[]).forEach(function(p){out.push({id:p.id,label:p.id});});
  if(S.view==='panels')(d.pages||[]).forEach(function(p){(p.panels||[]).forEach(function(x){out.push({id:p.id+'/'+x.id,label:p.id+' / '+x.id});});});
  if(S.view==='sources')(d.sources||[]).forEach(function(s){out.push({id:s.id,label:s.id});});
@@ -81,11 +82,11 @@ function selectedPage(){return byId(dash().pages,'id',selected());}
 function renderShell(){
  var root=$('pane_dashboard');root.textContent='';
  var bar=el('div','de-bar');root.appendChild(bar);
- var views=[['dashboard',tr('仪表盘','Dashboard')],['pages',tr('页面','Pages')],['panels',tr('面板','Panels')],['sources',tr('数据源','Sources')],['variables',tr('变量','Variables')],['alerts',tr('告警规则','Alert rules')],['layout',tr('布局','Layout')]];
+ var views=[['dashboard',tr('仪表盘','Dashboard')],['pages',tr('页面','Pages')],['panels',tr('面板','Panels')],['sources',tr('数据源','Sources')],['credentials',tr('凭据','Credentials')],['variables',tr('变量','Variables')],['alerts',tr('告警规则','Alert rules')],['layout',tr('布局','Layout')]];
  var vs=document.createElement('select');views.forEach(function(v){var o=document.createElement('option');o.value=v[0];o.textContent=v[1];vs.appendChild(o);});vs.value=S.view;vs.onchange=function(){S.view=vs.value;render();};bar.appendChild(vs);
- var is=document.createElement('select');is.className='grow';items().forEach(function(v){var o=document.createElement('option');o.value=v.id;o.textContent=v.label;is.appendChild(o);});is.value=selected();is.disabled=S.view==='dashboard';is.onchange=function(){S.selected[S.view]=is.value;render();};bar.appendChild(is);
- button(bar,tr('新建','New'),newItem,'sec').disabled=S.view==='dashboard'||S.view==='layout';
- button(bar,tr('删除','Delete'),deleteItem,'danger').disabled=S.view==='layout';
+ var is=document.createElement('select');is.className='grow';items().forEach(function(v){var o=document.createElement('option');o.value=v.id;o.textContent=v.label;is.appendChild(o);});is.value=selected();is.disabled=S.view==='dashboard'||S.view==='credentials';is.onchange=function(){S.selected[S.view]=is.value;render();};bar.appendChild(is);
+ button(bar,tr('新建','New'),newItem,'sec').disabled=S.view==='dashboard'||S.view==='layout'||S.view==='credentials';
+ button(bar,tr('删除','Delete'),deleteItem,'danger').disabled=S.view==='layout'||S.view==='credentials';
  bar.appendChild(el('span','de-clean','')).id='de_dirty';
  var actions=el('div','de-bar');root.appendChild(actions);
  button(actions,tr('校验并原子应用','Validate & apply atomically'),apply,'');
@@ -101,7 +102,7 @@ function renderShell(){
  root.appendChild(el('div','de-preview')).id='de_preview';
  updateDirty();
 }
-function render(){if(!S.draft)return;renderShell();var form=$('de_form');if(S.view==='dashboard')formDashboard(form);if(S.view==='pages')formPage(form);if(S.view==='panels')formPanel(form);if(S.view==='sources')formSource(form);if(S.view==='variables')formVariable(form);if(S.view==='alerts')formAlert(form);if(S.view==='layout')formLayout(form);renderPreview();}
+function render(){if(!S.draft)return;renderShell();var form=$('de_form');if(S.view==='dashboard')formDashboard(form);if(S.view==='pages')formPage(form);if(S.view==='panels')formPanel(form);if(S.view==='sources')formSource(form);if(S.view==='credentials')formCredentials(form);if(S.view==='variables')formVariable(form);if(S.view==='alerts')formAlert(form);if(S.view==='layout')formLayout(form);renderPreview();}
 function formDashboard(parent){
  var d=dash(),g=grid(parent);
  input(g,'ID',d.id,function(v){d.id=v;});
@@ -140,14 +141,26 @@ function formPanel(parent){
  p.actions.forEach(function(a,i){a.confirm=!!a.confirm;var row=el('div','de-row');as.appendChild(row);var ag=grid(row);input(ag,'ID',a.id,function(v){a.id=v;});select(ag,tr('动作','Action'),a.kind,[['goto_page','goto_page'],['goto_panel','goto_panel'],['set_variable','set_variable'],['refresh','refresh'],['back','back'],['ack_alert','ack_alert']],function(v){a.kind=v;});input(ag,tr('标签','Label'),a.label||'',function(v){a.label=v;});input(ag,tr('目标','Target'),a.target||'',function(v){a.target=v;});input(ag,tr('值','Value'),a.value||'',function(v){a.value=v;});input(ag,tr('执行前确认','Confirm before running'),a.confirm,function(v){a.confirm=v;},'checkbox');button(row,tr('移除动作','Remove action'),function(){p.actions.splice(i,1);dirty();render();},'sec');});
  button(as,tr('添加动作','Add action'),function(){p.actions.push({id:unique('action',p.actions,'id'),kind:'refresh',label:'Refresh',target:'current',value:'',confirm:false});dirty();render();},'sec');
 }
+function loadCredentials(){return api('/sources/credentials').then(function(j){S.credentials=(j&&j.credentials)||[];return S.credentials;});}
+function credentialOptions(current){var out=[['',tr('（无认证）','(no authentication)')]],seen=!current;(S.credentials||[]).forEach(function(c){out.push([c.ref,c.ref]);if(c.ref===current)seen=true;});if(current&&!seen)out.push([current,current+tr('（旧引用，需重建）',' (legacy; re-create)')]);return out;}
+function credentialInput(parent,label,type){var n=document.createElement('input');n.type=type;n.autocomplete='off';return field(parent,label,n,true);}
+function formCredentials(parent){
+ var note=el('p','dim',tr('秘密只写入 NVS 的 source 区域；此处立即生效，永不读回秘密值。配置和 SD 只保存引用。','Secrets are write-only in the NVS source namespace and apply immediately. Config and SD store refs only.'));parent.appendChild(note);
+ var g=grid(parent),key=credentialInput(g,tr('Key（1-15 位字母/数字/_/-）','Key (1-15 letters/digits/_/-)'),'text'),value=credentialInput(g,tr('秘密值（写入/轮换后清空）','Secret value (cleared after write/rotate)'),'password');key.maxLength=15;value.maxLength=1024;
+ button(parent,tr('写入或轮换凭据','Write or rotate credential'),function(){if(!key.value||!value.value){status(tr('请填写 key 和秘密值。','Enter a key and secret value.'),true);return;}status(tr('正在写入…','Writing…'));api('/sources/credentials',{method:'PUT',body:JSON.stringify({key:key.value,value:value.value})}).then(function(){value.value='';return loadCredentials();}).then(function(){render();status(tr('凭据已写入，数据源下次请求即使用新值。','Credential saved; the next source request uses the new value.'));}).catch(showError);},'');
+ var existing=section(parent,tr('已有引用（仅元数据）','Existing refs (metadata only)'));var list=el('pre','',(S.credentials||[]).map(function(c){return c.ref;}).join('\n')||tr('（无凭据）','(no credentials)'));existing.appendChild(list);
+ var chosen=document.createElement('select'),empty=document.createElement('option');empty.value='';empty.textContent=tr('选择要删除的 key…','Select a key to delete…');chosen.appendChild(empty);(S.credentials||[]).forEach(function(c){var o=document.createElement('option');o.value=c.key;o.textContent=c.key;chosen.appendChild(o);});field(existing,tr('删除未引用凭据','Delete an unreferenced credential'),chosen,true);
+ button(existing,tr('删除选中凭据','Delete selected credential'),function(){if(!chosen.value)return;if(!confirm(tr('确定删除？仍被引用的凭据会被设备拒绝删除。','Delete this credential? The device rejects deletion while referenced.')))return;api('/sources/credentials',{method:'DELETE',body:JSON.stringify({key:chosen.value})}).then(function(){return loadCredentials();}).then(function(){render();status(tr('凭据已删除。','Credential deleted.'));}).catch(showError);},'danger');
+}
 function formSource(parent){
  var s=byId(dash().sources,'id',selected());if(!s){parent.textContent=tr('请先新建数据源。','Create a source first.');return;}normalizeSource(s);var g=grid(parent);
  input(g,'ID',s.id,function(v){var old=s.id,p=byId(plans(),'id',old);remapSourceBuffers(old,v);s.id=v;if(p)p.id=v;S.selected.sources=v;});
  select(g,tr('类型','Kind'),s.kind,[['http','http'],['static','static']],function(v){s.kind=v;if(v==='static')s.url='';syncPlan(s);});
  input(g,tr('启用','Enabled'),s.enabled,function(v){s.enabled=v;syncPlan(s);},'checkbox');input(g,'URL',s.url||'',function(v){s.url=v;syncPlan(s);},'text',true);
  number(g,tr('刷新 (ms)','Refresh (ms)'),s.refresh_ms,function(v){s.refresh_ms=v;syncPlan(s);});number(g,tr('超时 (ms)','Timeout (ms)'),s.timeout_ms,function(v){s.timeout_ms=v;syncPlan(s);});number(g,tr('响应上限 (bytes)','Response budget (bytes)'),s.max_response_bytes,function(v){s.max_response_bytes=v;syncPlan(s);});
- input(g,'TLS verify',s.tls_verify,function(v){s.tls_verify=v;syncPlan(s);},'checkbox');input(g,'auth_token_ref',s.auth_token_ref,function(v){s.auth_token_ref=v;syncPlan(s);});
- jsonArea(parent,tr('请求头（敏感值保持掩码；替换掩码即更新）','Headers (sensitive values stay masked; replace the mask to change)'),s.headers,function(v){s.headers=v;syncPlan(s);},'de-json',function(){return 'source:'+s.id+':headers';});
+ input(g,'TLS verify',s.tls_verify,function(v){s.tls_verify=v;syncPlan(s);},'checkbox');select(g,tr('Bearer 凭据引用（auth_token_ref）','Bearer credential ref (auth_token_ref)'),s.auth_token_ref,credentialOptions(s.auth_token_ref),function(v){s.auth_token_ref=v;syncPlan(s);});
+ jsonArea(parent,tr('普通请求头（仅非秘密字面值；Cookie/X-API-Key 等会被拒绝）','Plain headers (non-secret values only; Cookie/X-API-Key etc. are rejected)'),s.headers,function(v){s.headers=v;syncPlan(s);},'de-json',function(){return 'source:'+s.id+':headers';});
+ jsonArea(parent,tr('秘密请求头引用（header_secret_refs：头名 → nvs:source/key）','Secret header refs (header_secret_refs: header name → nvs:source/key)'),s.header_secret_refs,function(v){s.header_secret_refs=v;syncPlan(s);},'de-json',function(){return 'source:'+s.id+':secret-headers';});
  var ps=section(parent,tr('查询与转换 SourcePlan（声明式，无脚本）','Query & transform SourcePlan (declarative, no scripts)'));var p=byId(plans(),'id',s.id);
  if(!p){button(ps,tr('添加 SourcePlan','Add SourcePlan'),function(){delete S.jsonBuffers['source:'+s.id+':plan'];plans().push(defaultPlan(s));dirty();render();},'sec');button(ps,tr('测试默认 Standard JSON','Test default Standard JSON'),function(){testSource(defaultPlan(s));},'sec');return;}
  jsonArea(ps,tr('response、JSONPath、metrics/events 映射、单位与安全表达式','response, JSONPath, metric/event mappings, units and safe expressions'),p,function(v){if(!v||typeof v!=='object'||Array.isArray(v))throw new Error('SourcePlan must be an object');var current=byId(plans(),'id',s.id),i=plans().indexOf(current);if(i>=0){syncPlanFields(v,s);plans()[i]=v;}},'de-plan',function(){return 'source:'+s.id+':plan';});
@@ -197,7 +210,7 @@ function apply(){if(invalidJsonGuard())return;api('/dashboard',mutation({method:
 function validateDraft(){if(invalidJsonGuard())return;api('/dashboard/validate',{method:'POST',body:JSON.stringify(S.draft)}).then(function(j){var text=j.valid?tr('校验通过','Validation passed'):tr('校验失败','Validation failed');if(j.migrated)text+=' · '+tr('已从 v1 迁移','migrated from v1');if(j.errors&&j.errors.length)text+='\n'+JSON.stringify(j.errors,null,2);status(text,!j.valid);}).catch(showError);}
 function loadFailed(e){showError(e);if(S.draft)return;S.ready=false;var root=$('pane_dashboard');if(!root)return;root.textContent='';root.appendChild(el('div','err',tr('Dashboard 加载失败：','Dashboard load failed: ')+(e&&e.message?e.message:tr('未知错误','unknown error'))));button(root,tr('重试','Retry'),reload,'sec');}
 function setCurrent(j){S.jsonBuffers={};S.current=clone(j);S.draft=clone(j);S.dirty=false;S.ready=true;}
-function reload(){if(S.dirty&&!confirm(tr('放弃未保存修改？','Discard unsaved changes?')))return;api('/dashboard').then(function(j){setCurrent(j);status('');render();}).catch(function(e){if(e.status===404){S.current=e.body&&typeof e.body.revision==='number'?{revision:e.body.revision}:null;loadSample(true);}else loadFailed(e);});}
+function reload(){if(S.dirty&&!confirm(tr('放弃未保存修改？','Discard unsaved changes?')))return;loadCredentials().then(function(){if(S.draft)render();}).catch(showError);api('/dashboard').then(function(j){setCurrent(j);status('');render();}).catch(function(e){if(e.status===404){S.current=e.body&&typeof e.body.revision==='number'?{revision:e.body.revision}:null;loadSample(true);}else loadFailed(e);});}
 function loadSample(force){force=force===true;if(!force&&S.dirty&&!confirm(tr('用样板替换当前草稿？','Replace the current draft with the sample?')))return;api('/dashboard/sample').then(function(j){S.jsonBuffers={};S.sample=clone(j);S.draft=clone(j);S.dirty=!force;S.ready=true;status(tr('样板仅载入草稿，点击应用后才生效。','Sample loaded as a draft; apply to make it active.'));render();}).catch(loadFailed);}
 function importFile(e){if(S.dirty&&!confirm(tr('导入文件并替换当前草稿？','Import a file and replace the current draft?'))){e.target.value='';return;}var file=e.target.files&&e.target.files[0];if(!file)return;if(file.size>196608){status(tr('文件超过 192 KiB。','File exceeds 192 KiB.'),true);return;}var reader=new FileReader();reader.onload=function(){try{var j=JSON.parse(reader.result);if(!j.dashboard)j={schema:'eego.dashboard-bundle/1',schema_version:1,revision:baseRevision(),dashboard:j,source_plans:[]};S.jsonBuffers={};S.draft=j;S.dirty=true;status(tr('文件已导入草稿，请先校验再应用。','File imported as a draft; validate before applying.'));render();}catch(err){status('JSON: '+err.message,true);}};reader.readAsText(file);e.target.value='';}
 function exportDraft(){if(invalidJsonGuard())return;var blob=new Blob([JSON.stringify(S.draft,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(dash().id||'dashboard')+'.json';document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},0);}
@@ -226,7 +239,7 @@ function renderPreview(){
  });
 }
 function canLeave(destination){if(destination==='dashboard'||!S.dirty)return true;if(!confirm(tr('有未保存的 dashboard 草稿，确定放弃？','Discard the unsaved dashboard draft?')))return false;S.jsonBuffers={};if(S.current&&S.current.dashboard)S.draft=clone(S.current);else if(S.sample)S.draft=clone(S.sample);else{S.draft=null;S.ready=false;}S.dirty=false;updateDirty();return true;}
-function enter(){if(!S.ready)reload();else render();}
+function enter(){if(!S.ready)reload();else{loadCredentials().then(function(){if(S.draft)render();}).catch(showError);render();}}
 function language(){$('tab_dashboard').textContent=tr('数据面板','Dashboard');if(S.draft)render();}
 window.addEventListener('beforeunload',function(e){if(S.dirty){e.preventDefault();e.returnValue='';}});
 window.DashboardEditor={enter:enter,canLeave:canLeave,language:language};

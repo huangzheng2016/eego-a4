@@ -45,6 +45,8 @@ struct NetRequest {
   uint32_t timeout_ms = 20000;
   bool tls_verify = true;
   bool conditional_get = false;  // true 且持有校验器时携带 If-None-Match/If-Modified-Since
+
+  ~NetRequest();
 };
 
 // 响应。body 超过阈值时驻留 PSRAM（move-only，禁止拷贝防 double-free）。

@@ -12,6 +12,8 @@
 #include "admin/admin_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "net_stack/credentials.h"
+#include "source_secret_migration.h"
 
 namespace eego::admin {
 namespace {
@@ -51,10 +53,7 @@ bool sensitiveKey(const std::string& key) {
 }
 
 bool sensitiveHeader(const std::string& key) {
-  const std::string k = lower(key);
-  return k.find("auth") != std::string::npos || k.find("key") != std::string::npos ||
-         k.find("token") != std::string::npos || k.find("pass") != std::string::npos ||
-         k.find("secret") != std::string::npos || k.find("cookie") != std::string::npos;
+  return net::CredentialStore::sensitiveHeaderName(key);
 }
 
 bool isTableColumnMappingKey(const std::string& path) {
@@ -104,7 +103,9 @@ JsonValue maskJson(const JsonValue& value, const std::string& path) {
   out.reserve(value.objectItems().size());
   for (const auto& member : value.objectItems()) {
     const std::string child_path = path.empty() ? member.first : path + "." + member.first;
-    if (member.first == "headers" && member.second.type() == JsonValue::Type::Object) {
+    if (member.first == "header_secret_refs" && member.second.type() == JsonValue::Type::Object) {
+      out.emplace_back(member.first, member.second);
+    } else if (member.first == "headers" && member.second.type() == JsonValue::Type::Object) {
       JsonValue::Object headers;
       for (const auto& header : member.second.objectItems()) {
         if (header.second.type() == JsonValue::Type::String && sensitiveHeader(header.first)) {
@@ -138,6 +139,10 @@ JsonValue sourceToJson(const dashboard::Source& source) {
   for (const auto& header : source.headers) {
     headers.emplace_back(header.key, JsonValue::makeString(header.value));
   }
+  JsonValue::Object secret_headers;
+  for (const auto& header : source.header_secret_refs) {
+    secret_headers.emplace_back(header.key, JsonValue::makeString(header.value));
+  }
   return JsonValue::makeObject({
       {"id", JsonValue::makeString(source.id)},
       {"kind", JsonValue::makeString(dashboard::sourceKindName(source.kind))},
@@ -149,6 +154,7 @@ JsonValue sourceToJson(const dashboard::Source& source) {
       {"tls_verify", JsonValue::makeBool(source.tls_verify)},
       {"auth_token_ref", JsonValue::makeString(source.auth_token_ref)},
       {"headers", JsonValue::makeObject(std::move(headers))},
+      {"header_secret_refs", JsonValue::makeObject(std::move(secret_headers))},
   });
 }
 
@@ -222,12 +228,103 @@ bool sameSource(const dashboard::Source& left, const dashboard::Source& right) {
       left.timeout_ms != right.timeout_ms ||
       left.max_response_bytes != right.max_response_bytes ||
       left.tls_verify != right.tls_verify || left.auth_token_ref != right.auth_token_ref ||
-      left.headers.size() != right.headers.size()) {
+      left.headers.size() != right.headers.size() ||
+      left.header_secret_refs.size() != right.header_secret_refs.size()) {
     return false;
   }
   for (const auto& header : left.headers) {
     const char* value = storedHeader(right.headers, header.key);
     if (value == nullptr || header.value != value) return false;
+  }
+  for (const auto& header : left.header_secret_refs) {
+    const char* value = storedHeader(right.header_secret_refs, header.key);
+    if (value == nullptr || header.value != value) return false;
+  }
+  return true;
+}
+
+bool migrateDashboardSource(JsonValue& source, internal::SourceSecretMigration& migration,
+                            bool& changed, std::string& error) {
+  if (source.type() != JsonValue::Type::Object) return true;
+  JsonValue* headers = source.find("headers");
+  if (headers == nullptr || headers->type() != JsonValue::Type::Object) return true;
+  JsonValue* existing_refs = source.find("header_secret_refs");
+  if (existing_refs != nullptr && existing_refs->type() != JsonValue::Type::Object) {
+    error = "legacy header_secret_refs must be an object";
+    return false;
+  }
+  const JsonValue* id_value = source.find("id");
+  const std::string id = id_value != nullptr && id_value->type() == JsonValue::Type::String
+                             ? id_value->stringValue()
+                             : std::string("unknown");
+  JsonValue::Object plain;
+  JsonValue::Object refs;
+  if (existing_refs != nullptr) refs = existing_refs->objectItems();
+  for (const auto& header : headers->objectItems()) {
+    if (header.second.type() != JsonValue::Type::String) {
+      plain.emplace_back(header.first, header.second);
+      continue;
+    }
+    const std::string lowered = lower(header.first);
+    const bool authorization = lowered == "authorization";
+    if (!authorization && !net::CredentialStore::sensitiveHeaderName(header.first)) {
+      plain.emplace_back(header.first, header.second);
+      continue;
+    }
+    if (existing_refs != nullptr && existing_refs->find(header.first) != nullptr) {
+      error = "legacy plain and referenced secret headers are ambiguous";
+      return false;
+    }
+    std::string secret = header.second.stringValue();
+    if (authorization) {
+      const JsonValue* existing_auth = source.find("auth_token_ref");
+      if (existing_auth != nullptr &&
+          (existing_auth->type() != JsonValue::Type::String ||
+           !existing_auth->stringValue().empty())) {
+        net::CredentialStore::secureErase(secret);
+        error = "legacy Authorization conflicts with auth_token_ref";
+        return false;
+      }
+      if (secret.size() < 8 || lower(secret.substr(0, 7)) != "bearer ") {
+        net::CredentialStore::secureErase(secret);
+        error = "legacy Authorization must use Bearer; re-enter it via credentials API";
+        return false;
+      }
+      secret = secret.substr(7);
+    }
+    const std::string ref = migration.add("dashboard/" + id, header.first, secret, error);
+    net::CredentialStore::secureErase(secret);
+    if (ref.empty()) return false;
+    if (authorization) {
+      set(source, "auth_token_ref", JsonValue::makeString(ref));
+    } else {
+      refs.emplace_back(header.first, JsonValue::makeString(ref));
+    }
+    changed = true;
+  }
+  set(source, "headers", JsonValue::makeObject(std::move(plain)));
+  if (!refs.empty()) set(source, "header_secret_refs", JsonValue::makeObject(std::move(refs)));
+  return true;
+}
+
+bool migrateDashboardSecrets(JsonValue& root, internal::SourceSecretMigration& migration,
+                             bool& changed, std::string& error) {
+  JsonValue* dashboard_value = root.find("dashboard");
+  if (dashboard_value == nullptr) dashboard_value = &root;
+  const auto migrate_collection = [&](JsonValue* collection, auto&& self) -> bool {
+    if (collection == nullptr || collection->type() != JsonValue::Type::Array) return true;
+    for (auto& source : collection->arrayItems()) {
+      if (!self(source)) return false;
+    }
+    return true;
+  };
+  const auto migrate_one = [&](JsonValue& source) {
+    return migrateDashboardSource(source, migration, changed, error);
+  };
+  if (!migrate_collection(dashboard_value->find("sources"), migrate_one)) return false;
+  if (dashboard_value != &root &&
+      !migrate_collection(root.find("source_plans"), migrate_one)) {
+    return false;
   }
   return true;
 }
@@ -253,7 +350,9 @@ bool readFile(const std::string& path, size_t maximum, std::string& out, bool& e
   return ok;
 }
 
-bool atomicWrite(const std::string& path, const std::string& text, std::string& error) {
+bool atomicWrite(const std::string& path, const std::string& text, std::string& error,
+                 bool* replaced = nullptr) {
+  if (replaced != nullptr) *replaced = false;
   const size_t slash = path.find_last_of('/');
   if (slash != std::string::npos && slash > 0) {
     const std::string directory = path.substr(0, slash);
@@ -269,7 +368,10 @@ bool atomicWrite(const std::string& path, const std::string& text, std::string& 
     if (ok) ok = fsync(fileno(file)) == 0;
     if (std::fclose(file) != 0) ok = false;
   }
-  if (ok) ok = std::rename(temporary.c_str(), path.c_str()) == 0;
+  if (ok) {
+    ok = std::rename(temporary.c_str(), path.c_str()) == 0;
+    if (ok && replaced != nullptr) *replaced = true;
+  }
   if (ok) {
     std::string verify;
     bool exists = false;
@@ -301,20 +403,46 @@ esp_err_t DashboardStore::init(const std::string& path) {
 
   std::string text;
   bool exists = false;
+  bool migration_failed = false;
   const bool read_ok = readFile(path_, kDashboardBundleMaxBytes, text, exists);
   if (read_ok && exists && !text.empty()) {
-    DashboardParseResult parsed = parse(text);
-    if (parsed.ok()) {
-      parsed.document.configured = true;
-      if (parsed.document.revision == 0) parsed.document.revision = 1;
-      snapshot_ = std::make_shared<DashboardDocument>(std::move(parsed.document));
-    } else {
-      valid_ = false;
+    JsonValue migrated_root;
+    dashboard::JsonParseError preprocess_error;
+    if (dashboard::jsonParse(text, migrated_root, preprocess_error, 18)) {
+      net::CredentialStore::secureErase(text);
+      internal::SourceSecretMigration migration;
+      bool migrated = false;
+      bool replaced = false;
+      std::string migration_error;
+      bool migration_ok = migrateDashboardSecrets(migrated_root, migration, migrated, migration_error);
+      if (migration_ok) migration_ok = migration.persist(migration_error);
+      if (migration_ok) {
+        text = migrated_root.toString();
+        if (migrated) migration_ok = atomicWrite(path_, text, migration_error, &replaced);
+      }
+      if (!migration_ok) {
+        if (!replaced) migration.rollback();
+        migration_failed = true;
+        valid_ = false;
+        ADMIN_LOG_ERROR("dashboard secret migration failed; configuration not loaded");
+      }
+      migration.finish();
+    }
+    if (!migration_failed) {
+      DashboardParseResult parsed = parse(text);
+      net::CredentialStore::secureErase(text);
+      if (parsed.ok()) {
+        parsed.document.configured = true;
+        if (parsed.document.revision == 0) parsed.document.revision = 1;
+        snapshot_ = std::make_shared<DashboardDocument>(std::move(parsed.document));
+      } else {
+        valid_ = false;
+      }
     }
   } else if (!read_ok) {
     valid_ = false;
   }
-  if (!valid_ && exists) {
+  if (!valid_ && exists && !migration_failed) {
     const std::string backup = path_ + ".bak";
     std::remove(backup.c_str());
     if (std::rename(path_.c_str(), backup.c_str()) == 0) {
@@ -451,6 +579,12 @@ bool DashboardStore::validate(DashboardDocument& candidate, const DashboardDocum
   dashboard::validateDashboard(candidate.dashboard, dashboard::Limits{}, errors);
 
   for (size_t i = 0; i < candidate.dashboard.sources.size(); ++i) {
+    SourcePlan connection;
+    connection.source = candidate.dashboard.sources[i];
+    std::string connection_error;
+    if (!dashboard::pipeline::validateSourcePlan(connection, connection_error)) {
+      addError(errors, "dashboard.sources[" + std::to_string(i) + "]", connection_error);
+    }
     restoreSourceSecrets(candidate.dashboard.sources[i], current,
                          "dashboard.sources[" + std::to_string(i) + "]", errors);
   }
@@ -594,7 +728,7 @@ const char* DashboardStore::sampleJson() {
   "dashboard":{
     "schema":"eego.dashboard/2","schema_version":2,
     "id":"sample","title":"EEGO 数据面板 / Data dashboard","default_page_id":"main","refresh_ms":60000,
-    "sources":[{"id":"sample","kind":"static","enabled":true,"url":"","refresh_ms":60000,"timeout_ms":10000,"max_response_bytes":65536,"tls_verify":true,"auth_token_ref":"","headers":{}}],
+    "sources":[{"id":"sample","kind":"static","enabled":true,"url":"","refresh_ms":60000,"timeout_ms":10000,"max_response_bytes":65536,"tls_verify":true,"auth_token_ref":"","headers":{},"header_secret_refs":{}}],
     "variables":[
       {"name":"account","label":"账号 / Account","kind":"text","default_value":"demo-account","options":[],"source_id":"","value_path":"","multi":false,"include_all":false},
       {"name":"city","label":"城市 / City","kind":"constant","default_value":"Shanghai","options":[{"label":"上海 / Shanghai","value":"Shanghai"},{"label":"深圳 / Shenzhen","value":"Shenzhen"}],"source_id":"","value_path":"","multi":false,"include_all":false},
@@ -625,7 +759,7 @@ const char* DashboardStore::sampleJson() {
     ],
     "events":[{"id":"evt-sample","rule_id":"cpu_high","source_id":"sample","timestamp_ms":2000,"severity":"warning","state":"active","title":"CPU 过高 / High CPU","message":"srv-demo CPU 86%","linked_panel_id":"cpu_trend"}]
   },
-  "source_plans":[{"id":"sample","kind":"static","enabled":true,"url":"","refresh_ms":60000,"timeout_ms":10000,"max_response_bytes":65536,"tls_verify":true,"auth_token_ref":"","headers":{},"response":"standard_json","method":"GET","body":"","static_body":"{\"metrics\":[{\"metric\":\"token.used\",\"value\":640,\"unit\":\"tokens\",\"timestamp_ms\":1000,\"labels\":{\"account\":\"demo-account\"}},{\"metric\":\"server.cpu\",\"value\":42,\"unit\":\"percent\",\"timestamp_ms\":1000,\"labels\":{\"server\":\"srv-demo\"}}],\"events\":[{\"id\":\"evt-sample\",\"rule_id\":\"cpu_high\",\"source_id\":\"sample\",\"timestamp_ms\":2000,\"severity\":\"warning\",\"state\":\"active\",\"title\":\"CPU high\",\"message\":\"srv-demo CPU 86%\",\"linked_panel_id\":\"cpu_trend\"}]}","text_path":"","reset_at_path":"$.reset_at","stale_after_ms":300000,"conditional_get":true,"max_json_depth":16}]
+  "source_plans":[{"id":"sample","kind":"static","enabled":true,"url":"","refresh_ms":60000,"timeout_ms":10000,"max_response_bytes":65536,"tls_verify":true,"auth_token_ref":"","headers":{},"header_secret_refs":{},"response":"standard_json","method":"GET","body":"","static_body":"{\"metrics\":[{\"metric\":\"token.used\",\"value\":640,\"unit\":\"tokens\",\"timestamp_ms\":1000,\"labels\":{\"account\":\"demo-account\"}},{\"metric\":\"server.cpu\",\"value\":42,\"unit\":\"percent\",\"timestamp_ms\":1000,\"labels\":{\"server\":\"srv-demo\"}}],\"events\":[{\"id\":\"evt-sample\",\"rule_id\":\"cpu_high\",\"source_id\":\"sample\",\"timestamp_ms\":2000,\"severity\":\"warning\",\"state\":\"active\",\"title\":\"CPU high\",\"message\":\"srv-demo CPU 86%\",\"linked_panel_id\":\"cpu_trend\"}]}","text_path":"","reset_at_path":"$.reset_at","stale_after_ms":300000,"conditional_get":true,"max_json_depth":16}]
 })JSON";
 }
 

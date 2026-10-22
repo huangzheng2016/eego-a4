@@ -244,15 +244,47 @@ class Validator {
     count(values.size(), kMaxHeaders, path);
     for (size_t i = 0; i < values.size(); ++i) {
       const std::string field = path + "." + values[i].key;
+      std::string lowered = values[i].key;
+      std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
+      // Keep in sync with net::CredentialStore::sensitiveHeaderName; dashboard_core
+      // deliberately has no net_stack dependency. Cross-classifier tests cover both.
+      const bool sensitive = lowered.find("auth") != std::string::npos ||
+                             lowered.find("key") != std::string::npos ||
+                             lowered.find("token") != std::string::npos ||
+                             lowered.find("pass") != std::string::npos ||
+                             lowered.find("secret") != std::string::npos ||
+                             lowered.find("cookie") != std::string::npos ||
+                             lowered.find("credential") != std::string::npos;
       check(validHeaderName(values[i].key), field, "invalid HTTP header name");
       check(!asciiEqual(values[i].key, "authorization") && !asciiEqual(values[i].key, "host") &&
                 !asciiEqual(values[i].key, "content-length"),
             field, "header is managed by the runtime and cannot be configured");
+      check(!sensitive, field, "sensitive values must use header_secret_refs");
       check(validHeaderValue(values[i].value), field,
             "HTTP header value contains a forbidden control character");
       check(jsonCodePointCount(values[i].value) <= 512, field, "exceeds 512 code points");
       for (size_t j = 0; j < i; ++j)
         check(!asciiEqual(values[i].key, values[j].key), field, "duplicate HTTP header");
+    }
+  }
+
+  void secretHeaders(const std::vector<KeyValue>& values, const std::vector<KeyValue>& plain,
+                     const std::string& path) {
+    count(values.size() + plain.size(), kMaxHeaders, path);
+    for (size_t i = 0; i < values.size(); ++i) {
+      const std::string field = path + "." + values[i].key;
+      check(validHeaderName(values[i].key), field, "invalid HTTP header name");
+      check(!asciiEqual(values[i].key, "authorization") && !asciiEqual(values[i].key, "host") &&
+                !asciiEqual(values[i].key, "content-length"),
+            field, "Authorization must use auth_token_ref; this header is runtime-managed");
+      check(validHeaderValue(values[i].value) && values[i].value.size() <= 128, field,
+            "invalid source credential reference");
+      for (size_t j = 0; j < i; ++j)
+        check(!asciiEqual(values[i].key, values[j].key), field, "duplicate HTTP header");
+      for (const auto& header : plain)
+        check(!asciiEqual(values[i].key, header.key), field, "ambiguous HTTP header");
     }
   }
 
@@ -287,6 +319,7 @@ class Validator {
       else
         check(source.url.empty(), child(path, "url"), "static sources cannot have a URL");
       headers(source.headers, child(path, "headers"));
+      secretHeaders(source.header_secret_refs, source.headers, child(path, "header_secret_refs"));
     }
   }
 

@@ -6,7 +6,7 @@
 // 通用 http_poll 源形状：
 //   { "id": "nas-poll", "kind": "http_poll", "enabled": true,
 //     "url": "http://nas.local/api/alerts", "interval_ms": 60000,
-//     "auth_token_ref": "nvs:src_nas_token", "tls_verify": true,
+//     "auth_token_ref": "nvs:source/nas_token", "tls_verify": true,
 //     "clear_after_misses": 3,
 //     "array_path": "data.alerts",
 //     "field_map":   { "severity": "labels.severity", "title": "annotations.summary" },
@@ -46,7 +46,7 @@ struct SourceConfig {
   bool enabled = true;
   std::string url;                 // http_poll：完整 URL
   uint32_t interval_ms = kSourceIntervalDefaultMs;
-  std::string auth_token_ref;      // "nvs:<key>" 或 "nvs:<ns>/<key>"；空 = 无认证
+  std::string auth_token_ref;      // "nvs:source/<key>"；空 = 无认证
   bool tls_verify = true;          // false = 内网自签（显式关闭才生效）
   uint32_t clear_after_misses = kSourceClearMissesDefault;
   std::string array_path;          // 事件数组路径；空 = 根（根数组或单对象）
@@ -57,7 +57,8 @@ struct SourceConfig {
   std::vector<std::string> clear_states;
   std::vector<std::string> dedup_key;  // 空 = 类型注册表默认 → 内置默认
   std::string default_type;        // 映射缺 type 时的兜底；空 = generic.any
-  std::vector<NetHeader> headers;  // 附加静态头（不含 Authorization，由 token 注入）
+  std::vector<NetHeader> headers;  // 非敏感静态头；秘密字面值一律拒绝
+  std::vector<NetHeader> header_secret_refs;  // 头名 -> nvs:source/<key>
   uint32_t timeout_ms = kSourceTimeoutDefaultMs;
   // 响应体解析上限（JSON DOM 在内部 RAM，给池的 512KB 传输上限之外再设一道
   // 解析预算；超限记源错误，绝不硬吃）。默认 64KB，可调至 512KB。
@@ -70,5 +71,8 @@ struct SourceConfig {
   // 语义校验（id 字符集/URL scheme/interval 范围）；返回空串 = 通过。
   std::string validate() const;
 };
+
+// 在实际请求时解析全部 source 凭据；失败时 out 不可用于传输。
+bool buildSourceRequest(const SourceConfig& cfg, NetRequest& out, std::string& error);
 
 }  // namespace eego::net

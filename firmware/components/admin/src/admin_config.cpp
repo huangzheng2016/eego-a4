@@ -14,6 +14,8 @@
 #include "device_settings/device_settings.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "net_stack/credentials.h"
+#include "source_secret_migration.h"
 
 namespace eego::admin {
 
@@ -95,11 +97,7 @@ bool isSensitiveKey(const std::string& key_lower) {
 }
 
 bool isSensitiveHeaderName(const std::string& name_lower) {
-  return name_lower.find("auth") != std::string::npos ||
-         name_lower.find("key") != std::string::npos ||
-         name_lower.find("token") != std::string::npos ||
-         name_lower.find("pass") != std::string::npos ||
-         name_lower.find("secret") != std::string::npos;
+  return net::CredentialStore::sensitiveHeaderName(name_lower);
 }
 
 // 深拷贝 + secrets 掩码（M13：远程响应 secrets 省略或 "********"）。
@@ -120,7 +118,9 @@ alert_core::JsonValue maskDom(const alert_core::JsonValue& v, const std::string&
         for (size_t i = 0; i < kv.first.size(); i++) {
           lower[i] = static_cast<char>(tolower(static_cast<unsigned char>(kv.first[i])));
         }
-        if (lower == "headers" && kv.second.type() == JsonValue::Type::Object) {
+        if (lower == "header_secret_refs" && kv.second.type() == JsonValue::Type::Object) {
+          out.emplace_back(kv.first, cloneDom(kv.second));
+        } else if (lower == "headers" && kv.second.type() == JsonValue::Type::Object) {
           // sources.headers：按头名敏感程度掩码值
           JsonValue::Object hdrs;
           hdrs.reserve(kv.second.objectItems().size());
@@ -652,6 +652,123 @@ bool validateLoadedDom(const alert_core::JsonValue& dom, FieldErrors& errs) {
   return errs.empty();
 }
 
+bool migrateLegacySourceSecrets(alert_core::JsonValue& dom,
+                                internal::SourceSecretMigration& migration, bool& changed,
+                                std::string& error) {
+  using alert_core::JsonValue;
+  JsonValue* sources = const_cast<JsonValue*>(objGet(dom, "sources"));
+  if (sources == nullptr || sources->type() != JsonValue::Type::Array) return true;
+  auto& items = const_cast<JsonValue::Array&>(sources->arrayItems());
+  for (size_t i = 0; i < items.size(); ++i) {
+    JsonValue& source = items[i];
+    if (source.type() != JsonValue::Type::Object) continue;
+    JsonValue* headers = const_cast<JsonValue*>(objGet(source, "headers"));
+    if (headers == nullptr || headers->type() != JsonValue::Type::Object) continue;
+    JsonValue* existing_refs = const_cast<JsonValue*>(objGet(source, "header_secret_refs"));
+    if (existing_refs != nullptr && existing_refs->type() != JsonValue::Type::Object) {
+      error = "legacy header_secret_refs must be an object";
+      return false;
+    }
+    JsonValue::Object plain;
+    JsonValue::Object refs;
+    if (existing_refs != nullptr) refs = existing_refs->objectItems();
+    const JsonValue* id_value = objGet(source, "id");
+    const std::string id = id_value != nullptr && id_value->type() == JsonValue::Type::String
+                               ? id_value->stringValue()
+                               : std::to_string(i);
+    for (const auto& header : headers->objectItems()) {
+      if (header.second.type() != JsonValue::Type::String) {
+        plain.emplace_back(header.first, header.second);
+        continue;
+      }
+      std::string lowered = header.first;
+      for (char& c : lowered) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+      }
+      const bool authorization = lowered == "authorization";
+      if (!authorization && !net::CredentialStore::sensitiveHeaderName(header.first)) {
+        plain.emplace_back(header.first, header.second);
+        continue;
+      }
+      if (existing_refs != nullptr && existing_refs->find(header.first) != nullptr) {
+        error = "legacy plain and referenced secret headers are ambiguous";
+        return false;
+      }
+      std::string secret = header.second.stringValue();
+      if (authorization) {
+        const JsonValue* existing_auth = objGet(source, "auth_token_ref");
+        if (existing_auth != nullptr &&
+            (existing_auth->type() != JsonValue::Type::String ||
+             !existing_auth->stringValue().empty())) {
+          net::CredentialStore::secureErase(secret);
+          error = "legacy Authorization conflicts with auth_token_ref";
+          return false;
+        }
+        std::string scheme = secret.substr(0, 7);
+        for (char& c : scheme) {
+          if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        }
+        if (secret.size() < 8 || scheme != "bearer ") {
+          net::CredentialStore::secureErase(secret);
+          error = "legacy Authorization must use Bearer; re-enter it via credentials API";
+          return false;
+        }
+        secret = secret.substr(7);
+      }
+      const std::string ref = migration.add("legacy/" + id, header.first, secret, error);
+      net::CredentialStore::secureErase(secret);
+      if (ref.empty()) return false;
+      if (authorization) {
+        objSet(source, "auth_token_ref", JsonValue::makeString(ref));
+      } else {
+        refs.emplace_back(header.first, JsonValue::makeString(ref));
+      }
+      changed = true;
+    }
+    objSet(source, "headers", JsonValue::makeObject(std::move(plain)));
+    if (!refs.empty()) objSet(source, "header_secret_refs", JsonValue::makeObject(std::move(refs)));
+  }
+  return true;
+}
+
+bool atomicConfigWrite(const std::string& path, const std::string& text, bool& replaced) {
+  replaced = false;
+  const size_t slash = path.find_last_of('/');
+  if (slash != std::string::npos && slash > 0) {
+    const std::string dir = path.substr(0, slash);
+    if (mkdir(dir.c_str(), 0775) != 0 && errno != EEXIST) {
+      // fopen below reports the authoritative error without exposing contents.
+    }
+  }
+  const std::string tmp = path + ".tmp";
+  bool ok = false;
+  if (FILE* f = fopen(tmp.c_str(), "wb")) {
+    ok = fwrite(text.data(), 1, text.size(), f) == text.size();
+    if (ok) ok = fflush(f) == 0;
+    if (ok) ok = fsync(fileno(f)) == 0;
+    if (fclose(f) != 0) ok = false;
+  }
+  if (ok) {
+    ok = rename(tmp.c_str(), path.c_str()) == 0;
+    replaced = ok;
+  }
+  if (ok) {
+    std::string back;
+    if (FILE* f = fopen(path.c_str(), "rb")) {
+      char buffer[512];
+      size_t count = 0;
+      while ((count = fread(buffer, 1, sizeof(buffer), f)) > 0) back.append(buffer, count);
+      if (ferror(f)) ok = false;
+      if (fclose(f) != 0) ok = false;
+    } else {
+      ok = false;
+    }
+    ok = ok && back == text;
+  }
+  if (!ok && !replaced) remove(tmp.c_str());
+  return ok;
+}
+
 }  // namespace
 
 void validateLegacyDisplayCapability(const alert_core::JsonValue& display_patch,
@@ -697,19 +814,40 @@ esp_err_t ConfigStore::init(const std::string& path) {
     alert_core::JsonValue parsed;
     alert_core::JsonParseError perr;
     FieldErrors errs;
-    if (alert_core::jsonParse(text, parsed, perr)) {
-      validateLoadedDom(parsed, errs);
-      if (errs.empty()) {
-        dom_ = std::move(parsed);
-        admin_ = parseAdminView(dom_);
-      } else {
+    const bool parse_ok = alert_core::jsonParse(text, parsed, perr);
+    net::CredentialStore::secureErase(text);
+    bool migration_failed = false;
+    if (parse_ok) {
+      internal::SourceSecretMigration migration;
+      bool migrated = false;
+      bool replaced = false;
+      std::string migration_error;
+      bool migration_ok = migrateLegacySourceSecrets(parsed, migration, migrated, migration_error);
+      if (migration_ok) migration_ok = migration.persist(migration_error);
+      if (migration_ok && migrated) {
+        migration_ok = atomicConfigWrite(path_, parsed.toString(), replaced);
+      }
+      if (!migration_ok) {
+        if (!replaced) migration.rollback();
+        migration_failed = true;
         valid_ = false;
+        ADMIN_LOG_ERROR("config secret migration failed; configuration not loaded");
+      }
+      migration.finish();
+      if (!migration_failed) {
+        validateLoadedDom(parsed, errs);
+        if (errs.empty()) {
+          dom_ = std::move(parsed);
+          admin_ = parseAdminView(dom_);
+        } else {
+          valid_ = false;
+        }
       }
     } else {
       valid_ = false;
     }
-    if (!valid_) {
-      // 坏文件改名 config.bak（M13 F6），加载默认
+    if (!valid_ && !migration_failed) {
+      // 坏文件改名 config.bak（M13 F6），加载默认；迁移失败时保留原路径以便明确恢复。
       const std::string bak = path_ + ".bak";
       remove(bak.c_str());
       if (rename(path_.c_str(), bak.c_str()) != 0) {
@@ -819,51 +957,21 @@ bool ConfigStore::validateAndMerge(const std::string& body, alert_core::JsonValu
 
 bool ConfigStore::commit(const alert_core::JsonValue& merged, std::string& err) {
   xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex_), portMAX_DELAY);
-
+  FieldErrors validation;
+  if (!validateLoadedDom(merged, validation)) {
+    err = "config validation failed; refusing to persist secret or invalid values";
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
+    return false;
+  }
   const std::string text = merged.toString();
-  const std::string tmp = path_ + ".tmp";
-
-  // 确保父目录存在（/sdcard/alertpanel）
-  const size_t slash = path_.find_last_of('/');
-  if (slash != std::string::npos && slash > 0) {
-    const std::string dir = path_.substr(0, slash);
-    if (mkdir(dir.c_str(), 0775) != 0 && errno != EEXIST) {
-      // FATFS VFS mkdir 已存在时返回 EEXIST；其他错误继续尝试写（fopen 会再失败）
-    }
+  bool replaced = false;
+  if (atomicConfigWrite(path_, text, replaced)) {
+    dom_ = cloneDom(merged);
+    admin_ = parseAdminView(dom_);
+    valid_ = true;
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
+    return true;
   }
-
-  bool ok = false;
-  if (FILE* f = fopen(tmp.c_str(), "wb")) {
-    ok = fwrite(text.data(), 1, text.size(), f) == text.size();
-    if (ok) ok = (fflush(f) == 0);
-    if (ok) ok = (fsync(fileno(f)) == 0);
-    if (fclose(f) != 0) ok = false;
-  }
-  if (ok) {
-    ok = (rename(tmp.c_str(), path_.c_str()) == 0);
-  }
-  if (ok) {
-    // 回读校验（M13 F6：回读验证，失败回滚）
-    std::string back;
-    if (FILE* f = fopen(path_.c_str(), "rb")) {
-      char buf[512];
-      size_t n;
-      while ((n = fread(buf, 1, sizeof(buf), f)) > 0) back.append(buf, n);
-      fclose(f);
-    }
-    alert_core::JsonValue rp;
-    alert_core::JsonParseError perr;
-    if (!back.empty() && alert_core::jsonParse(back, rp, perr) &&
-        rp.toString() == merged.toString()) {
-      dom_ = cloneDom(merged);
-      admin_ = parseAdminView(dom_);
-      valid_ = true;
-      xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
-      return true;
-    }
-    ok = false;
-  }
-  remove(tmp.c_str());
   err = "atomic config write failed (rolled back to previous RAM copy)";
   ADMIN_LOG_ERROR("config commit failed: %s", path_.c_str());
   xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
@@ -964,7 +1072,10 @@ const char* ConfigStore::schemaJson() {
           "sd_log": {"type": "bool", "default": false}}}
       }
     },
-    "sources": {"type": "array", "max_items": 16, "see": "net_stack SourceConfig (M11 §5)"},
+    "sources": {"type": "array", "max_items": 16,
+      "auth_token_ref": "\"nvs:source/<key>\"; manage via /api/v1/sources/credentials",
+      "headers": "object of non-secret literal values only",
+      "header_secret_refs": "object of header name -> \"nvs:source/<key>\"; Authorization uses auth_token_ref"},
     "alert_type_overrides": {"type": "object", "max_entries": 64,
       "value": {"severity": "critical|warning|info", "ttl_s": "int 0..31622400",
                 "name_zh": "string <=64B", "name_en": "string <=64B", "muted": "bool"}},

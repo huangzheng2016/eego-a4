@@ -149,20 +149,16 @@ static std::string effectiveFingerprint(const AlertEvent& ev, const std::string&
 
 bool HttpPollAdapter::runCycle(AdapterContext& ctx, const SourceConfig& cfg,
                                SourceHealth& health) {
-  // 1. 组请求：静态头 + Bearer 注入（token 只进内存头，不落日志）+ 条件 GET
+  // 1. 每次请求解析最新 NVS 凭据；任何引用失败都不得退化为无认证请求。
   NetRequest req;
-  req.url = cfg.url;
-  req.timeout_ms = cfg.timeout_ms;
-  req.tls_verify = cfg.tls_verify;
-  req.conditional_get = true;
-  req.headers = cfg.headers;
-  if (!cfg.auth_token_ref.empty()) {
-    std::string token = CredentialStore::resolveToken(cfg.auth_token_ref);
-    if (!token.empty()) req.headers.push_back({"Authorization", "Bearer " + token});
+  std::string request_error;
+  health.last_attempt_at = ctx.now;
+  if (!buildSourceRequest(cfg, req, request_error)) {
+    health.last_error = request_error;
+    return false;
   }
 
   NetResponse resp = ctx.pool->execute(req);
-  health.last_attempt_at = ctx.now;
   if (resp.status == -1) {
     health.last_error = resp.error;
     return false;

@@ -1364,6 +1364,88 @@ bool presetIdFromPath(const char* path, std::string& id) {
 }
 
 // ---------------------------------------------------------------------------
+// sources/credentials（write-only；固定 source 命名空间，不返回秘密值）
+// ---------------------------------------------------------------------------
+esp_err_t h_source_credentials_get(httpd_req_t* req) {
+  std::vector<net::SourceCredentialMetadata> credentials;
+  if (net::CredentialStore::listSourceCredentials(credentials) != ESP_OK) {
+    return sendError(req, 503, errc::kUnavailable, "source credential store unavailable");
+  }
+  using alert_core::JsonValue;
+  JsonValue::Array items;
+  for (const auto& credential : credentials) {
+    items.push_back(JsonValue::makeObject({
+        {"key", JsonValue::makeString(credential.key)},
+        {"ref", JsonValue::makeString(credential.ref)},
+    }));
+  }
+  return sendJson(req, 200,
+                  JsonValue::makeObject({
+                      {"namespace", JsonValue::makeString("source")},
+                      {"credentials", JsonValue::makeArray(std::move(items))},
+                  }).toString());
+}
+
+esp_err_t h_source_credentials_write(httpd_req_t* req, bool remove) {
+  struct SecretGuard {
+    std::string value;
+    ~SecretGuard() { net::CredentialStore::secureErase(value); }
+  } secret;
+  if (!contentTypeJsonOk(req)) {
+    return sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
+  }
+  std::string body;
+  if (readBodyBudget(req, kBodyBudgetSmall, body) != 0) return ESP_OK;
+  alert_core::JsonValue root;
+  if (!parseJsonBody(req, body, root)) {
+    net::CredentialStore::secureErase(body);
+    return ESP_OK;
+  }
+  net::CredentialStore::secureErase(body);
+  using alert_core::JsonValue;
+  std::string key;
+  bool shape = root.type() == JsonValue::Type::Object && jsonStringField(root, "key", key);
+  if (!remove) shape = shape && jsonStringField(root, "value", secret.value);
+  if (shape) {
+    for (const auto& member : root.objectItems()) {
+      if (member.first != "key" && (remove || member.first != "value")) shape = false;
+    }
+  }
+  root = JsonValue::makeNull();
+  if (!shape) {
+    return sendError(req, 400, errc::kInvalidRequest,
+                     remove ? "credential key is required" : "credential key and value are required");
+  }
+  FieldErrors errs;
+  if (!net::CredentialStore::validSourceKeyForWrite(key)) {
+    errs.push_back({"key", "must be 1..15 [A-Za-z0-9_-] chars and not a reserved device key"});
+  }
+  if (!remove && !net::CredentialStore::validSourceValue(secret.value)) {
+    errs.push_back({"value", "must be 1..1024 bytes without control characters"});
+  }
+  if (!errs.empty()) {
+    return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
+  }
+
+  AdminCommand cmd;
+  cmd.type = remove ? AdminCommandType::DeleteSourceCredential
+                    : AdminCommandType::WriteSourceCredential;
+  cmd.credential_key = key;
+  cmd.credential_value = secret.value;
+  AdminResult res;
+  const bool ok = runCommand(req, cmd, res);
+  net::CredentialStore::secureErase(cmd.credential_value);
+  if (!ok) return ESP_OK;
+  ADMIN_LOG_INFO(remove ? "source credential deleted" : "source credential written");
+  return sendJson(req, 200,
+                  JsonValue::makeObject({
+                      {"key", JsonValue::makeString(key)},
+                      {"ref", JsonValue::makeString(net::CredentialStore::sourceRef(key))},
+                      {"deleted", JsonValue::makeBool(remove)},
+                  }).toString());
+}
+
+// ---------------------------------------------------------------------------
 // sources/test（Bearer，每令牌 5 次/分钟；出网 10s；不回显目标 body）
 // ---------------------------------------------------------------------------
 esp_err_t h_source_test(httpd_req_t* req) {
@@ -1383,56 +1465,37 @@ esp_err_t h_source_test(httpd_req_t* req) {
   }
 
   using alert_core::JsonValue;
-  // 目标来源：{id} 引用已配置源，或 {url,...} 直接给出（不落盘）
-  std::string url, auth_ref;
-  bool tls_verify = true;
-  std::vector<net::NetHeader> headers;
+  // 目标来源：{id} 引用已配置源，或 {url,...} 直接给出（不落盘）。
+  net::SourceConfig source;
   std::string src_id;
   jsonStringField(root, "id", src_id);
   if (!src_id.empty()) {
     const auto sources = ConfigStore::instance().sources();
     const net::SourceConfig* hit = nullptr;
-    for (const auto& s : sources) {
-      if (s.id == src_id) hit = &s;
+    for (const auto& candidate : sources) {
+      if (candidate.id == src_id) hit = &candidate;
     }
     if (hit == nullptr) {
       FieldErrors errs = fieldErr("id", "unknown source id");
       return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
     }
-    url = hit->url;
-    auth_ref = hit->auth_token_ref;
-    tls_verify = hit->tls_verify;
-    headers = hit->headers;
+    source = *hit;
   } else {
-    if (!jsonStringField(root, "url", url) || url.empty()) {
-      FieldErrors errs = fieldErr("url", "url or id required");
+    if (root.find("id") == nullptr) {
+      mutableItems(root).emplace_back("id", JsonValue::makeString("source-test"));
+    }
+    alert_core::ValidationError validation;
+    if (!net::SourceConfig::fromJson(root, source, validation)) {
+      FieldErrors errs = fieldErr(validation.field, validation.message);
       return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
     }
-    jsonStringField(root, "auth_token_ref", auth_ref);
-    if (const JsonValue* v = root.find("tls_verify")) tls_verify = v->boolValue(true);
-    if (const JsonValue* v = root.find("headers");
-        v != nullptr && v->type() == JsonValue::Type::Object) {
-      for (const auto& h : v->objectItems()) {
-        if (h.second.type() == JsonValue::Type::String) {
-          headers.push_back({h.first, h.second.stringValue()});
-        }
-      }
-    }
   }
-  if (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0) {
-    FieldErrors errs = fieldErr("url", "must be http:// or https://");
-    return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
-  }
-
+  source.timeout_ms = 10000;
   net::NetRequest nreq;
-  nreq.method = "GET";
-  nreq.url = url;
-  nreq.timeout_ms = 10000;  // M13：出网超时 10s
-  nreq.tls_verify = tls_verify;
-  nreq.headers = std::move(headers);
-  if (!auth_ref.empty()) {
-    const std::string tok = net::CredentialStore::resolveToken(auth_ref);
-    if (!tok.empty()) nreq.headers.push_back({"Authorization", "Bearer " + tok});
+  std::string request_error;
+  if (!net::buildSourceRequest(source, nreq, request_error)) {
+    return sendError(req, 400, errc::kValidationFailed,
+                     "request validation failed: " + request_error);
   }
 
   const int64_t t0 = esp_timer_get_time();
@@ -1679,6 +1742,10 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
       if (!bearer()) return ESP_OK;
       return h_input_bindings_schema(req);
     }
+    if (strcmp(path, "sources/credentials") == 0) {
+      if (!bearer()) return ESP_OK;
+      return h_source_credentials_get(req);
+    }
     if (strcmp(path, "sources/presets") == 0) {
       if (!bearer()) return ESP_OK;
       return h_source_presets(req);
@@ -1776,6 +1843,11 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
       if (!bearer()) return ESP_OK;
       return h_settings_put(req);
     }
+    if (strcmp(path, "sources/credentials") == 0) {
+      if (!bearer()) return ESP_OK;
+      if (!rateLimit(req, "source-credential-write:" + token.substr(0, 8), 60, 30)) return ESP_OK;
+      return h_source_credentials_write(req, false);
+    }
     if (strcmp(path, "input-bindings") == 0) {
       if (!bearer()) return ESP_OK;
       if (!rateLimit(req, "input-write:" + token.substr(0, 8), 60, 30)) return ESP_OK;
@@ -1793,6 +1865,11 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     if (strcmp(path, "config/wifi") == 0) {
       if (!bearer()) return ESP_OK;
       return h_wifi_remove(req);
+    }
+    if (strcmp(path, "sources/credentials") == 0) {
+      if (!bearer()) return ESP_OK;
+      if (!rateLimit(req, "source-credential-write:" + token.substr(0, 8), 60, 30)) return ESP_OK;
+      return h_source_credentials_write(req, true);
     }
     return sendError(req, 404, errc::kNotFound, "resource not found");
   }
