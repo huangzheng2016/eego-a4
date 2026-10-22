@@ -108,8 +108,11 @@ class SchemaValidator:
                 errors.append(f"{path}: string is shorter than {schema['minLength']} code points")
             if "maxLength" in schema and len(value) > schema["maxLength"]:
                 errors.append(f"{path}: string exceeds {schema['maxLength']} code points")
-            if "pattern" in schema and re.search(schema["pattern"], value) is None:
-                errors.append(f"{path}: string does not match {schema['pattern']}")
+            if "pattern" in schema:
+                pattern = schema["pattern"]
+                match_pattern = pattern[:-1] + r"\Z" if pattern.startswith("^") and pattern.endswith("$") else pattern
+                if re.search(match_pattern, value) is None:
+                    errors.append(f"{path}: string does not match {pattern}")
         if self._number(value):
             if "minimum" in schema and value < schema["minimum"]:
                 errors.append(f"{path}: number is below {schema['minimum']}")
