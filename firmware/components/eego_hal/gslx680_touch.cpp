@@ -213,7 +213,7 @@ TouchEvent Gslx680Touch::poll() {
     uint8_t frame[24] = {};
     std::vector<TouchEvent> events;
     if (readReg(0x80, frame, sizeof(frame)) != ESP_OK) {
-        events = gestures_.tick(now);
+        events = gestures_.invalidate(now);
     } else {
         const uint8_t count = frame[0] > 5 ? 5 : frame[0];
         const uint16_t rawYWord =

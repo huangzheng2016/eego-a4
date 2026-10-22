@@ -673,41 +673,45 @@ struct DashboardRuntime::Impl {
     for (size_t i = 0; i < pages.size(); ++i) {
       if (pages[i]->id == page_id) index = i;
     }
-    index = (index + pages.size() + static_cast<size_t>(delta)) % pages.size();
-    setPage(pages[index]->id, 0, false);
+    int64_t next = (static_cast<int64_t>(index) + delta) % static_cast<int64_t>(pages.size());
+    if (next < 0) next += static_cast<int64_t>(pages.size());
+    setPage(pages[static_cast<size_t>(next)]->id, 0, false);
   }
 
   void moveFocus(int delta) {
-    if (layout.panels.empty()) {
-      movePage(delta);
-      return;
-    }
+    if (delta == 0) return;
     const std::string old = focusedPanel() == nullptr ? "" : focusedPanel()->id;
-    const int64_t next = static_cast<int64_t>(focus) + delta;
-    if (next < 0) {
-      if (page_index > 0) {
-        --page_index;
-        rebuildLayout();
-        focus = layout.panels.empty() ? 0 : layout.panels.size() - 1;
-        force_full = true;
-      } else {
-        movePage(-1);
-        return;
+    int remaining = delta;
+    while (remaining != 0) {
+      if (layout.panels.empty()) {
+        movePage(remaining);
+        break;
       }
-    } else if (next >= static_cast<int64_t>(layout.panels.size())) {
-      if (page_index + 1 < layout.page_count) {
-        ++page_index;
-        rebuildLayout();
-        focus = 0;
-        force_full = true;
+      const int step = remaining > 0 ? 1 : -1;
+      const int64_t next = static_cast<int64_t>(focus) + step;
+      if (next < 0) {
+        if (page_index > 0) {
+          --page_index;
+          rebuildLayout();
+          focus = layout.panels.empty() ? 0 : layout.panels.size() - 1;
+          force_full = true;
+        } else {
+          movePage(-1);
+        }
+      } else if (next >= static_cast<int64_t>(layout.panels.size())) {
+        if (page_index + 1 < layout.page_count) {
+          ++page_index;
+          rebuildLayout();
+          focus = 0;
+          force_full = true;
+        } else {
+          movePage(1);
+        }
       } else {
-        movePage(1);
-        return;
+        focus = static_cast<size_t>(next);
       }
-    } else {
-      focus = static_cast<size_t>(next);
+      remaining -= step;
     }
-
     focused_event_id.clear();
     action_focus = 0;
     invalidateFocus(old);

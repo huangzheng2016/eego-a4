@@ -28,6 +28,7 @@ public:
     TouchEvent poll();  // 8ms 轮询，返回事件
 
     bool isPressed() const { return gestures_.screenPressed(); }
+    bool hasPending() const { return !pending_.empty(); }
 
 private:
     esp_err_t writeReg(uint8_t reg, const uint8_t* data, size_t len);

@@ -9,6 +9,7 @@
 # ui_text.*        中英界面文案表
 # device_prefs.*   旧 NVS "ui" 静音指纹的一次性迁移（其他偏好在 device_settings）
 # time_source.*    统一时间源（SNTP 系统时间 > RTC > 不可用；M21）
+# input_merge.*    触控/实体键同批时间戳归并（DP8 R1）
 idf_component_register(
     SRCS
         "app_main.cpp"
@@ -21,6 +22,7 @@ idf_component_register(
         "time_source.cpp"
         "input_confirm.cpp"
         "input_navigation.cpp"
+        "input_merge.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         board

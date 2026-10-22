@@ -43,6 +43,7 @@ class TouchGestureFsm {
   void reset();
   std::vector<TouchEvent> sample(TouchContact contact, uint16_t x, uint16_t y,
                                  int64_t now_us);
+  std::vector<TouchEvent> invalidate(int64_t now_us);
   std::vector<TouchEvent> tick(int64_t now_us);
   bool screenPressed() const { return active_ == TouchContact::Screen; }
 

@@ -19,7 +19,7 @@
 //   9. diag::start（串口命令钩子全部在 app_task 上下文执行）+ PanelApp.begin
 //
 // app_task 主循环（唯一 UI 属主）：
-//   触控 8ms 轮询 → 按键队列 → diag::service → admin::serviceCommands(0) →
+//   触控帧 + 按键队列按时间戳归并 → diag::service → admin::serviceCommands(0) →
 //   app.service()（事件归并/电源 FSM/按需渲染）→ vTaskDelay(8ms)
 //
 // 串口诊断入口：UART0 115200，输入 help 查看命令。
@@ -45,6 +45,7 @@
 #include "freertos/task.h"
 #include "net_stack/net_stack.h"
 #include "net_stack/sd_alert_file_io.h"
+#include "input_merge.h"
 #include "panel_app.h"
 #include "time_source.h"
 
@@ -379,17 +380,21 @@ extern "C" void app_main(void) {
   // 10. app_task 主循环（唯一 UI 属主；input/net/httpd/serial 只经队列/快照交互）
   ESP_LOGI(TAG, "app_task running");
   eego::ButtonEvent bevt;
+  panel::InputEventBatch inputEvents;
   while (true) {
-    // 触控轮询（8ms 合同，边沿触发；前键短/长按经触控 sentinel 上报）
-    const eego::TouchEvent tev = touch.poll();
-    if (tev.type != eego::TouchEventType::None) {
-      app.handleTouch(tev);
+    // 每轮只读取一次新触控帧，随后排空该帧事件与全部实体键；在任一
+    // handler 可执行危险动作前，先按统一 esp_timer 时间戳归并两个来源。
+    inputEvents.clear();
+    while (true) {
+      const eego::TouchEvent tev = touch.poll();
+      if (tev.type == eego::TouchEventType::None) break;
+      inputEvents.add(tev);
+      if (!touch.hasPending()) break;
     }
-
-    // 按键事件队列（后台任务去抖）
     while (eego::ButtonManager::instance().poll(&bevt, 0)) {
-      app.handleButton(bevt);
+      inputEvents.add(bevt);
     }
+    inputEvents.dispatch(app);
 
     // 诊断开关热生效；禁用时不分发串口命令。
     if (deviceSettings.snapshot().values.diagnostics_enabled) diag::service();

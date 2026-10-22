@@ -191,6 +191,16 @@ void TouchGestureFsm::release(int64_t now_us, std::vector<TouchEvent>& out) {
   front_double_armed_ = false;
 }
 
+std::vector<TouchEvent> TouchGestureFsm::invalidate(int64_t now_us) {
+  const bool had_activity = active_ != TouchContact::None || pending_front_short_deadline_us_ != 0;
+  const uint16_t x = last_x_;
+  const uint16_t y = last_y_;
+  reset();
+  std::vector<TouchEvent> out;
+  if (had_activity) out.push_back({TouchEventType::Cancel, x, y, now_us});
+  return out;
+}
+
 std::vector<TouchEvent> TouchGestureFsm::tick(int64_t now_us) {
   std::vector<TouchEvent> out;
   if (active_ != TouchContact::None && !moved_ && !long_sent_ &&
