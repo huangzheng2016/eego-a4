@@ -42,8 +42,7 @@ constexpr uint32_t kNetBitSource = 1u << 1;
 constexpr uint32_t kPollWaitMs = 45000;
 constexpr uint32_t kRenderThrottleMs = 250;
 constexpr uint32_t kClockRenderMs = 30000;
-constexpr uint32_t kConfirmWindowMs = 5000;
-constexpr size_t kSettingsRowCount = 26;
+constexpr size_t kSettingsRowCount = 28;
 constexpr size_t kSettingsPageRows = 8;
 
 constexpr uint32_t kDashboardPollWaitMs = 130000;
@@ -104,6 +103,9 @@ void PanelApp::begin(const Deps& deps) {
   dashboardDeps.canvas = deps_.canvas;
   dashboardDeps.net = &NetStack::instance();
   dashboardDeps.alerts = deps_.publisher;
+  dashboardDeps.confirm_action = [this](const DashboardConfirmRequest& request) {
+    armDashboardConfirm(request);
+  };
   page_ = dashboardStartupPage(page_, dashboard_.begin(dashboardDeps));
   dashboard_.setMains(mains_);
 
@@ -257,7 +259,11 @@ void PanelApp::service() {
     lastChargeMs_ = now;
   }
 
-  if (confirm_ != ConfirmKind::None && now > confirmDeadlineMs_) clearConfirm();
+  if (confirm_ != ConfirmKind::None &&
+      (confirmState_.expired(now * 1000) || !confirmTargetCurrent())) {
+    clearConfirm();
+  }
+  flushNavigation(now * 1000);
   if (!banner_.empty() && now > bannerDeadlineMs_) {
     banner_.clear();
     markDirty();
@@ -315,68 +321,312 @@ void PanelApp::service() {
 
 // ── 输入 ────────────────────────────────────────────────────────────────────
 
-void PanelApp::handleTouch(const eego::TouchEvent& ev) {
-  lastInputMs_ = nowMs();
-  switch (ev.type) {
-    case eego::TouchEventType::Touch:
-      if (ev.pressed) onTouchTap(static_cast<int16_t>(ev.x), static_cast<int16_t>(ev.y));
-      break;
-    case eego::TouchEventType::FrontKeyShort:
+namespace {
+
+ConfirmSource buttonSource(eego::ButtonId id) {
+  switch (id) {
+    case eego::ButtonId::Up: return ConfirmSource::Up;
+    case eego::ButtonId::Down: return ConfirmSource::Down;
+    case eego::ButtonId::Power: return ConfirmSource::Power;
+  }
+  return ConfirmSource::None;
+}
+
+const char* buttonTriggerControl(eego::ButtonId id) {
+  switch (id) {
+    case eego::ButtonId::Up: return "trigger:up";
+    case eego::ButtonId::Down: return "trigger:down";
+    case eego::ButtonId::Power: return "trigger:power";
+  }
+  return "";
+}
+
+}  // namespace
+
+void PanelApp::handleButton(const eego::ButtonEvent& ev) {
+  const int64_t now_us = esp_timer_get_time();
+  if (ev.timestamp_us <= 0 || now_us < ev.timestamp_us ||
+      now_us - ev.timestamp_us > eego::kInputActionMaxAgeUs) {
+    return;
+  }
+  lastInputMs_ = now_us / 1000;
+  const size_t index = static_cast<size_t>(ev.id);
+  if (index >= 3) return;
+  const ConfirmSource source = buttonSource(ev.id);
+  if (ev.action == eego::ButtonAction::Press) suppressButtonLong_[index] = false;
+  if (ev.action == eego::ButtonAction::LongPress && suppressButtonLong_[index]) {
+    suppressButtonLong_[index] = false;
+    return;
+  }
+
+  if (ev.action == eego::ButtonAction::Press) {
+    suppressButtonShort_[index] = false;
+    if (confirm_ != ConfirmKind::None) {
+      const std::string& wanted = confirmState_.target().control;
+      const std::string control = wanted.rfind("trigger:", 0) == 0
+                                      ? buttonTriggerControl(ev.id)
+                                      : focusedControl();
+      if (confirmState_.beginHold(source, control, ev.timestamp_us, now_us)) return;
       clearConfirm();
+    }
+    return;
+  }
+  if (ev.action == eego::ButtonAction::Release) {
+    if (confirm_ != ConfirmKind::None && confirmState_.holding() &&
+        confirmState_.source() == source) {
+      suppressButtonShort_[index] = true;
+      clearConfirm();
+    }
+    return;
+  }
+  if (ev.action == eego::ButtonAction::LongPress) {
+    if (confirm_ != ConfirmKind::None) {
+      suppressButtonShort_[index] = true;
+      if (confirmState_.completeHold(source, ev.timestamp_us, now_us)) {
+        executeArmedConfirm();
+      } else {
+        clearConfirm();
+      }
+      return;
+    }
+    if (ev.id == eego::ButtonId::Power) {
+      activeInputControl_ = focusedControl();
+      back();
+    } else {
+      dispatchTrigger(ev.id == eego::ButtonId::Up ? eego::admin::InputTrigger::UpLong
+                                                  : eego::admin::InputTrigger::DownLong,
+                      now_us);
+    }
+    return;
+  }
+  if (ev.action == eego::ButtonAction::ShortPress) {
+    if (suppressButtonShort_[index]) {
+      suppressButtonShort_[index] = false;
+      return;
+    }
+    if (confirm_ != ConfirmKind::None) clearConfirm();
+    if (ev.id == eego::ButtonId::Power) {
+      activeInputControl_ = focusedControl();
+      activateFocused();
+    } else {
+      dispatchTrigger(ev.id == eego::ButtonId::Up ? eego::admin::InputTrigger::UpShort
+                                                  : eego::admin::InputTrigger::DownShort,
+                      now_us);
+    }
+    return;
+  }
+  if (ev.action == eego::ButtonAction::DoublePress) {
+    if (confirm_ != ConfirmKind::None) clearConfirm();
+    if (ev.id != eego::ButtonId::Power) {
+      dispatchTrigger(ev.id == eego::ButtonId::Up ? eego::admin::InputTrigger::UpDouble
+                                                  : eego::admin::InputTrigger::DownDouble,
+                      now_us);
+    }
+    return;
+  }
+  if (ev.action == eego::ButtonAction::ChordPress) {
+    if (confirm_ != ConfirmKind::None) clearConfirm();
+    dispatchTrigger(eego::admin::InputTrigger::UpDownChord, now_us);
+  }
+}
+
+void PanelApp::handleTouch(const eego::TouchEvent& ev) {
+  const int64_t now_us = esp_timer_get_time();
+  if (ev.timestamp_us <= 0 || now_us < ev.timestamp_us ||
+      now_us - ev.timestamp_us > eego::kInputActionMaxAgeUs) {
+    return;
+  }
+  lastInputMs_ = now_us / 1000;
+  const int16_t x = static_cast<int16_t>(ev.x);
+  const int16_t y = static_cast<int16_t>(ev.y);
+  if (ev.type == eego::TouchEventType::Press || ev.type == eego::TouchEventType::FrontPress) {
+    suppressTouchHold_ = false;
+  }
+  if ((ev.type == eego::TouchEventType::Hold || ev.type == eego::TouchEventType::FrontLong) &&
+      suppressTouchHold_) {
+    suppressTouchHold_ = false;
+    return;
+  }
+
+  switch (ev.type) {
+    case eego::TouchEventType::Press:
+      suppressTouchTap_ = false;
+      if (confirm_ != ConfirmKind::None) {
+        if (confirmState_.beginHold(ConfirmSource::Touch, touchControl(x, y),
+                                    ev.timestamp_us, now_us)) {
+          return;
+        }
+        clearConfirm();
+      }
+      break;
+    case eego::TouchEventType::Release:
+      if (confirm_ != ConfirmKind::None && confirmState_.holding() &&
+          confirmState_.source() == ConfirmSource::Touch) {
+        suppressTouchTap_ = true;
+        clearConfirm();
+      }
+      break;
+    case eego::TouchEventType::Move:
+    case eego::TouchEventType::Cancel:
+      if (confirm_ != ConfirmKind::None) {
+        suppressTouchTap_ = true;
+        clearConfirm();
+      }
+      break;
+    case eego::TouchEventType::Hold:
+      if (confirm_ != ConfirmKind::None) {
+        suppressTouchTap_ = true;
+        if (confirmState_.completeHold(ConfirmSource::Touch, ev.timestamp_us, now_us)) {
+          executeArmedConfirm();
+        } else {
+          clearConfirm();
+        }
+      }
+      break;
+    case eego::TouchEventType::Tap:
+      if (suppressTouchTap_) {
+        suppressTouchTap_ = false;
+        return;
+      }
+      if (confirm_ != ConfirmKind::None) clearConfirm();
+      activeInputControl_ = touchControl(x, y);
+      onTouchTap(x, y);
+      break;
+    case eego::TouchEventType::SwipeLeft:
+    case eego::TouchEventType::SwipeRight:
+      if (confirm_ != ConfirmKind::None) clearConfirm();
+      requestNavigation(NavigationKind::Page,
+                        ev.type == eego::TouchEventType::SwipeLeft ? 1 : -1, now_us);
+      break;
+    case eego::TouchEventType::FrontPress:
+      suppressFrontShort_ = false;
+      if (confirm_ != ConfirmKind::None) {
+        const std::string control = confirmState_.target().control == "trigger:front"
+                                        ? "trigger:front"
+                                        : "";
+        if (confirmState_.beginHold(ConfirmSource::Front, control, ev.timestamp_us, now_us)) {
+          return;
+        }
+        clearConfirm();
+      }
+      break;
+    case eego::TouchEventType::FrontRelease:
+      if (confirm_ != ConfirmKind::None && confirmState_.holding() &&
+          confirmState_.source() == ConfirmSource::Front) {
+        suppressFrontShort_ = true;
+        clearConfirm();
+      }
+      break;
+    case eego::TouchEventType::FrontShort:
+      if (suppressFrontShort_) {
+        suppressFrontShort_ = false;
+        return;
+      }
+      if (confirm_ != ConfirmKind::None) clearConfirm();
+      activeInputControl_ = "front.home";
       onFrontKeyShort();
       break;
-    case eego::TouchEventType::FrontKeyLong:
-      onFrontKeyLong();
+    case eego::TouchEventType::FrontLong:
+      if (confirm_ != ConfirmKind::None) {
+        if (confirmState_.completeHold(ConfirmSource::Front, ev.timestamp_us, now_us)) {
+          executeArmedConfirm();
+        } else {
+          clearConfirm();
+        }
+      } else {
+        dispatchTrigger(eego::admin::InputTrigger::FrontLong, now_us);
+      }
+      break;
+    case eego::TouchEventType::FrontDouble:
+      if (confirm_ != ConfirmKind::None) clearConfirm();
+      dispatchTrigger(eego::admin::InputTrigger::FrontDouble, now_us);
       break;
     default:
       break;
   }
 }
 
-void PanelApp::handleButton(const eego::ButtonEvent& ev) {
-  lastInputMs_ = nowMs();
-  if (ev.action == eego::ButtonAction::LongPress) {
-    onButtonLong(ev.id);
-  } else {
-    onButtonShort(ev.id);
+void PanelApp::dispatchTrigger(eego::admin::InputTrigger trigger, int64_t now_us) {
+  if (page_ == Page::Provision) return;
+  switch (trigger) {
+    case eego::admin::InputTrigger::UpShort:
+    case eego::admin::InputTrigger::UpLong:
+    case eego::admin::InputTrigger::UpDouble:
+      activeInputControl_ = "trigger:up";
+      break;
+    case eego::admin::InputTrigger::DownShort:
+    case eego::admin::InputTrigger::DownLong:
+    case eego::admin::InputTrigger::DownDouble:
+      activeInputControl_ = "trigger:down";
+      break;
+    case eego::admin::InputTrigger::UpDownChord:
+      activeInputControl_ = "trigger:up_down";
+      break;
+    case eego::admin::InputTrigger::FrontLong:
+    case eego::admin::InputTrigger::FrontDouble:
+      activeInputControl_ = "trigger:front";
+      break;
+  }
+  const auto bindings = eego::admin::InputBindings::instance().snapshot();
+  eego::admin::InputBinding binding;
+  if (eego::admin::resolveInputBinding(bindings.bindings, pageContext(), trigger, binding)) {
+    executeBinding(binding, now_us);
   }
 }
 
-void PanelApp::onButtonShort(eego::ButtonId id) {
-  // 二次确认执行：armed 状态下电源短按 = 确认（其他输入在各自分支先取消）
-  if (id == eego::ButtonId::Power && confirm_ != ConfirmKind::None) {
-    executeArmedConfirm();
+void PanelApp::executeBinding(const eego::admin::InputBinding& binding, int64_t now_us) {
+  using eego::admin::InputActionKind;
+  if (binding.action.kind == InputActionKind::None) return;
+  if (binding.action.kind == InputActionKind::Builtin) {
+    if (!eego::admin::inputBuiltinAllowed(binding.action.target)) {
+      showBanner(tr(Str::ActionFailed), 3000);
+      return;
+    }
+    executeBuiltin(binding.action.target, now_us);
     return;
   }
-
-  clearConfirm();
-  switch (id) {
-    case eego::ButtonId::Up:
-      moveFocus(-1);
-      break;
-    case eego::ButtonId::Down:
-      moveFocus(1);
-      break;
-    case eego::ButtonId::Power:
-      activateFocused();
-      break;
+  if (inputBusy()) {
+    showBanner(tr(Str::Busy), 2000);
+    return;
+  }
+  eego::dashboard::ActionKind kind = eego::dashboard::ActionKind::Refresh;
+  if (!dashboard_.executeActionRef(binding.action.panel_id, binding.action.action_id, &kind)) {
+    showBanner(tr(Str::ActionFailed), 3000);
+    return;
+  }
+  if (confirm_ == ConfirmKind::DashboardAction) return;
+  if (dashboard_.consumeExitRequest()) {
+    gotoPage(Page::Overview);
+    return;
+  }
+  if (kind == eego::dashboard::ActionKind::GotoPage ||
+      kind == eego::dashboard::ActionKind::GotoPanel) {
+    gotoPage(Page::Dashboard);
   }
 }
 
-void PanelApp::onButtonLong(eego::ButtonId id) {
-  if (id == eego::ButtonId::Power) {
-    clearConfirm();
-    back();
-  } else if (page_ == Page::Dashboard) {
-    clearConfirm();
-    dashboard_.moveFocus(id == eego::ButtonId::Up ? -1 : 1, true);
-  } else {
-    onButtonShort(id);  // Up/Down 长按视同短按
+void PanelApp::executeBuiltin(const std::string& name, int64_t now_us) {
+  if (name == "focus_previous" || name == "focus_next") {
+    requestNavigation(NavigationKind::Focus, name == "focus_previous" ? -1 : 1, now_us);
+  } else if (name == "page_previous" || name == "page_next") {
+    requestNavigation(NavigationKind::Page, name == "page_previous" ? -1 : 1, now_us);
+  } else if (name == "help") {
+    if (page_ != Page::Help) helpReturn_ = page_;
+    gotoPage(Page::Help);
+  } else if (name == "status") {
+    gotoPage(Page::Status);
+  } else if (name == "refresh") {
+    if (inputBusy()) {
+      showBanner(tr(Str::Busy), 2000);
+    } else if (page_ == Page::Dashboard) {
+      dashboard_.refreshCurrent();
+    } else {
+      doPollNow();
+    }
   }
 }
 
 void PanelApp::onFrontKeyShort() {
-  // S0 ↔ S1 快切；其他页回 S0
   if (page_ == Page::Overview) {
     gotoPage(Page::Table);
   } else {
@@ -384,33 +634,107 @@ void PanelApp::onFrontKeyShort() {
   }
 }
 
-void PanelApp::onFrontKeyLong() {
-  // 任意页面：全部确认（二次确认）
-  if (confirm_ == ConfirmKind::AckAll) {
-    doAckAll();
-    clearConfirm();
-  } else {
-    armConfirm(ConfirmKind::AckAll);
+bool PanelApp::inputBusy() const {
+  return page_ == Page::Dashboard && !dashboard_.networkIdle();
+}
+
+uint64_t PanelApp::inputEpoch() const {
+  return (pageEpoch_ << 32) ^ (dashboard_.pageEpoch() & 0xffffffffULL);
+}
+
+std::string PanelApp::pageContext() const {
+  switch (page_) {
+    case Page::Overview: return "overview";
+    case Page::Table: return "table";
+    case Page::Detail: return "detail";
+    case Page::Status: return "status";
+    case Page::Settings: return "settings";
+    case Page::Help: return "help";
+    case Page::Dashboard: return dashboard_.pageContext();
+    case Page::Provision: return "provision";
+  }
+  return {};
+}
+
+void PanelApp::requestNavigation(NavigationKind kind, int delta, int64_t now_us) {
+  const int immediate = navigation_.submit(kind, delta, inputBusy(), inputEpoch(), now_us);
+  if (immediate == 0) return;
+  if (kind == NavigationKind::Focus) moveFocus(immediate);
+  if (kind == NavigationKind::Page) movePage(immediate);
+}
+
+void PanelApp::flushNavigation(int64_t now_us) {
+  NavigationKind kind = NavigationKind::None;
+  const int delta = navigation_.flush(inputBusy(), inputEpoch(), now_us, kind);
+  if (delta == 0) return;
+  if (kind == NavigationKind::Focus) moveFocus(delta);
+  if (kind == NavigationKind::Page) movePage(delta);
+}
+
+void PanelApp::movePage(int delta) {
+  switch (page_) {
+    case Page::Table: {
+      std::vector<const alert_core::AlertRecord*> visible;
+      const size_t total = visibleRecords(visible);
+      const size_t pages = std::max<size_t>(1, (total + geom::kRowsPerPage - 1) /
+                                                   geom::kRowsPerPage);
+      int64_t next = (static_cast<int64_t>(tablePage_) + delta) % static_cast<int64_t>(pages);
+      if (next < 0) next += static_cast<int64_t>(pages);
+      tablePage_ = static_cast<size_t>(next);
+      focus_ = 0;
+      markDirty(true);
+      break;
+    }
+    case Page::Settings: {
+      const size_t pages = (kSettingsRowCount + kSettingsPageRows - 1) / kSettingsPageRows;
+      const size_t current = focus_ / kSettingsPageRows;
+      int64_t signed_next = (static_cast<int64_t>(current) + delta) % static_cast<int64_t>(pages);
+      if (signed_next < 0) signed_next += static_cast<int64_t>(pages);
+      const size_t next = static_cast<size_t>(signed_next);
+      focus_ = std::min(next * kSettingsPageRows, kSettingsRowCount - 1);
+      markDirty(true);
+      break;
+    }
+    case Page::Dashboard:
+      dashboard_.movePage(delta);
+      break;
+    case Page::Overview:
+      if (delta > 0) gotoPage(Page::Table);
+      break;
+    default:
+      break;
   }
 }
 
 // ── 导航 ────────────────────────────────────────────────────────────────────
 
+namespace {
+
+size_t wrappedIndex(size_t current, int delta, size_t count) {
+  if (count == 0) return 0;
+  int64_t next = (static_cast<int64_t>(current) + delta) % static_cast<int64_t>(count);
+  if (next < 0) next += static_cast<int64_t>(count);
+  return static_cast<size_t>(next);
+}
+
+}  // namespace
+
 void PanelApp::gotoPage(Page p) {
   if (page_ == p || (p == Page::Dashboard && !dashboard_.available())) return;
   page_ = p;
+  ++pageEpoch_;
+  navigation_.cancel();
   focus_ = 0;
   provisionSucceeded_ = false;
   clearConfirm();
-  if (p == Page::Settings) refreshMuteRuleCount();  // S4 静音规则数（M21）
+  if (p == Page::Settings) refreshMuteRuleCount();
   if (p == Page::Dashboard) dashboard_.invalidateAll();
-  markDirty(true);  // 切页 Full 刷新（避免跨页残影）
+  markDirty(true);
 }
 
 void PanelApp::back() {
   switch (page_) {
     case Page::Detail: {
-      // 返回列表时把选择还原到目标行（gotoPage 会清 focus，先切页再还原）
       const std::string target = detailId_;
       gotoPage(Page::Table);
       std::vector<const alert_core::AlertRecord*> vis;
@@ -425,6 +749,9 @@ void PanelApp::back() {
       markDirty();
       break;
     }
+    case Page::Help:
+      gotoPage(helpReturn_ == Page::Help ? Page::Overview : helpReturn_);
+      break;
     case Page::Table:
     case Page::Status:
     case Page::Settings:
@@ -441,7 +768,10 @@ void PanelApp::back() {
 void PanelApp::moveFocus(int delta) {
   switch (page_) {
     case Page::Overview:
-      focus_ = (focus_ + delta + softKeyCount()) % softKeyCount();
+    case Page::Detail:
+    case Page::Status:
+    case Page::Help:
+      focus_ = wrappedIndex(focus_, delta, softKeyCount());
       markDirty();
       break;
     case Page::Table: {
@@ -449,27 +779,16 @@ void PanelApp::moveFocus(int delta) {
       const size_t total = visibleRecords(vis);
       if (total == 0) break;
       int64_t idx = static_cast<int64_t>(tablePage_ * geom::kRowsPerPage + focus_) + delta;
-      if (idx < 0) idx = 0;
-      if (idx >= static_cast<int64_t>(total)) idx = static_cast<int64_t>(total) - 1;
+      idx = std::max<int64_t>(0, std::min<int64_t>(idx, static_cast<int64_t>(total) - 1));
       tablePage_ = static_cast<size_t>(idx) / geom::kRowsPerPage;
       focus_ = static_cast<size_t>(idx) % geom::kRowsPerPage;
       markDirty();
       break;
     }
-    case Page::Detail:
-      focus_ = (focus_ + delta + softKeyCount()) % softKeyCount();
+    case Page::Settings:
+      focus_ = wrappedIndex(focus_, delta, kSettingsRowCount);
       markDirty();
       break;
-    case Page::Status:
-      focus_ = (focus_ + delta + 2) % 2;
-      markDirty();
-      break;
-    case Page::Settings: {
-      const int rows = static_cast<int>(kSettingsRowCount);
-      focus_ = static_cast<size_t>((static_cast<int>(focus_) + delta + rows) % rows);
-      markDirty();
-      break;
-    }
     case Page::Dashboard:
       dashboard_.moveFocus(delta, false);
       break;
@@ -483,6 +802,7 @@ void PanelApp::activateFocused() {
     case Page::Overview:
     case Page::Detail:
     case Page::Status:
+    case Page::Help:
       activateSoftKey(focus_);
       break;
     case Page::Table: {
@@ -496,7 +816,7 @@ void PanelApp::activateFocused() {
       break;
     }
     case Page::Settings:
-      activateSoftKey(focus_ + 1);  // 软键 0 = 返回；行聚焦从 1 起
+      activateSoftKey(focus_ + 1);
       break;
     case Page::Dashboard:
       dashboard_.activate();
@@ -509,48 +829,25 @@ void PanelApp::activateFocused() {
 void PanelApp::activateSoftKey(size_t idx) {
   switch (page_) {
     case Page::Overview:
-      if (idx == 0) {
-        gotoPage(Page::Table);
-      } else if (idx == 1) {
-        if (confirm_ == ConfirmKind::AckAll) {
-          doAckAll();
-          clearConfirm();
-        } else {
-          armConfirm(ConfirmKind::AckAll);
-        }
-      } else if (idx == 2) {
-        gotoPage(Page::Settings);
-      } else if (idx == 3) {
-        gotoPage(Page::Dashboard);
-      }
+      if (idx == 0) gotoPage(Page::Table);
+      else if (idx == 1) armConfirm(ConfirmKind::AckAll);
+      else if (idx == 2) gotoPage(Page::Settings);
+      else if (idx == 3) gotoPage(Page::Dashboard);
       break;
     case Page::Table:
-      if (idx == 0) {
-        activateFocused();
-      } else if (idx == 1) {
-        back();
-      }
+      if (idx == 0) activateFocused();
+      else if (idx == 1) back();
       break;
     case Page::Detail: {
       const alert_core::AlertRecord* rec = findRecord(detailId_);
       if (idx == 0 && rec != nullptr && rec->state == alert_core::AlertState::Active) {
         doAck(detailId_);
       } else if (idx == 1 && rec != nullptr) {
-        if (confirm_ == ConfirmKind::Mute) {
-          doMute(*rec);
-          clearConfirm();
-        } else {
-          armConfirm(ConfirmKind::Mute);
-        }
+        armConfirm(ConfirmKind::Mute);
       } else if (idx == 2 && rec != nullptr &&
                  (rec->state == alert_core::AlertState::Active ||
                   rec->state == alert_core::AlertState::Acked)) {
-        if (confirm_ == ConfirmKind::Clear) {
-          doClear(detailId_);
-          clearConfirm();
-        } else {
-          armConfirm(ConfirmKind::Clear);
-        }
+        armConfirm(ConfirmKind::Clear);
       } else if (idx == 3 && rec != nullptr &&
                  !dashboard_.linkedPanelForAlert(*rec).empty()) {
         const std::string linked = dashboard_.linkedPanelForAlert(*rec);
@@ -561,18 +858,15 @@ void PanelApp::activateSoftKey(size_t idx) {
       break;
     }
     case Page::Status:
-      if (idx == 0) {
-        doPollNow();
-      } else if (idx == 1) {
-        back();
-      }
+      if (idx == 0) doPollNow();
+      else if (idx == 1) back();
       break;
     case Page::Settings:
-      if (idx == 0) {
-        back();
-        break;
-      }
-      activateSettingRow(idx - 1);
+      if (idx == 0) back();
+      else activateSettingRow(idx - 1);
+      break;
+    case Page::Help:
+      if (idx == 0) back();
       break;
     default:
       break;
@@ -581,81 +875,85 @@ void PanelApp::activateSoftKey(size_t idx) {
 
 // ── 触控 ────────────────────────────────────────────────────────────────────
 
-void PanelApp::onTouchTap(int16_t x, int16_t y) {
-  if (page_ == Page::Dashboard) {
-    clearConfirm();
-    dashboard_.touch(x, y);
-    return;
-  }
-  // 1. 命中解析：软键下标（S4 软键 0=返回）或 S4 行（hitIdx=行下标+1, hitRow=true）；
-  //    内容区命中保持 hitIdx=-1（永不匹配布防 → 取消）。
-  int hitIdx = -1;
-  bool hitRow = false;
+void PanelApp::resolveTouchHit(int16_t x, int16_t y, int& hit_idx, bool& hit_row) const {
+  hit_idx = -1;
+  hit_row = false;
   if (y >= geom::kSoftKeyY && y <= geom::kSoftKeyY + geom::kSoftKeyH) {
     const size_t n = softKeyCount();
     if (n > 0) {
       const int16_t gap = 8;
       const int16_t kw = static_cast<int16_t>((geom::kContentW - gap * (n - 1)) / n);
       int idx = (x - geom::kContentX) / (kw + gap);
-      if (idx < 0) idx = 0;
-      if (idx >= static_cast<int>(n)) idx = static_cast<int>(n) - 1;
-      hitIdx = idx;
+      idx = std::max(0, std::min(idx, static_cast<int>(n) - 1));
+      hit_idx = idx;
     }
   } else if (page_ == Page::Settings) {
-    const int16_t rowsY = geom::kContentTop + 64;
-    if (y >= rowsY && y < rowsY + static_cast<int16_t>(kSettingsPageRows * 56)) {
-      const size_t row = static_cast<size_t>((y - rowsY) / 56);
+    const int16_t rows_y = geom::kContentTop + 64;
+    if (y >= rows_y && y < rows_y + static_cast<int16_t>(kSettingsPageRows * 56)) {
+      const size_t row = static_cast<size_t>((y - rows_y) / 56);
       const size_t global = (focus_ / kSettingsPageRows) * kSettingsPageRows + row;
       if (global < kSettingsRowCount) {
-        hitRow = true;
-        hitIdx = static_cast<int>(global + 1);
+        hit_row = true;
+        hit_idx = static_cast<int>(global + 1);
       }
     }
   }
+}
 
-  // 2. 二次确认：布防状态下命中同一控件 = 执行；过期或其他命中 = 取消后正常分发
-  //    （与 onButtonShort 的语义一致，触控/按键同契约）。
-  if (confirm_ != ConfirmKind::None) {
-    if (nowMs() > confirmDeadlineMs_) {
-      clearConfirm();
-    } else if (confirmTargetMatches(confirm_, page_, hitIdx, hitRow)) {
-      executeArmedConfirm();
-      return;
-    } else {
-      clearConfirm();
-    }
+std::string PanelApp::controlForHit(int hit_idx, bool hit_row) const {
+  if (hit_idx < 0) return {};
+  return std::to_string(static_cast<unsigned>(page_)) + (hit_row ? ":row:" : ":key:") +
+         std::to_string(hit_idx);
+}
+
+std::string PanelApp::focusedControl() const {
+  if (page_ == Page::Dashboard) return dashboard_.focusedControl();
+  if (page_ == Page::Settings) return controlForHit(static_cast<int>(focus_ + 1), true);
+  if (page_ == Page::Overview || page_ == Page::Detail || page_ == Page::Status ||
+      page_ == Page::Help) {
+    return controlForHit(static_cast<int>(focus_), false);
   }
+  return {};
+}
 
-  // 3. 正常分发
-  if (hitIdx >= 0 && !hitRow) {  // 软键栏
-    if (page_ == Page::Settings) {
-      back();  // S4 软键只有"返回"
-    } else {
-      activateSoftKey(static_cast<size_t>(hitIdx));
-    }
+std::string PanelApp::touchControl(int16_t x, int16_t y) const {
+  if (page_ == Page::Dashboard) return dashboard_.touchControl(x, y);
+  int hit_idx = -1;
+  bool hit_row = false;
+  resolveTouchHit(x, y, hit_idx, hit_row);
+  return controlForHit(hit_idx, hit_row);
+}
+
+void PanelApp::onTouchTap(int16_t x, int16_t y) {
+  if (page_ == Page::Dashboard) {
+    dashboard_.touch(x, y);
     return;
   }
-  if (hitRow) {  // S4 设置行
-    const size_t row = static_cast<size_t>(hitIdx - 1);
-    if (row == focus_) {
-      activateSoftKey(static_cast<size_t>(hitIdx));
-    } else {
+  int hit_idx = -1;
+  bool hit_row = false;
+  resolveTouchHit(x, y, hit_idx, hit_row);
+  if (hit_idx >= 0 && !hit_row) {
+    if (page_ == Page::Settings) back();
+    else activateSoftKey(static_cast<size_t>(hit_idx));
+    return;
+  }
+  if (hit_row) {
+    const size_t row = static_cast<size_t>(hit_idx - 1);
+    if (row == focus_) activateSoftKey(static_cast<size_t>(hit_idx));
+    else {
       focus_ = row;
       markDirty();
     }
     return;
   }
-  // 页面内容
   switch (page_) {
     case Page::Overview:
-      if (y >= geom::kContentTop + 64 && y < geom::kContentTop + 474) {
-        gotoPage(Page::Table);  // 卡片区域点按进列表
-      }
+      if (y >= geom::kContentTop + 64 && y < geom::kContentTop + 474) gotoPage(Page::Table);
       break;
     case Page::Table: {
-      const int16_t rowsY = geom::kContentTop + 60;
-      if (y >= rowsY && y < rowsY + geom::kRowsPerPage * geom::kRowH) {
-        const size_t row = static_cast<size_t>((y - rowsY) / geom::kRowH);
+      const int16_t rows_y = geom::kContentTop + 60;
+      if (y >= rows_y && y < rows_y + geom::kRowsPerPage * geom::kRowH) {
+        const size_t row = static_cast<size_t>((y - rows_y) / geom::kRowH);
         std::vector<const alert_core::AlertRecord*> vis;
         visibleRecords(vis);
         if (tablePage_ * geom::kRowsPerPage + row < vis.size()) {
@@ -921,20 +1219,18 @@ void PanelApp::activateSettingRow(size_t row) {
                                                               : tr(Str::SecurityMissing),
                  3000);
       break;
-    case 23:
-      if (confirm_ == ConfirmKind::ClearMutes) {
-        doClearMutes();
-        clearConfirm();
-      } else {
-        armConfirm(ConfirmKind::ClearMutes);
-      }
-      break;
+    case 23: armConfirm(ConfirmKind::ClearMutes); break;
     case 24: armConfirm(ConfirmKind::FactoryReset); break;
     case 25: {
       const esp_app_desc_t* description = esp_app_get_description();
       showBannerFmt(5000, "%s %s", description->project_name, description->version);
       break;
     }
+    case 26:
+      helpReturn_ = Page::Settings;
+      gotoPage(Page::Help);
+      break;
+    case 27: resetInputBindings(); break;
     default: break;
   }
 }
@@ -978,16 +1274,83 @@ void PanelApp::doFactoryReset() {
   markDirty(true);
 }
 
+uint64_t PanelApp::currentSnapshotEpoch() const {
+  if (deps_.publisher != nullptr) {
+    const auto snapshot = deps_.publisher->acquire();
+    if (snapshot != nullptr) return snapshot->seq;
+  }
+  return snapshotSeq_;
+}
+
+void PanelApp::resetInputBindings() {
+  std::string error;
+  bool conflict = false;
+  const auto document = admin::DashboardStore::instance().snapshot();
+  const eego::dashboard::Dashboard* current =
+      document != nullptr && document->configured ? &document->dashboard : nullptr;
+  if (admin::InputBindings::instance().reset(false, 0, current, error, conflict)) {
+    showBanner(tr(Str::InputResetDone), 3000);
+  } else {
+    showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), error.c_str());
+  }
+  markDirty();
+}
+
+bool PanelApp::confirmTargetCurrent() const {
+  if (confirm_ == ConfirmKind::None || !confirmState_.armed()) return false;
+  const ConfirmTarget& target = confirmState_.target();
+  if (confirm_ == ConfirmKind::DashboardAction) {
+    return page_ == Page::Dashboard && target.page_epoch == pageEpoch_ &&
+           dashboard_.pageEpoch() == confirmDashboard_.page_epoch &&
+           dashboard_.snapshotEpoch() == confirmDashboard_.snapshot_epoch;
+  }
+  if (target.page_epoch != pageEpoch_) return false;
+  if (confirm_ == ConfirmKind::AckAll || confirm_ == ConfirmKind::Mute ||
+      confirm_ == ConfirmKind::Clear) {
+    const auto latest = deps_.publisher != nullptr ? deps_.publisher->acquire() : snapshot_;
+    const ConfirmRecordRule rule = confirm_ == ConfirmKind::AckAll
+                                       ? ConfirmRecordRule::AckAll
+                                       : (confirm_ == ConfirmKind::Mute ? ConfirmRecordRule::Mute
+                                                                       : ConfirmRecordRule::Clear);
+    if (!confirmRecordTargetCurrent(target, rule, latest.get())) return false;
+    if (confirm_ != ConfirmKind::AckAll &&
+        (page_ != Page::Detail || detailId_ != target.record_id)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void PanelApp::executeArmedConfirm() {
+  if (!confirmTargetCurrent()) {
+    clearConfirm();
+    showBanner(tr(Str::ActionFailed), 3000);
+    return;
+  }
+  if (confirm_ == ConfirmKind::DashboardAction) {
+    const DashboardConfirmRequest request = confirmDashboard_;
+    clearConfirm();
+    dashboard_.executeConfirmed(request);
+    return;
+  }
   switch (confirm_) {
     case ConfirmKind::AckAll: doAckAll(); break;
     case ConfirmKind::Mute: {
-      const alert_core::AlertRecord* rec = findRecord(detailId_);
+      const auto latest = deps_.publisher != nullptr ? deps_.publisher->acquire() : snapshot_;
+      const alert_core::AlertRecord* rec = nullptr;
+      if (latest != nullptr && latest->seq == confirmState_.target().snapshot_epoch) {
+        for (const auto& candidate : latest->records) {
+          if (candidate.id == confirmState_.target().record_id) {
+            rec = &candidate;
+            break;
+          }
+        }
+      }
       if (rec != nullptr) doMute(*rec);
       else showBanner(tr(Str::ActionFailed), 3000);
       break;
     }
-    case ConfirmKind::Clear: doClear(detailId_); break;
+    case ConfirmKind::Clear: doClear(confirmState_.target().record_id); break;
     case ConfirmKind::ClearMutes: doClearMutes(); break;
     case ConfirmKind::NetworkRecovery: doOpenRecovery(); break;
     case ConfirmKind::WifiReset: doWifiReset(); break;
@@ -998,24 +1361,87 @@ void PanelApp::executeArmedConfirm() {
 }
 
 void PanelApp::armConfirm(ConfirmKind kind) {
-  confirm_ = kind;
-  confirmDeadlineMs_ = nowMs() + kConfirmWindowMs;
-  if (requiresPhysicalConfirm(kind)) {
-    showBanner(tr(Str::ConfirmPhysical), kConfirmWindowMs);
-  } else if (kind == ConfirmKind::AckAll) {
-    showBanner(tr(Str::ConfirmAckAll), kConfirmWindowMs);
-  } else {
-    showBanner(tr(Str::ConfirmHint), kConfirmWindowMs);
+  clearConfirm();
+  if (activeInputControl_.empty()) {
+    showBanner(tr(Str::ActionFailed), 3000);
+    return;
   }
+  ConfirmTarget target;
+  target.page_epoch = pageEpoch_;
+  target.control = activeInputControl_;
+  target.physical_power_only = requiresPhysicalConfirm(kind);
+  if (kind == ConfirmKind::AckAll || kind == ConfirmKind::Mute || kind == ConfirmKind::Clear) {
+    target.snapshot_epoch = currentSnapshotEpoch();
+  }
+  if (kind == ConfirmKind::Mute || kind == ConfirmKind::Clear) target.record_id = detailId_;
+  confirm_ = kind;
+  confirmState_.arm(target, esp_timer_get_time());
+  showBanner(requiresPhysicalConfirm(kind) ? tr(Str::ConfirmPhysicalHold) : tr(Str::ConfirmHold),
+             static_cast<uint32_t>(kConfirmWindowUs / 1000));
+}
+
+void PanelApp::armDashboardConfirm(const DashboardConfirmRequest& request) {
+  clearConfirm();
+  if (activeInputControl_.empty()) {
+    showBanner(tr(Str::ActionFailed), 3000);
+    return;
+  }
+  DashboardConfirmRequest prepared = request;
+  if (activeInputControl_ == "trigger:up_down") {
+    if (!dashboard_.focusAction(request.panel_id, request.action_id, request.target_identity)) {
+      showBanner(tr(Str::ActionFailed), 3000);
+      return;
+    }
+    activeInputControl_ = dashboard_.focusedControl();
+    prepared.page_epoch = dashboard_.pageEpoch();
+  }
+  if (page_ != Page::Dashboard) {
+    const bool trigger = activeInputControl_.rfind("trigger:", 0) == 0;
+    const bool focused = activeInputControl_ == dashboard_.focusedControl();
+    if (!trigger && !focused) {
+      showBanner(tr(Str::ActionFailed), 3000);
+      return;
+    }
+    gotoPage(Page::Dashboard);
+  }
+  ConfirmTarget target;
+  target.page_epoch = pageEpoch_;
+  target.snapshot_epoch = prepared.snapshot_epoch;
+  target.control = activeInputControl_;
+  target.record_id = prepared.target_identity;
+  confirmDashboard_ = std::move(prepared);
+  confirm_ = ConfirmKind::DashboardAction;
+  confirmState_.arm(target, esp_timer_get_time());
+  showBanner(tr(Str::ConfirmHold), static_cast<uint32_t>(kConfirmWindowUs / 1000));
 }
 
 void PanelApp::clearConfirm() {
   if (confirm_ == ConfirmKind::None) return;
-  confirm_ = ConfirmKind::None;
-  if (banner_ == tr(Str::ConfirmHint) || banner_ == tr(Str::ConfirmAckAll) ||
-      banner_ == tr(Str::ConfirmPhysical)) {
-    banner_.clear();
+  if (confirmState_.holding()) {
+    switch (confirmState_.source()) {
+      case ConfirmSource::Up:
+        suppressButtonShort_[0] = suppressButtonLong_[0] = true;
+        break;
+      case ConfirmSource::Down:
+        suppressButtonShort_[1] = suppressButtonLong_[1] = true;
+        break;
+      case ConfirmSource::Power:
+        suppressButtonShort_[2] = suppressButtonLong_[2] = true;
+        break;
+      case ConfirmSource::Touch:
+        suppressTouchTap_ = suppressTouchHold_ = true;
+        break;
+      case ConfirmSource::Front:
+        suppressFrontShort_ = suppressTouchHold_ = true;
+        break;
+      default: break;
+    }
   }
+  confirm_ = ConfirmKind::None;
+  confirmState_.cancel();
+  confirmDashboard_ = DashboardConfirmRequest{};
+  if (banner_ == tr(Str::ConfirmHold) || banner_ == tr(Str::ConfirmPhysicalHold)) banner_.clear();
+  if (page_ == Page::Dashboard) dashboard_.showStatusMessage("", 1);
   markDirty();
 }
 
@@ -1305,7 +1731,8 @@ size_t PanelApp::softKeyCount() const {
       return rec != nullptr && !dashboard_.linkedPanelForAlert(*rec).empty() ? 5 : 4;
     }
     case Page::Status: return 2;
-    case Page::Settings: return 1;
+    case Page::Settings:
+    case Page::Help: return 1;
     default: return 0;
   }
 }
@@ -1343,6 +1770,7 @@ void PanelApp::softKeys(SoftKeyModel* out, size_t cap) const {
       out[1] = {tr(Str::Back), true};
       break;
     case Page::Settings:
+    case Page::Help:
       out[0] = {tr(Str::Back), true};
       break;
     default:
@@ -1408,6 +1836,12 @@ void PanelApp::render(int64_t now) {
       drawS4(c, m);
       break;
     }
+    case Page::Help: {
+      S3Model m;
+      buildHelp(m);
+      drawHelp(c, m);
+      break;
+    }
     case Page::Provision: {
       ProvisionModel m;
       m.succeeded = provisionSucceeded_;
@@ -1425,7 +1859,8 @@ void PanelApp::render(int64_t now) {
   const size_t n = softKeyCount();
   softKeys(keys, 5);
   size_t focusIdx = static_cast<size_t>(-1);
-  if (page_ == Page::Overview || page_ == Page::Detail || page_ == Page::Status) {
+  if (page_ == Page::Overview || page_ == Page::Detail || page_ == Page::Status ||
+      page_ == Page::Help) {
     focusIdx = focus_;
   }
   drawSoftKeys(c, keys, n, focusIdx);
@@ -1689,6 +2124,21 @@ void PanelApp::buildS3(S3Model& m) {
   add(tr(Str::Version), buf);
 }
 
+void PanelApp::buildHelp(S3Model& m) {
+  auto add = [&m](Str label, Str value) {
+    m.rows.emplace_back(tr(label), tr(value));
+  };
+  add(Str::HelpPower, Str::HelpActivateBack);
+  add(Str::HelpFrontHome, Str::HelpHome);
+  add(Str::HelpFrontGestures, Str::HelpDefaultHelpStatus);
+  add(Str::HelpUpDown, Str::HelpFocusPage);
+  add(Str::HelpSwipe, Str::HelpPage);
+  add(Str::HelpChord, Str::HelpCustomOnly);
+  add(Str::HelpDanger, Str::HelpFreshHold);
+  add(Str::HelpCustomBindings, Str::HelpOverrideOrder);
+  add(Str::HelpLocalReset, Str::HelpResetHere);
+}
+
 void PanelApp::buildS4(S4Model& m) {
   auto add = [&m](Str label, const std::string& value, bool isAction) {
     S4RowModel row;
@@ -1782,6 +2232,8 @@ void PanelApp::buildS4(S4Model& m) {
   add(Str::SetMutes, buf, true);
   add(Str::SetFactoryReset, "", true);
   add(Str::Version, esp_app_get_description()->version, false);
+  add(Str::SetInputHelp, "", false);
+  add(Str::SetInputReset, "", true);
 
   m.pageCount = (m.rows.size() + kSettingsPageRows - 1) / kSettingsPageRows;
   m.page = focus_ / kSettingsPageRows;

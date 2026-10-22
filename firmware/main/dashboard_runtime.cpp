@@ -52,7 +52,6 @@ constexpr size_t kMaxEvents = 1024;
 constexpr int64_t kRenderThrottleMs = 250;
 constexpr int64_t kStatusPeriodMs = 30000;
 constexpr int64_t kCarouselPeriodMs = 15000;
-constexpr int64_t kConfirmMs = 5000;
 constexpr int64_t kBatteryCycleMs = 130000;
 
 int64_t monotonicMs() { return esp_timer_get_time() / 1000; }
@@ -237,13 +236,6 @@ struct DashboardRuntime::Impl {
     std::string event_id;
   };
 
-  struct PendingAction {
-    dash::Action action;
-    std::string panel_id;
-    int64_t deadline_ms = 0;
-    bool armed = false;
-  };
-
   using RuleState = DashboardDerivedRuleState;
 
   struct RuntimeImageProvider final : public ui::ImageProvider {
@@ -289,7 +281,7 @@ struct DashboardRuntime::Impl {
   std::string focused_event_id;
   ui::PageLayout layout;
   std::vector<Location> navigation;
-  PendingAction pending;
+  uint64_t page_epoch = 1;
 
   bool dirty = true;
   bool force_full = true;
@@ -588,6 +580,7 @@ struct DashboardRuntime::Impl {
     rule_states.clear();
     event_tracker.reset();
     navigation.clear();
+    ++page_epoch;
     focused_event_id.clear();
     chart_selection.clear();
     const dash::Page* initial = page(config, page_id);
@@ -625,7 +618,7 @@ struct DashboardRuntime::Impl {
     focus = 0;
     action_focus = 0;
     focused_event_id.clear();
-    pending.armed = false;
+    ++page_epoch;
     rebuildLayout();
     dirty = true;
     force_full = true;
@@ -680,41 +673,46 @@ struct DashboardRuntime::Impl {
     for (size_t i = 0; i < pages.size(); ++i) {
       if (pages[i]->id == page_id) index = i;
     }
-    index = (index + pages.size() + static_cast<size_t>(delta)) % pages.size();
-    setPage(pages[index]->id, 0, false);
+    int64_t next = (static_cast<int64_t>(index) + delta) % static_cast<int64_t>(pages.size());
+    if (next < 0) next += static_cast<int64_t>(pages.size());
+    setPage(pages[static_cast<size_t>(next)]->id, 0, false);
   }
 
   void moveFocus(int delta) {
-    if (layout.panels.empty()) {
-      movePage(delta);
-      return;
-    }
+    if (delta == 0) return;
     const std::string old = focusedPanel() == nullptr ? "" : focusedPanel()->id;
-    const int64_t next = static_cast<int64_t>(focus) + delta;
-    if (next < 0) {
-      if (page_index > 0) {
-        --page_index;
-        rebuildLayout();
-        focus = layout.panels.empty() ? 0 : layout.panels.size() - 1;
-        force_full = true;
-      } else {
-        movePage(-1);
-        return;
+    int remaining = delta;
+    while (remaining != 0) {
+      const int step = remaining > 0 ? 1 : -1;
+      if (layout.panels.empty()) {
+        movePage(step);
+        remaining -= step;
+        continue;
       }
-    } else if (next >= static_cast<int64_t>(layout.panels.size())) {
-      if (page_index + 1 < layout.page_count) {
-        ++page_index;
-        rebuildLayout();
-        focus = 0;
-        force_full = true;
+      const int64_t next = static_cast<int64_t>(focus) + step;
+      if (next < 0) {
+        if (page_index > 0) {
+          --page_index;
+          rebuildLayout();
+          focus = layout.panels.empty() ? 0 : layout.panels.size() - 1;
+          force_full = true;
+        } else {
+          movePage(-1);
+        }
+      } else if (next >= static_cast<int64_t>(layout.panels.size())) {
+        if (page_index + 1 < layout.page_count) {
+          ++page_index;
+          rebuildLayout();
+          focus = 0;
+          force_full = true;
+        } else {
+          movePage(1);
+        }
       } else {
-        movePage(1);
-        return;
+        focus = static_cast<size_t>(next);
       }
-    } else {
-      focus = static_cast<size_t>(next);
+      remaining -= step;
     }
-    pending.armed = false;
     focused_event_id.clear();
     action_focus = 0;
     invalidateFocus(old);
@@ -1422,7 +1420,7 @@ struct DashboardRuntime::Impl {
       movePage(delta);
       return;
     }
-    pending.armed = false;
+
     if (selected->kind == dash::PanelKind::Button && selected->actions.size() > 1) {
       action_focus = (action_focus + selected->actions.size() + static_cast<size_t>(delta)) %
                      selected->actions.size();
@@ -1568,7 +1566,16 @@ struct DashboardRuntime::Impl {
     return false;
   }
 
-  void dispatchAction(const dash::PanelSpec& panel, const dash::Action& input) {
+  uint64_t snapshotEpoch() const {
+    if (deps.alerts != nullptr) {
+      const auto snapshot = deps.alerts->acquire();
+      if (snapshot != nullptr) return snapshot->seq;
+    }
+    return alert_sequence;
+  }
+
+  void dispatchAction(const dash::PanelSpec& panel, const dash::Action& input,
+                      bool confirmed = false, const DashboardConfirmRequest* confirmed_request = nullptr) {
     dash::Action action = input;
     std::string error;
     if (!dash::interpolateVariables(input.target, variables, action.target, error) ||
@@ -1576,18 +1583,96 @@ struct DashboardRuntime::Impl {
       showMessage("Invalid action variable");
       return;
     }
-    const int64_t now = monotonicMs();
-    const bool same = pending.armed && pending.panel_id == panel.id &&
-                      pending.action.id == action.id && now <= pending.deadline_ms;
-    if (action.confirm || action.kind == dash::ActionKind::AckAlert) {
-      if (!same) {
-        pending = {action, panel.id, now + kConfirmMs, true};
-        showMessage("Press again to confirm", kConfirmMs);
+    const bool needs_confirm = action.confirm || action.kind == dash::ActionKind::AckAlert;
+    if (needs_confirm && !confirmed) {
+      DashboardConfirmRequest request;
+      request.panel_id = panel.id;
+      request.action_id = action.id;
+      request.resolved_target = action.target;
+      request.resolved_value = action.value;
+      request.page_epoch = page_epoch;
+      request.snapshot_epoch = snapshotEpoch();
+      if (action.kind == dash::ActionKind::AckAlert) {
+        const dash::Event* event = ackTarget(action.target);
+        if (event == nullptr) {
+          showMessage("No active alert to acknowledge");
+          return;
+        }
+        request.target_identity = dashboardEventIdentity(*event);
+        request.target_generation = event_tracker.generation(*event);
+      }
+      if (deps.confirm_action) {
+        deps.confirm_action(request);
+      } else {
+        showMessage("Confirmation unavailable");
+      }
+      return;
+    }
+    if (confirmed) {
+      if (confirmed_request == nullptr || action.target != confirmed_request->resolved_target ||
+          action.value != confirmed_request->resolved_value) {
+        showMessage("Stale action cancelled");
         return;
       }
+      if (action.kind == dash::ActionKind::AckAlert) {
+        const dash::Event* event = ackTarget(action.target);
+        if (event == nullptr || dashboardEventIdentity(*event) != confirmed_request->target_identity ||
+            event_tracker.generation(*event) != confirmed_request->target_generation) {
+          showMessage("Stale alert cancelled");
+          return;
+        }
+      }
     }
-    pending.armed = false;
     if (!executeAction(panel.id, action)) showMessage("Action unavailable");
+  }
+
+  bool executeActionRef(const std::string& panel_id, const std::string& action_id,
+                        dash::ActionKind* kind) {
+    const dash::PanelSpec* panel = findPanel(panel_id);
+    if (panel == nullptr || !panel->visible) return false;
+    for (const auto& action : panel->actions) {
+      if (action.id != action_id) continue;
+      if (kind != nullptr) *kind = action.kind;
+      dispatchAction(*panel, action);
+      return true;
+    }
+    return false;
+  }
+
+  bool executeConfirmed(const DashboardConfirmRequest& request) {
+    if (page_epoch != request.page_epoch || snapshotEpoch() != request.snapshot_epoch) {
+      showMessage("Stale action cancelled");
+      return false;
+    }
+    const dash::PanelSpec* panel = findPanel(request.panel_id);
+    if (panel == nullptr || !panel->visible) {
+      showMessage("Stale action cancelled");
+      return false;
+    }
+    for (const auto& action : panel->actions) {
+      if (action.id != request.action_id) continue;
+      dispatchAction(*panel, action, true, &request);
+      return true;
+    }
+    showMessage("Stale action cancelled");
+    return false;
+  }
+
+  std::string focusedControl() const {
+    const dash::PanelSpec* selected = focusedPanel();
+    if (selected == nullptr || selected->actions.empty()) return {};
+    const size_t index = selected->kind == dash::PanelKind::Button ? action_focus : 0;
+    if (index >= selected->actions.size()) return {};
+    return selected->id + "/" + selected->actions[index].id;
+  }
+
+  std::string touchControl(int16_t x, int16_t y) const {
+    if (y >= 740) return {};
+    ui::HitTarget target;
+    if (!ui::hitTest(layout, x, y, target) || target.panel == nullptr || target.action == nullptr) {
+      return {};
+    }
+    return target.panel->id + "/" + target.action->id;
   }
 
   void activate() {
@@ -1648,7 +1733,7 @@ struct DashboardRuntime::Impl {
       const bool already_focused = focus == index;
       focus = index;
       action_focus = 0;
-      pending.armed = false;
+
       if (item.panel->kind == dash::PanelKind::Alert) {
         ui::Rect body = item.content;
         if (!item.panel->title.empty()) {
@@ -1680,7 +1765,7 @@ struct DashboardRuntime::Impl {
       invalidateFocus(old);
       return;
     }
-    pending.armed = false;
+
   }
 
   void tick() {
@@ -1761,12 +1846,6 @@ struct DashboardRuntime::Impl {
     if (!ready) return;
     mains = mains_mode;
     const int64_t now = monotonicMs();
-    if (pending.armed && now > pending.deadline_ms) {
-      pending.armed = false;
-      message.clear();
-      status_dirty = true;
-      dirty = true;
-    }
     if (!message.empty() && now > message_deadline_ms) {
       message.clear();
       status_dirty = true;
@@ -2300,6 +2379,12 @@ void DashboardRuntime::moveFocus(int delta, bool adjust) {
     impl_->moveFocus(delta);
   }
 }
+void DashboardRuntime::movePage(int delta) {
+  if (impl_ != nullptr && impl_->ready) impl_->movePage(delta);
+}
+void DashboardRuntime::refreshCurrent() {
+  if (impl_ != nullptr && impl_->ready) impl_->refresh("current");
+}
 void DashboardRuntime::activate() {
   if (impl_ != nullptr && impl_->ready) impl_->activate();
 }
@@ -2328,6 +2413,44 @@ bool DashboardRuntime::gotoPage(const std::string& page_id) {
 }
 bool DashboardRuntime::gotoPanel(const std::string& panel_id) {
   return impl_ != nullptr && impl_->focusPanel(panel_id);
+}
+bool DashboardRuntime::focusAction(const std::string& panel_id, const std::string& action_id,
+                                   const std::string& event_id) {
+  if (impl_ == nullptr || !impl_->ready || !impl_->focusPanel(panel_id)) return false;
+  const dash::PanelSpec* selected = impl_->focusedPanel();
+  if (selected == nullptr) return false;
+  for (size_t i = 0; i < selected->actions.size(); ++i) {
+    if (selected->actions[i].id != action_id) continue;
+    impl_->action_focus = i;
+    impl_->focused_event_id = event_id;
+    impl_->invalidateFocus();
+    return true;
+  }
+  return false;
+}
+bool DashboardRuntime::executeActionRef(const std::string& panel_id,
+                                        const std::string& action_id,
+                                        eego::dashboard::ActionKind* kind) {
+  return impl_ != nullptr && impl_->ready &&
+         impl_->executeActionRef(panel_id, action_id, kind);
+}
+bool DashboardRuntime::executeConfirmed(const DashboardConfirmRequest& request) {
+  return impl_ != nullptr && impl_->ready && impl_->executeConfirmed(request);
+}
+uint64_t DashboardRuntime::pageEpoch() const {
+  return impl_ == nullptr ? 0 : impl_->page_epoch;
+}
+uint64_t DashboardRuntime::snapshotEpoch() const {
+  return impl_ == nullptr ? 0 : impl_->snapshotEpoch();
+}
+std::string DashboardRuntime::pageContext() const {
+  return impl_ == nullptr || !impl_->ready ? "dashboard" : "dashboard:" + impl_->page_id;
+}
+std::string DashboardRuntime::focusedControl() const {
+  return impl_ == nullptr || !impl_->ready ? std::string() : impl_->focusedControl();
+}
+std::string DashboardRuntime::touchControl(int16_t x, int16_t y) const {
+  return impl_ == nullptr || !impl_->ready ? std::string() : impl_->touchControl(x, y);
 }
 void DashboardRuntime::showStatusMessage(const std::string& text, uint32_t duration_ms) {
   if (impl_ != nullptr && impl_->ready) impl_->showMessage(text, duration_ms);

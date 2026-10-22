@@ -2,24 +2,24 @@
 // 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
 // EEGO A4 按键管理实现
 // 三键: GPIO5(Up, active-low), GPIO7(Down, active-low), GPIO8(Power, active-high)
-// 5ms 去抖 + 短按/长按检测 + FreeRTOS 异步轮询任务
+// 5ms 去抖 + 时间戳边沿/短按/长按/双击/chord + 唤醒释放门控
 #include "buttons.h"
 #include "eego_pins.h"
 
 #include <esp_log.h>
+#include <esp_sleep.h>
 #include <esp_timer.h>
 #include <driver/gpio.h>
+#include "input_gesture.h"
 
 static const char* BTN_TAG = "eego_btn";
 
-// 长按阈值（微秒）
-static constexpr int64_t LONG_PRESS_US = 700 * 1000LL;
 // 轮询周期
 static constexpr uint32_t POLL_PERIOD_MS = 15;
 // 去抖延时
 static constexpr uint32_t DEBOUNCE_MS = 5;
-// 队列深度
-static constexpr uint32_t QUEUE_LEN = 32;
+// 原始边沿与手势共用队列，保留双击/chord 的额外事件空间。
+static constexpr uint32_t QUEUE_LEN = 64;
 // 任务栈大小
 static constexpr uint32_t TASK_STACK = 4096;
 // 任务优先级（低于显示刷新）
@@ -44,15 +44,6 @@ static constexpr size_t kButtonCount = sizeof(kButtons) / sizeof(kButtons[0]);
 ButtonManager& ButtonManager::instance() {
     static ButtonManager inst;
     return inst;
-}
-
-bool ButtonManager::readDebounced(int pin, bool activeHigh) {
-    // 读取 GPIO 状态后等 5ms 再读一次，两次一致才确认
-    int level1 = gpio_get_level(static_cast<gpio_num_t>(pin));
-    vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
-    int level2 = gpio_get_level(static_cast<gpio_num_t>(pin));
-    if (level1 != level2) return false;
-    return activeHigh ? (level1 == 1) : (level1 == 0);
 }
 
 esp_err_t ButtonManager::begin() {
@@ -128,71 +119,37 @@ bool ButtonManager::poll(ButtonEvent* event, uint32_t timeoutMs) {
 
 void ButtonManager::pollTask(void* arg) {
     ButtonManager* self = static_cast<ButtonManager*>(arg);
-
-    // 每个按键的运行时状态
-    struct BtnState {
-        bool pressed;        // 当前去抖确认的按下状态
-        int64_t pressStart;  // 按下起始时间（微秒）
-        bool longSent;       // 长按事件已发送
-    };
-    BtnState states[kButtonCount];
+    ButtonGestureFsm gestures;
+    uint8_t initialMask = 0;
     for (size_t i = 0; i < kButtonCount; i++) {
-        states[i] = {false, 0, false};
+        const int level = gpio_get_level(static_cast<gpio_num_t>(kButtons[i].pin));
+        const bool pressed = kButtons[i].activeHigh ? level == 1 : level == 0;
+        if (pressed) initialMask |= static_cast<uint8_t>(1u << i);
     }
+    gestures.reset(esp_timer_get_time(), initialMask,
+                   esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0);
 
     while (self->running_) {
-        // 第一轮采样所有按键
         bool sample1[kButtonCount];
         for (size_t i = 0; i < kButtonCount; i++) {
-            int level = gpio_get_level(static_cast<gpio_num_t>(kButtons[i].pin));
-            sample1[i] = kButtons[i].activeHigh ? (level == 1) : (level == 0);
+            const int level = gpio_get_level(static_cast<gpio_num_t>(kButtons[i].pin));
+            sample1[i] = kButtons[i].activeHigh ? level == 1 : level == 0;
         }
-
-        // 5ms 去抖等待
         vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
 
-        // 第二轮采样
         bool sample2[kButtonCount];
         for (size_t i = 0; i < kButtonCount; i++) {
-            int level = gpio_get_level(static_cast<gpio_num_t>(kButtons[i].pin));
-            sample2[i] = kButtons[i].activeHigh ? (level == 1) : (level == 0);
+            const int level = gpio_get_level(static_cast<gpio_num_t>(kButtons[i].pin));
+            sample2[i] = kButtons[i].activeHigh ? level == 1 : level == 0;
         }
-
-        int64_t now = esp_timer_get_time();
-
+        const int64_t now = esp_timer_get_time();
         for (size_t i = 0; i < kButtonCount; i++) {
-            // 两次采样不一致 → 跳过（去抖未通过）
             if (sample1[i] != sample2[i]) continue;
-
-            bool nowPressed = sample2[i];
-
-            // 按下边沿
-            if (nowPressed && !states[i].pressed) {
-                states[i].pressed = true;
-                states[i].pressStart = now;
-                states[i].longSent = false;
-            }
-            // 释放边沿
-            else if (!nowPressed && states[i].pressed) {
-                states[i].pressed = false;
-                // 若长按未发送 → 短按事件
-                if (!states[i].longSent) {
-                    ButtonEvent evt = {kButtons[i].id, ButtonAction::ShortPress};
-                    xQueueSend(self->queue_, &evt, 0);
-                }
-            }
-
-            // 按住期间检测长按阈值
-            if (states[i].pressed && !states[i].longSent) {
-                if (now - states[i].pressStart >= LONG_PRESS_US) {
-                    states[i].longSent = true;
-                    ButtonEvent evt = {kButtons[i].id, ButtonAction::LongPress};
-                    xQueueSend(self->queue_, &evt, 0);
-                }
+            const auto events = gestures.sample(kButtons[i].id, sample2[i], now);
+            for (const ButtonEvent& event : events) {
+                xQueueSend(self->queue_, &event, 0);
             }
         }
-
-        // 轮询周期延时
         vTaskDelay(pdMS_TO_TICKS(POLL_PERIOD_MS));
     }
 

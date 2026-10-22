@@ -23,6 +23,8 @@ idf_component_register(
         "src/admin_config.cpp"
         "src/admin_commands.cpp"
         "src/config_transaction.cpp"
+        "src/input_binding_model.cpp"
+        "src/input_bindings.cpp"
         "src/admin_httpd.cpp"
         "src/admin_page.cpp"
         "src/dashboard_api.cpp"

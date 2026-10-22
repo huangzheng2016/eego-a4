@@ -30,6 +30,7 @@
 #include "admin/admin_config.h"
 #include "admin/admin_log.h"
 #include "admin/admin_types.h"
+#include "admin/input_bindings.h"
 #include "admin/provision_portal.h"
 #include "alert_core/type_registry.h"
 #include "esp_err.h"
@@ -56,8 +57,9 @@ void setAdminEventCallback(AdminEventCallback cb, void* ctx);
 
 // 默认命令处理器：ApplyConfig/ApplySettings（校验、事务回滚、订阅热生效）、
 // ApplyDashboard/DeleteDashboard（完整 bundle 校验、revision 检查与原子持久化）、
+// ApplyInputBindings（稀疏覆盖、白名单重验、revision 与单记录 NVS 原子写）、
 // ApplyWifi、WifiReset（仅清 WiFi + 限时恢复 AP）、FactoryReset（清
-// sec/wifi/ui/ble/device/dashboard + 指定 SD 配置，保留字体）、Reboot。仅在 app_task 执行。
+// sec/wifi/ui/ble/device/dashboard/input + 指定 SD 配置，保留字体）、Reboot。仅在 app_task 执行。
 void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx);
 
 // 组件内部共用：事件发射（portal/httpd → app_task 回调）。

@@ -138,6 +138,7 @@ void drawS1(eego::PortraitCanvas& c, const S1Model& m);
 void drawS2(eego::PortraitCanvas& c, const S2Model& m);
 void drawS3(eego::PortraitCanvas& c, const S3Model& m);
 void drawS4(eego::PortraitCanvas& c, const S4Model& m);
+void drawHelp(eego::PortraitCanvas& c, const S3Model& m);
 void drawProvision(eego::PortraitCanvas& c, const ProvisionModel& m);
 
 // ── 钳制工具（构建模型与绘制共用；渲染层对不可信字段的最后一道闸）────────────

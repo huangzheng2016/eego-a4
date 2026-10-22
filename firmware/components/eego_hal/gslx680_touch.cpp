@@ -190,9 +190,8 @@ esp_err_t Gslx680Touch::begin(i2c_port_t port) {
 
 void Gslx680Touch::end() {
     enabled_ = false;
-    pressed_ = false;
-    frontKeyDown_ = false;
-    frontKeyLongDelivered_ = false;
+    gestures_.reset();
+    pending_.clear();
     // 不卸载共享 I²C 总线（与 PCF8563 共用 I2C_NUM_0）
 }
 
@@ -202,83 +201,43 @@ void Gslx680Touch::end() {
 // 屏下电容键 sentinel：raw_x==0x03a0 且 raw_y==0x1020。
 
 TouchEvent Gslx680Touch::poll() {
-    TouchEvent ev;
-    if (!enabled_) return ev;
+    if (!pending_.empty()) {
+        const TouchEvent out = pending_.front();
+        pending_.erase(pending_.begin());
+        return out;
+    }
 
-    uint8_t frame[24] = {};
-    if (readReg(0x80, frame, sizeof(frame)) != ESP_OK) return ev;
-
+    TouchEvent none;
+    if (!enabled_) return none;
     const int64_t now = esp_timer_get_time();
-    const uint8_t count = frame[0] > 5 ? 5 : frame[0];
-    const uint16_t rawYWord =
-        (static_cast<uint16_t>(frame[5]) << 8) | frame[4];
-    const uint16_t rawXWord =
-        (static_cast<uint16_t>(frame[7]) << 8) | frame[6];
-    const bool homeKey = (count == 1 && rawXWord == FRONT_KEY_RAW_X &&
-                          rawYWord == FRONT_KEY_RAW_Y);
-
-    if (count == 0) {
-        // 全部释放：结算屏下键短按，或触控抬起
-        if (frontKeyDown_) {
-            if (!frontKeyLongDelivered_) ev.type = TouchEventType::FrontKeyShort;
-            frontKeyDown_ = false;
-            frontKeyLongDelivered_ = false;
-        } else if (pressed_) {
-            ev.type = TouchEventType::Touch;
-            ev.pressed = false;
-            ev.x = rawTouchToLogicalX(lastRawY_);
-            ev.y = rawTouchToLogicalY(lastRawX_);
-            pressed_ = false;
+    uint8_t frame[24] = {};
+    std::vector<TouchEvent> events;
+    if (readReg(0x80, frame, sizeof(frame)) != ESP_OK) {
+        events = gestures_.invalidate(now);
+    } else {
+        const uint8_t count = frame[0] > 5 ? 5 : frame[0];
+        const uint16_t rawYWord =
+            (static_cast<uint16_t>(frame[5]) << 8) | frame[4];
+        const uint16_t rawXWord =
+            (static_cast<uint16_t>(frame[7]) << 8) | frame[6];
+        const bool homeKey = rawXWord == FRONT_KEY_RAW_X && rawYWord == FRONT_KEY_RAW_Y;
+        if (count == 0) {
+            events = gestures_.sample(TouchContact::None, 0, 0, now);
+        } else if (homeKey) {
+            events = gestures_.sample(TouchContact::Front, 0, 0, now);
+        } else {
+            const uint16_t rawY = rawYWord & 0x0fff;
+            const uint16_t rawX = rawXWord & 0x0fff;
+            events = gestures_.sample(TouchContact::Screen,
+                                      rawTouchToLogicalX(rawY),
+                                      rawTouchToLogicalY(rawX), now);
         }
-        return ev;
     }
-
-    if (homeKey) {
-        if (!frontKeyDown_) {
-            frontKeyDown_ = true;
-            frontKeyLongDelivered_ = false;
-            frontKeyDownTime_ = now;
-        } else if (!frontKeyLongDelivered_ &&
-                   (now - frontKeyDownTime_) >=
-                       static_cast<int64_t>(FRONT_KEY_LONG_MS) * 1000) {
-            frontKeyLongDelivered_ = true;
-            ev.type = TouchEventType::FrontKeyLong;
-        }
-        // 屏下键期间取消任何触控
-        pressed_ = false;
-        return ev;
-    }
-
-    // 普通触控：若之前屏下键按下，先结算短按
-    if (frontKeyDown_) {
-        const bool wasLong = frontKeyLongDelivered_;
-        frontKeyDown_ = false;
-        frontKeyLongDelivered_ = false;
-        pressed_ = false;
-        if (!wasLong) {
-            ev.type = TouchEventType::FrontKeyShort;
-            return ev;  // 本周期返回短按，触控下一周期处理
-        }
-        // 长按已交付，仅清理后继续处理当前触控
-    }
-
-    // 按住期间：仅交付一次按下事件（边沿触发）。
-    // 若已处于按下状态（pressed_==true）则本次轮询为按住重复，返回空事件，
-    // 避免一次按压被上层重复处理（如主页彩蛋计数、阅读页连翻多页）。
-    if (pressed_) {
-        return ev;  // ev 为空事件（type=None），上层忽略
-    }
-
-    const uint16_t rawY = rawYWord & 0x0fff;
-    const uint16_t rawX = rawXWord & 0x0fff;
-    lastRawX_ = rawX;
-    lastRawY_ = rawY;
-    ev.type = TouchEventType::Touch;
-    ev.pressed = true;
-    ev.x = rawTouchToLogicalX(rawY);
-    ev.y = rawTouchToLogicalY(rawX);
-    pressed_ = true;
-    return ev;
+    if (events.empty()) return none;
+    pending_ = std::move(events);
+    const TouchEvent out = pending_.front();
+    pending_.erase(pending_.begin());
+    return out;
 }
 
 }  // namespace eego
