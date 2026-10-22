@@ -76,12 +76,15 @@ for fields, APIs, interaction details, limitations, and recovery procedures.
 
 - No remote OTA in this release. HTTP and BLE are unreachable during deep sleep;
   battery mode serves requests only during wake windows.
-- The runtime resolves NVS `auth_token_ref` values, but there is no public UI/API/serial
-  workflow for writing an arbitrary source token into NVS. The Bearer provisioning chain
-  is therefore incomplete and not accepted.
-- Ordinary custom headers are for non-secret values only. Sensitive headers are masked
-  in API responses but currently persisted verbatim to SD; do not use them for secrets.
-  Servers should return the minimum required data and never unnecessary credentials.
+- Manage source credentials in Dashboard → Credentials or through
+  `GET/PUT/DELETE /api/v1/sources/credentials`. Values are write-only in the NVS `source`
+  namespace; configuration, SD, and exports carry only `nvs:source/<key>` references. Use
+  `auth_token_ref` for Bearer authentication and `header_secret_refs` for other secret
+  headers; ordinary `headers` accept non-secret values only. See the firmware guide for
+  rotation, deletion, and migration rules.
+- Live authenticated-source behavior still requires physical acceptance. Servers should
+  return the minimum required data: raw 2xx responses are cached by design, and reference-only
+  configuration does not imply that responses, caches, or historical coredumps contain no secrets.
 - Host/static/mock/native-C++/DOM checks and the full ESP-IDF build pass on the final
   baseline, including all 30 presets and four scenarios. **These are not physical-device
   acceptance.** Display, touch/electrical behavior, live device networking, BLE/RF

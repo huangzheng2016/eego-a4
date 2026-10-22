@@ -19,9 +19,11 @@ python3 firmware/tools/preset_tool.py validate-library
 
 `--mock-host` 只写演示变量默认值，不带 scheme、路径或凭据。接入真实服务时，在
 HTTP 编辑器中同时修改 source URL 和对应 source plan；编辑器的 source 表单会保持二者
-连接字段同步。不要把真实 token 写进这些 JSON 或普通 headers。最终基线的 NVS
-`auth_token_ref` 只有运行时读取端，尚无公开 token 写入流程；敏感自定义 headers 当前
-会原值写入 SD。详见[认证与存储限制](../README.md#http-headers-与-nvs-secret-引用当前限制)。
+连接字段同步。需要认证时，先在「数据面板 → 凭据」写入或轮换秘密，再在 source 表单选择
+`nvs:source/<key>`：Bearer 填入 `auth_token_ref`，其他秘密头填入 `header_secret_refs`；
+手工 JSON 必须让 dashboard source 与 plan 的这些字段一致。普通 `headers` 只放非秘密值。
+不要把真实 token 写进预设、bundle、URL、mock 或命令历史。完整 API、删除冲突和旧配置
+迁移见[数据源凭据与 NVS 引用](../README.md#http-headers-与-nvs-secret-引用)。
 
 ## 30 个预设
 
