@@ -52,6 +52,8 @@ class TouchGestureFsm {
              std::vector<TouchEvent>& out);
   void release(int64_t now_us, std::vector<TouchEvent>& out);
   void cancel(int64_t now_us, std::vector<TouchEvent>& out);
+  void expireFrontShort(int64_t now_us, std::vector<TouchEvent>& out);
+  void expireHold(int64_t now_us, std::vector<TouchEvent>& out);
 
   TouchContact active_ = TouchContact::None;
   uint16_t start_x_ = 0;

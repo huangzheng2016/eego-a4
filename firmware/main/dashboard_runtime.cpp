@@ -683,11 +683,12 @@ struct DashboardRuntime::Impl {
     const std::string old = focusedPanel() == nullptr ? "" : focusedPanel()->id;
     int remaining = delta;
     while (remaining != 0) {
-      if (layout.panels.empty()) {
-        movePage(remaining);
-        break;
-      }
       const int step = remaining > 0 ? 1 : -1;
+      if (layout.panels.empty()) {
+        movePage(step);
+        remaining -= step;
+        continue;
+      }
       const int64_t next = static_cast<int64_t>(focus) + step;
       if (next < 0) {
         if (page_index > 0) {

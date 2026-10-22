@@ -201,8 +201,15 @@ std::vector<TouchEvent> TouchGestureFsm::invalidate(int64_t now_us) {
   return out;
 }
 
-std::vector<TouchEvent> TouchGestureFsm::tick(int64_t now_us) {
-  std::vector<TouchEvent> out;
+void TouchGestureFsm::expireFrontShort(int64_t now_us, std::vector<TouchEvent>& out) {
+  if (active_ == TouchContact::None && pending_front_short_deadline_us_ != 0 &&
+      now_us >= pending_front_short_deadline_us_) {
+    pending_front_short_deadline_us_ = 0;
+    out.push_back({TouchEventType::FrontShort, 0, 0, now_us});
+  }
+}
+
+void TouchGestureFsm::expireHold(int64_t now_us, std::vector<TouchEvent>& out) {
   if (active_ != TouchContact::None && !moved_ && !long_sent_ &&
       now_us - down_since_us_ >= kInputLongPressUs) {
     long_sent_ = true;
@@ -212,17 +219,19 @@ std::vector<TouchEvent> TouchGestureFsm::tick(int64_t now_us) {
                                                   : TouchEventType::Hold,
                    last_x_, last_y_, now_us});
   }
-  if (active_ == TouchContact::None && pending_front_short_deadline_us_ != 0 &&
-      now_us >= pending_front_short_deadline_us_) {
-    pending_front_short_deadline_us_ = 0;
-    out.push_back({TouchEventType::FrontShort, 0, 0, now_us});
-  }
+}
+
+std::vector<TouchEvent> TouchGestureFsm::tick(int64_t now_us) {
+  std::vector<TouchEvent> out;
+  expireHold(now_us, out);
+  expireFrontShort(now_us, out);
   return out;
 }
 
 std::vector<TouchEvent> TouchGestureFsm::sample(TouchContact contact, uint16_t x,
                                                  uint16_t y, int64_t now_us) {
-  std::vector<TouchEvent> out = tick(now_us);
+  std::vector<TouchEvent> out;
+  expireFrontShort(now_us, out);
   if (contact != TouchContact::None && active_ != TouchContact::None &&
       contact != active_) {
     cancel(now_us, out);
@@ -235,9 +244,7 @@ std::vector<TouchEvent> TouchGestureFsm::sample(TouchContact contact, uint16_t x
     start(contact, x, y, now_us, out);
     return out;
   }
-  if (contact == TouchContact::Front) return out;
-
-  if (x != last_x_ || y != last_y_) {
+  if (contact == TouchContact::Screen && (x != last_x_ || y != last_y_)) {
     last_x_ = x;
     last_y_ = y;
     if (absolute(static_cast<int>(x) - static_cast<int>(start_x_)) > kTouchSlopPx ||
@@ -246,6 +253,7 @@ std::vector<TouchEvent> TouchGestureFsm::sample(TouchContact contact, uint16_t x
     }
     out.push_back({TouchEventType::Move, x, y, now_us});
   }
+  expireHold(now_us, out);
   return out;
 }
 
