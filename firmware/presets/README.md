@@ -50,7 +50,7 @@ HTTP 编辑器中同时修改 source URL 和对应 source plan；编辑器的 so
 | 内容 | `text-single` | 单行动态文本 |
 | 内容 | `text-multiline` | 多行动态文本 |
 | 内容 | `image` | image panel + image asset + `response=image` |
-| 内容 | `image-text` | 图片与动态说明文字复合布局 |
+| 布局 | `image-text` | 图片与动态说明文字复合布局 |
 | 动作 | `button` | 单按钮数据刷新 |
 | 动作 | `button-group` | 刷新、页面跳转、变量设置、fresh-hold 确认 ack |
 | 布局 | `chart-kpi` | 三个 KPI + 全宽趋势图 |
