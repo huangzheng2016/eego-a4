@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -26,8 +27,42 @@ enum Change : uint32_t {
   kChangedTimezone = 1u << 5,
   kChangedDiagnostics = 1u << 6,
   kChangedEpdRefresh = 1u << 7,
+  kChangedBle = 1u << 8,
   kChangedRefresh = kChangedDataRefresh | kChangedEpdRefresh,
-  kChangedAll = (1u << 8) - 1,
+  kChangedAll = (1u << 9) - 1,
+};
+
+inline constexpr size_t kMaxBleObserverRules = 4;
+inline constexpr size_t kMaxBleObserverFields = 4;
+inline constexpr size_t kMaxBlePayloadMatchBytes = 12;
+
+enum class BleValueType : uint8_t {
+  UInt8 = 0,
+  Int8,
+  UInt16Le,
+  Int16Le,
+  UInt32Le,
+  Int32Le,
+  Float32Le,
+};
+
+struct BleFieldMap {
+  std::string name;
+  uint16_t offset = 0;
+  BleValueType type = BleValueType::UInt16Le;
+  double scale = 1.0;
+};
+
+struct BleObserverRule {
+  std::string id;
+  std::string event_type = "ble.sensor";
+  std::string title = "BLE sensor";
+  int manufacturer_id = -1;
+  std::string service_uuid;
+  uint16_t payload_offset = 0;
+  std::vector<uint8_t> payload_match;
+  std::vector<BleFieldMap> fields;
+  uint32_t ttl_s = 86400;
 };
 
 struct Settings {
@@ -44,7 +79,20 @@ struct Settings {
   uint8_t frontlight_warmth = 50;
   uint32_t epd_full_refresh_s = 86400;
   bool diagnostics_enabled = true;
+  bool ble_observer_enabled = false;
+  uint32_t ble_observer_window_s = 10;
+  uint32_t ble_observer_interval_s = 300;
+  uint32_t ble_observer_dedup_ms = 5000;
+  std::vector<BleObserverRule> ble_observer_rules;
 };
+
+bool operator==(const BleFieldMap& a, const BleFieldMap& b);
+bool operator==(const BleObserverRule& a, const BleObserverRule& b);
+const char* bleValueTypeName(BleValueType type);
+bool bleValueTypeFromString(const std::string& name, BleValueType& out);
+bool normalizeBleUuid(const std::string& text, std::string& canonical);
+std::string bleBytesToHex(const std::vector<uint8_t>& bytes);
+bool bleBytesFromHex(const std::string& text, std::vector<uint8_t>& out);
 
 struct FieldError {
   std::string field;

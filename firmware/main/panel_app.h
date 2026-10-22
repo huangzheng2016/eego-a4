@@ -51,8 +51,8 @@ struct MuteRule;
 
 namespace panel {
 
-// 危险确认契约：布防后必须由同一控件重新持续按住；网络恢复、WiFi 重置和
-// 恢复出厂只接受实体 Power fresh hold。其他输入、目标/快照变化取消，窗口为 5s。
+// 危险确认契约：布防后必须由同一控件重新持续按住；网络恢复、WiFi 重置、
+// 恢复出厂、BLE 配网与解绑只接受实体 Power fresh hold。其他输入、目标/快照变化取消。
 
 class PanelApp {
  public:
@@ -138,6 +138,9 @@ class PanelApp {
   void refreshMuteRuleCount();
   void doPollNow();
   void doOpenRecovery();
+  void doStartBleProvision();
+  void doClearBleBonds();
+  void clearBlePop();
   void doWifiReset();
   void doFactoryReset();
   void resetInputBindings();
@@ -223,6 +226,8 @@ class PanelApp {
   bool suppressFrontShort_ = false;
   std::string banner_;
   int64_t bannerDeadlineMs_ = 0;
+  std::string blePop_;
+  bool bleProvisionWasActive_ = false;
 
   // 快照（无锁读；renderedSeq_ 跟踪已渲染代际）
   std::shared_ptr<const alert_core::AlertSnapshot> snapshot_;

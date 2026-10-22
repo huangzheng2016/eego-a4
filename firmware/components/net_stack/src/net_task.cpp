@@ -110,6 +110,7 @@ struct NetStack::Impl {
   int64_t next_wifi_retry_ms_ = 0;
   uint32_t wifi_backoff_ms_ = kWifiBackoffStartMs;
   WifiState last_wifi_state_ = WifiState::Disconnected;
+  bool wifi_provisioning_was_held_ = false;
 
   // 快照发布状态（net_task 上下文私有）：摘要变了才重建发布
   uint64_t last_digest_ = 0;
@@ -411,6 +412,17 @@ struct NetStack::Impl {
   // ---- WiFi 重连（指数退避，M13 F3）----
   void pumpWifi(int64_t now) {
     if (!self->cfg_.wifi_auto_reconnect) return;
+    const bool provisioning_hold = self->wifiProvisioningHold();
+    if (provisioning_hold) {
+      wifi_provisioning_was_held_ = true;
+      next_wifi_retry_ms_ = now + 1000;
+      return;
+    }
+    if (wifi_provisioning_was_held_) {
+      wifi_provisioning_was_held_ = false;
+      wifi_backoff_ms_ = kWifiBackoffStartMs;
+      next_wifi_retry_ms_ = 0;
+    }
     WifiState st = self->wifi_.state();
     if (st == WifiState::Connected) {
       if (last_wifi_state_ != WifiState::Connected) {

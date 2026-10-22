@@ -30,6 +30,7 @@ idf_component_register(
         eego_ui
         admin
         alert_core
+        ble
         dashboard_core
         dashboard_ui
         data_pipeline

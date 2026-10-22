@@ -58,6 +58,12 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
       <h3 id="t_set_network"></h3>
       <div id="set_net_status" class="dim"></div>
       <div id="set_ble_status" class="dim"></div>
+      <label><span id="l_ble_observer"></span><input id="set_ble_observer" type="checkbox"></label>
+      <label><span id="l_ble_window"></span><input id="set_ble_window" type="number" min="2" max="60"></label>
+      <label><span id="l_ble_interval"></span><input id="set_ble_interval" type="number" min="30" max="86400"></label>
+      <label><span id="l_ble_dedup"></span><input id="set_ble_dedup" type="number" min="0" max="60000"></label>
+      <label><span id="l_ble_rules"></span><textarea id="set_ble_rules" rows="7" spellcheck="false"></textarea></label>
+      <button id="btn_ble_unbind" class="sec"></button>
     </div>
     <div class="presetbox">
       <h3 id="t_set_display"></h3>
@@ -197,6 +203,10 @@ var L={
   settings_save:'保存设置',settings_reload:'重载设置',settings_recovery:'打开恢复操作',
   power_auto:'自动',power_mains:'常供电',power_battery:'电池',lang_zh:'中文',lang_en:'英文',
   ok_settings:'设置已保存并生效',err_sleep_time:'睡眠时间格式必须为 HH:MM',
+  ble_observer:'启用 BLE 被动传感扫描',ble_window:'扫描窗口秒数（2-60）',
+  ble_interval:'窗口间隔秒数（≥30；电池每次唤醒一轮）',ble_dedup:'重复包去抖毫秒（0-60000）',
+  ble_rules:'声明式过滤/映射规则 JSON（最多4条）',ble_unbind:'清除 BLE bond',
+  ble_unbind_confirm:'输入 UNBIND 以确认清除 BLE bond：',ok_ble_unbind:'BLE bond 已清除',
   ble_unavailable:'蓝牙：不可用（本固件未启用）',capabilities:'能力与电源状态'},
  en:{login:'EEGO A4 Admin Sign-in',login_btn:'Sign in',pw_ph:'Admin password',badpw:'Sign-in failed (wrong password or device not provisioned)',
   tab_alerts:'Alerts',tab_status:'Status',tab_sources:'Sources',tab_config:'Config',tab_system:'System',logout:'Sign out',
@@ -228,6 +238,10 @@ var L={
   settings_recovery:'Open recovery operations',power_auto:'Auto',power_mains:'Mains',power_battery:'Battery',
   lang_zh:'Chinese',lang_en:'English',ok_settings:'Settings saved and applied',
   err_sleep_time:'Sleep time must use HH:MM format',ble_unavailable:'Bluetooth: unavailable in this firmware',
+  ble_observer:'Enable passive BLE sensor scanning',ble_window:'Scan window seconds (2-60)',
+  ble_interval:'Window interval seconds (>=30; one scan per battery wake)',ble_dedup:'Duplicate debounce ms (0-60000)',
+  ble_rules:'Declarative filter/mapping rules JSON (max 4)',ble_unbind:'Clear BLE bonds',
+  ble_unbind_confirm:'Type UNBIND to clear BLE bonds:',ok_ble_unbind:'BLE bonds cleared',
   capabilities:'Capabilities & power state'}
 };
 function t(k){return L[LANG][k];}
@@ -260,8 +274,9 @@ function applyI18n(){
   l_diag_enabled:'diag_enabled',btn_settings_recovery:'settings_recovery',
   btn_settings_save:'settings_save',btn_settings_reload:'settings_reload',
   opt_power_auto:'power_auto',opt_power_mains:'power_mains',opt_power_battery:'power_battery',
-  opt_lang_zh:'lang_zh',opt_lang_en:'lang_en',set_ble_status:'ble_unavailable',
-  set_capabilities:'capabilities'
+  opt_lang_zh:'lang_zh',opt_lang_en:'lang_en',l_ble_observer:'ble_observer',
+  l_ble_window:'ble_window',l_ble_interval:'ble_interval',l_ble_dedup:'ble_dedup',
+  l_ble_rules:'ble_rules',btn_ble_unbind:'ble_unbind',set_capabilities:'capabilities'
  };
  Object.keys(settingsText).forEach(function(id){$(id).textContent=t(settingsText[id]);});
  $('lang_toggle').textContent=LANG==='zh'?'EN':'中文';
@@ -436,7 +451,7 @@ function parseMinute(id){
 }
 function loadSettings(){
  Promise.all([api('/settings'),api('/status')]).then(function(r){
-  var j=r[0],st=r[1],s=j.settings,c=j.capabilities||{},power=j.power||{};
+  var j=r[0],st=r[1],s=j.settings,c=j.capabilities||{},power=j.power||{},ble=j.ble||{};
   $('set_fl_enabled').checked=!!s.frontlight_enabled;
   $('set_fl_brightness').value=s.frontlight_brightness;$('set_fl_warmth').value=s.frontlight_warmth;
   $('set_data_refresh').value=s.data_refresh_s;$('set_epd_full').value=s.epd_full_refresh_s;
@@ -444,30 +459,48 @@ function loadSettings(){
   $('set_idle_sleep').value=s.idle_sleep_s;$('set_sleep_start').value=minuteText(s.sleep_start_min);
   $('set_sleep_end').value=minuteText(s.sleep_end_min);$('set_timezone').value=s.timezone_offset_min;
   $('set_language').value=s.language;$('set_diag_enabled').checked=!!s.diagnostics_enabled;
+  $('set_ble_observer').checked=!!s.ble_observer_enabled;
+  $('set_ble_window').value=s.ble_observer_window_s;$('set_ble_interval').value=s.ble_observer_interval_s;
+  $('set_ble_dedup').value=s.ble_observer_dedup_ms;
+  $('set_ble_rules').value=JSON.stringify(s.ble_observer_rules||[],null,2);
   ['set_fl_enabled','set_fl_brightness','set_fl_warmth'].forEach(function(id){$(id).disabled=!c.frontlight;});
+  ['set_ble_observer','set_ble_window','set_ble_interval','set_ble_dedup','set_ble_rules'].forEach(function(id){$(id).disabled=!c.ble_observer;});
+  $('btn_ble_unbind').disabled=!c.bluetooth;
   var network=st.network||{};
   $('set_net_status').textContent='WiFi: '+(network.ssid||'-')+' / '+(network.ip||'-')+
    (power.recovery_ap_active?(' · recovery AP '+power.recovery_window_remaining_s+'s'):'');
-  $('set_ble_status').textContent=c.bluetooth?'Bluetooth: available':t('ble_unavailable');
+  $('set_ble_status').textContent=c.bluetooth?
+   ('BLE: '+(ble.role||'off')+' / '+(ble.provisioning_state||'idle')+' · scan '+(ble.observer_enabled?'on':'off')+
+    (ble.provisioning_remaining_s?(' · '+ble.provisioning_remaining_s+'s'):'')):t('ble_unavailable');
   $('set_storage_status').textContent='SD: '+JSON.stringify(st.storage||{});
   $('set_security_status').textContent=JSON.stringify(st.security||{});
-  $('set_capabilities').textContent=t('capabilities')+'\n'+JSON.stringify({capabilities:c,power:power},null,2);
+  $('set_capabilities').textContent=t('capabilities')+'\n'+JSON.stringify({capabilities:c,power:power,ble:ble},null,2);
  }).catch(function(e){if(e.message!=='401')msg(e.message,'err');});
 }
 function saveSettings(){
- var start,end;
- try{start=parseMinute('set_sleep_start');end=parseMinute('set_sleep_end');}
- catch(e){msg(e.message,'err');return;}
+ var start,end,rules;
+ try{start=parseMinute('set_sleep_start');end=parseMinute('set_sleep_end');
+  rules=JSON.parse($('set_ble_rules').value||'[]');if(!Array.isArray(rules))throw new Error('rules must be an array');
+ }catch(e){msg(e.message,'err');return;}
  var body={
   schema_version:1,language:$('set_language').value,power_mode:$('set_power_mode').value,
   battery_poll_s:Number($('set_battery_poll').value),data_refresh_s:Number($('set_data_refresh').value),
   idle_sleep_s:Number($('set_idle_sleep').value),sleep_start_min:start,sleep_end_min:end,
   timezone_offset_min:Number($('set_timezone').value),frontlight_enabled:$('set_fl_enabled').checked,
   frontlight_brightness:Number($('set_fl_brightness').value),frontlight_warmth:Number($('set_fl_warmth').value),
-  epd_full_refresh_s:Number($('set_epd_full').value),diagnostics_enabled:$('set_diag_enabled').checked
+  epd_full_refresh_s:Number($('set_epd_full').value),diagnostics_enabled:$('set_diag_enabled').checked,
+  ble_observer_enabled:$('set_ble_observer').checked,ble_observer_window_s:Number($('set_ble_window').value),
+  ble_observer_interval_s:Number($('set_ble_interval').value),ble_observer_dedup_ms:Number($('set_ble_dedup').value),
+  ble_observer_rules:rules
  };
  api('/settings',{method:'PUT',body:JSON.stringify(body)}).then(function(){
   msg(t('ok_settings'),'ok');loadSettings();
+ }).catch(function(e){if(e.message!=='401')msg(e.message,'err');});
+}
+function doBleUnbind(){
+ if(prompt(t('ble_unbind_confirm'),'')!=='UNBIND')return;
+ api('/settings/ble/unbind',{method:'POST',body:'{}'}).then(function(){
+  msg(t('ok_ble_unbind'),'ok');loadSettings();
  }).catch(function(e){if(e.message!=='401')msg(e.message,'err');});
 }
 // ---------- system ----------
@@ -526,6 +559,7 @@ $('preset_sel').onchange=showPreset;
 $('btn_preset_fill').onclick=fillPreset;
 $('btn_settings_save').onclick=saveSettings;
 $('btn_settings_reload').onclick=loadSettings;
+$('btn_ble_unbind').onclick=doBleUnbind;
 $('btn_settings_recovery').onclick=function(){switchTab('system');};
 $('btn_reboot').onclick=doReboot;
 $('btn_reset').onclick=doFactoryReset;

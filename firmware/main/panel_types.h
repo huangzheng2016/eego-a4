@@ -35,12 +35,15 @@ enum class ConfirmKind : uint8_t {
   NetworkRecovery,
   WifiReset,
   FactoryReset,
+  BleProvision,
+  BleUnbind,
   DashboardAction,
 };
 
 constexpr bool requiresPhysicalConfirm(ConfirmKind kind) {
   return kind == ConfirmKind::NetworkRecovery || kind == ConfirmKind::WifiReset ||
-         kind == ConfirmKind::FactoryReset;
+         kind == ConfirmKind::FactoryReset || kind == ConfirmKind::BleProvision ||
+         kind == ConfirmKind::BleUnbind;
 }
 
 // 电池模式阶段机。
