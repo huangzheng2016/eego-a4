@@ -189,11 +189,14 @@ uint8_t severityTextGray(uint8_t severity) {
 
 void drawPowerStatusIcon(PortraitCanvas& c, int16_t x, int16_t y, bool mains, bool charging) {
   if (mains) {
-    c.drawRect(x, static_cast<int16_t>(y + 4), 10, 12, 0);
-    c.drawLine(x + 2, y, x + 2, y + 4, 0);
-    c.drawLine(x + 8, y, x + 8, y + 4, 0);
-    c.drawLine(x + 5, y + 12, x + 5, y + 18, 0);
-    if (charging) c.fillRect(x + 2, y + 6, 6, 6, 0);
+    c.fillRect(x + 7, y, 4, 1, 0);
+    c.fillRect(x + 5, static_cast<int16_t>(y + 1), 6, 2, 0);
+    c.fillRect(x + 3, static_cast<int16_t>(y + 3), 8, 2, 0);
+    c.fillRect(x + 2, static_cast<int16_t>(y + 5), 10, 2, 0);
+    c.fillRect(x + 5, static_cast<int16_t>(y + 7), 5, 2, 0);
+    c.fillRect(x + 4, static_cast<int16_t>(y + 9), 4, 3, 0);
+    c.fillRect(x + 3, static_cast<int16_t>(y + 12), 3, 3, 0);
+    c.fillRect(x + 2, static_cast<int16_t>(y + 15), 2, 3, 0);
   } else {
     c.drawRect(x, static_cast<int16_t>(y + 4), 14, 16, 0);
     c.fillRect(x + 14, y + 9, 2, 6, 0);
