@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<!--
+  REFERENCE COPY of the device loader page. The firmware serves its own copy
+  at "/" (firmware/components/admin/src/admin_page.cpp kLoaderHtml) together
+  with /loader.js (see loader.js next to this file) and this CSP:
+
+    default-src 'self'; script-src 'self' https://huangzheng2016.github.io;
+    style-src 'self' https://huangzheng2016.github.io;
+    connect-src 'self' https://huangzheng2016.github.io;
+    img-src 'self' data: blob: https://huangzheng2016.github.io;
+    font-src 'self' data: https://huangzheng2016.github.io;
+    object-src 'none'; base-uri 'self'; frame-ancestors 'none'
+
+  No inline script/style is used, so no hashes or 'unsafe-inline' are needed.
+  Keep this file and loader.js consistent with the firmware.
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EEGO A4 管理</title>
+</head>
+<body>
+<div id="root"></div>
+<div id="eego-fallback" hidden>
+<p>管理界面加载失败（需要能访问互联网）。Web app failed to load (internet access required).</p>
+<p><a href="/legacy">打开内置管理页 / Open built-in admin page</a></p>
+</div>
+<script src="/loader.js"></script>
+</body>
+</html>
