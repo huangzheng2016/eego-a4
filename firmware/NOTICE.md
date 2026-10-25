@@ -42,6 +42,9 @@ SPDX 标识为准。原 weread 项目的阅读器业务形态（书籍/章节/�
   分发字体二进制。用户可自备 12px `.eefont` 到 `components/eego_ui/fonts/`
   进行本地嵌入，也可使用 SD 卡 `.eefont`/`.bin` 或内置 5x7 ASCII 回退字体；
   字体许可由使用者自行核对。
+- **Noto Sans CJK 字体**（notofonts/noto-cjk，SIL OFL 1.1）：不随仓库分发。
+  用户可用 CrossPoint 官方转换工具生成小尺寸 CPFONT 并本地嵌入，许可由
+  使用者自行核对。
 - **web_flasher**（esptool-js，Apache-2.0）：不在本目录；如需浏览器 USB
   刷机可复用模板仓库的实现，遵守其许可。
 

@@ -15,6 +15,9 @@ LodePNG 位于 `components/third_party/lodepng/`，许可文本保留于
 不得移除。本副本的裁剪与 ESP-IDF 分配器适配改动已在源码与组件
 CMakeLists 中标注（zlib 第 2 条要求的 altered-source 标记）。
 
+Noto Sans CJK 字体二进制不随仓库分发；本地转换和嵌入遵循 SIL OFL 1.1，
+来源为 <https://github.com/notofonts/noto-cjk>，许可由使用者自行核对。
+
 ## 构建期依赖（不随树打包）
 
 | Component | Version | License | Project |

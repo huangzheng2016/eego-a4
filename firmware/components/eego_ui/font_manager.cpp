@@ -89,8 +89,8 @@ bool FontManager::loadUiFont(const char* path) {
 
 bool FontManager::loadUiFontEmbedded() {
 #ifdef EEGO_EMBEDDED_FONT
-    extern const uint8_t fontStart[] asm("_binary_HarmonyOS_Sans_SC_12_eefont_start");
-    extern const uint8_t fontEnd[] asm("_binary_HarmonyOS_Sans_SC_12_eefont_end");
+    extern const uint8_t fontStart[] asm("_binary_NotoSansCJKsc_3_cpfont_start");
+    extern const uint8_t fontEnd[] asm("_binary_NotoSansCJKsc_3_cpfont_end");
     if (uiEdc_) { delete uiEdc_; uiEdc_ = nullptr; }
     if (uiCp_) { delete uiCp_; uiCp_ = nullptr; }
     uiFmt_ = FontFormat::Unknown;
@@ -103,7 +103,7 @@ bool FontManager::loadUiFontEmbedded() {
         return false;
     }
     uiFmt_ = FontFormat::CpFontV4;
-    ESP_LOGI(TAG, "UI font loaded: embedded HarmonyOS Sans SC 12px");
+    ESP_LOGI(TAG, "UI font loaded: embedded Noto Sans CJK 3pt");
     return true;
 #else
     return false;
