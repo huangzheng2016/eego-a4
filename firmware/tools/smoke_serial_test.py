@@ -4,12 +4,12 @@
 
 覆盖：启动、显示、SD、WiFi、mock 告警、确认、API 登录状态。
 
-安全边界（强制）：本脚本**绝不刷写设备**——只做 UART0 读写与局域网 HTTP
+安全边界（强制）：本脚本**绝不刷写设备**——只做 USB Serial/JTAG 读写与局域网 HTTP
 GET/POST，不调用 esptool / idf.py / 任何写 flash 的工具。设备变砖风险为零；
 唯一副作用是注入一条测试告警并 ack-all 确认（测试数据，可清除）。
 
 前提：
-  * 设备已刷入本固件并上电（USB 连接，UART0 115200，diag 命令通道已启动）
+  * 设备已刷入本固件并上电（USB 连接，USB Serial/JTAG 115200，diag 命令通道已启动）
   * pip install pyserial（仓库 requirements.txt 已固定 pyserial==3.5）
   * WiFi 项需设备已完成首次配网；API 项需 --admin-password（或环境变量
     SMOKE_ADMIN_PASSWORD）提供管理密码
@@ -90,10 +90,19 @@ class Report:
 
 
 class Device:
-    """UART0 命令通道：发一行命令，按“静默窗口”收输出。"""
+    """USB Serial/JTAG 命令通道：发一行命令，按“静默窗口”收输出。"""
 
     def __init__(self, port: str, baud: int, quiet_s: float = 0.8) -> None:
-        self.ser = serial.Serial(port, baud, timeout=0.2)
+        self.ser = serial.Serial()
+        self.ser.port = port
+        self.ser.baudrate = baud
+        self.ser.timeout = 0.2
+        self.ser.write_timeout = 5
+        self.ser.dtr = False
+        self.ser.rts = False
+        self.ser.open()
+        self.ser.dtr = False
+        self.ser.rts = False
         self.quiet_s = quiet_s
 
     def close(self) -> None:

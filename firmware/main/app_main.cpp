@@ -22,7 +22,7 @@
 //   触控帧 + 按键队列按时间戳归并 → diag::service → admin::serviceCommands(0) →
 //   app.service()（事件归并/电源 FSM/按需渲染）→ vTaskDelay(8ms)
 //
-// 串口诊断入口：UART0 115200，输入 help 查看命令。
+// 串口诊断入口：USB Serial/JTAG 115200，输入 help 查看命令。
 
 #include "board/board_boot.h"
 #include "eego_hal.h"

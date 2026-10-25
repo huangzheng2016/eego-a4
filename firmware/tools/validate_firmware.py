@@ -428,6 +428,7 @@ def check_partitions(root: Path, rep: Report) -> None:
 
 SDKCONFIG_REQUIRED = {
     "CONFIG_IDF_TARGET": '"esp32s3"',
+    "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG": "y",
     "CONFIG_PARTITION_TABLE_CUSTOM": "y",
     "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME": '"partitions.csv"',
     "CONFIG_ESPTOOLPY_FLASHSIZE_16MB": "y",

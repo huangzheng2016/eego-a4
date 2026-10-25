@@ -3,11 +3,11 @@
 
 // diag 组件 —— 串口诊断命令通道（FW5/M18）。
 //
-// 并发模型（M12 定稿）：后台 diag 任务只做 UART0 阻塞读行 + 入队；
+// 并发模型（M12 定稿）：后台 diag 任务只做 USB Serial/JTAG 阻塞读行 + 入队；
 // 命令一律在 app_task 上下文经 service() 分发执行（I2C 单线程调用合同、
 // UI/渲染属主唯一、SD 写单属主）。命令处理器由组合根（app_main）以
 // Handlers 注入 —— 本组件不依赖 alert_core/net_stack/admin/eego_ui 任何头，
-// 保持可独立测试；处理器输出直接用 printf（UART0 控制台，115200）。
+// 保持可独立测试；处理器输出直接用 printf（USB Serial/JTAG 控制台，115200）。
 //
 // secrets 边界（强制）：本组件不读取/不输出任何凭据（WiFi 密码、管理
 // 密码、ingest key、token）；help 文本与分发逻辑只含状态/计数类命令。
@@ -36,7 +36,7 @@ struct Handlers {
   std::function<void(const char* arg)> dashboard;  // dashboard 状态/变量/面板/数据/刷新/smoke
 };
 
-// 启动 UART0 读行后台任务（栈/优先级内部固定）。幂等；false = 队列/任务创建失败。
+// 启动 USB Serial/JTAG 读行后台任务（栈/优先级内部固定）。幂等；false = 队列/任务创建失败。
 bool start(const Handlers& handlers);
 
 // app_task 主循环调用：非阻塞弹出至多一条命令并在调用方上下文分发执行。

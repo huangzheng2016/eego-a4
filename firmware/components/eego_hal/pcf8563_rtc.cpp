@@ -27,8 +27,24 @@ static constexpr uint8_t PCF8563_REG_CLKOUT          = 0x0D;
 static constexpr uint8_t PCF8563_CLKOUT_DISABLED     = 0x00;
 static constexpr uint8_t PCF8563_VL_FLAG             = 0x80;  // 秒寄存器 bit7
 
+static esp_err_t rtcProbeAck(i2c_port_t port, uint8_t addr) {
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, static_cast<uint8_t>((addr << 1) | I2C_MASTER_WRITE), true);
+    i2c_master_stop(cmd);
+    esp_err_t err = i2c_master_cmd_begin(port, cmd, pdMS_TO_TICKS(100));
+    i2c_cmd_link_delete(cmd);
+    return err;
+}
+
+static bool rtcBusInstalled(i2c_port_t port) {
+    return rtcProbeAck(port, eego::GSLX680_ADDRESS) == ESP_OK ||
+           rtcProbeAck(port, eego::PCF8563_ADDRESS) == ESP_OK;
+}
+
 // 确保共享 I2C 总线已安装
 static esp_err_t rtcEnsureI2cBus(i2c_port_t port) {
+    if (rtcBusInstalled(port)) return ESP_OK;
     i2c_config_t conf;
     memset(&conf, 0, sizeof(conf));
     conf.mode = I2C_MODE_MASTER;
@@ -40,7 +56,8 @@ static esp_err_t rtcEnsureI2cBus(i2c_port_t port) {
     esp_err_t err = i2c_param_config(port, &conf);
     if (err != ESP_OK) return err;
     err = i2c_driver_install(port, I2C_MODE_MASTER, 0, 0, 0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
+    // v5.5.1 重复安装可返回 ESP_FAIL；后续 RTC 读写仍会验证总线。
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE && err != ESP_FAIL) return err;
     return ESP_OK;
 }
 

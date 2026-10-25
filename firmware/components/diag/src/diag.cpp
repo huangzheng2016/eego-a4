@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// diag 组件实现 —— UART0 读行任务 + app_task 上下文分发（见 diag.h 契约）。
+// diag 组件实现 —— USB Serial/JTAG 读行任务 + app_task 上下文分发（见 diag.h 契约）。
 #include "diag/diag.h"
 
 #include <cstdio>
@@ -24,7 +24,7 @@ constexpr UBaseType_t kTaskPriority = 3;
 QueueHandle_t g_queue = nullptr;
 Handlers g_handlers;
 
-// UART0 读行任务：阻塞 fgets → 去 CRLF → 入队（命令执行不在本任务）。
+// USB Serial/JTAG 读行任务：阻塞 fgets → 去 CRLF → 入队（命令执行不在本任务）。
 void diagTask(void* arg) {
   (void)arg;
   char line[kCmdMaxLen];
@@ -134,7 +134,7 @@ bool start(const Handlers& handlers) {
     ESP_LOGE(TAG, "diag task create failed");
     return false;
   }
-  ESP_LOGI(TAG, "serial diagnostics ready (UART0 115200), type 'help'");
+  ESP_LOGI(TAG, "serial diagnostics ready (USB Serial/JTAG 115200), type 'help'");
   printHelp();
   return true;
 }
