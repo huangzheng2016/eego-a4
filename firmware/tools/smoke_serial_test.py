@@ -213,7 +213,12 @@ def phase_version(dev: Device, rep: Report) -> None:
 
 
 def phase_display_smoke(dev: Device, rep: Report) -> None:
-    resp = dev.cmd("smoke", deadline_s=60)  # 全量刷新耗时数秒
+    previous_quiet = dev.quiet_s
+    dev.quiet_s = max(previous_quiet, 3.0)
+    try:
+        resp = dev.cmd("smoke", deadline_s=60)  # 全量刷新耗时数秒
+    finally:
+        dev.quiet_s = previous_quiet
     pass_lines = [l for l in resp if l.startswith("[PASS]")]
     fail_lines = [l for l in resp if l.startswith("[FAIL]")]
     summary = next((l for l in resp if l.startswith("smoke: pass=")), "")

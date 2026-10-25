@@ -238,7 +238,11 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "system time set from RTC");
   }
 
-  // 3. NVS / 认证 / 配置存储 / 类型覆盖 / 管理日志
+  // 3. SD 目录 / NVS / 认证 / 配置存储 / 类型覆盖 / 管理日志
+  if (eego::SdCard::instance().ready() &&
+      !eego::SdCard::instance().mkdir("/alertpanel")) {
+    ESP_LOGE(TAG, "failed to create /sdcard/alertpanel");
+  }
   if (eego::net::CredentialStore::ensureNvs() != ESP_OK) {
     ESP_LOGE(TAG, "NVS init failed; credentials/config persistence unavailable");
   }
