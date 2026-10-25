@@ -128,7 +128,6 @@ RtcTime Pcf8563Rtc::readTime() {
 
     // VL 标志：秒寄存器 bit7。VL=1 表示时钟停振/电池耗尽，时间不可靠
     bool vl = (raw[0] & PCF8563_VL_FLAG) != 0;
-    t.valid = !vl;
 
     // BCD → 二进制
     t.second  = bcdToBin(raw[0] & 0x7FU);
@@ -142,6 +141,15 @@ RtcTime Pcf8563Rtc::readTime() {
     uint8_t yy = bcdToBin(raw[6]);
     t.year = (raw[5] & 0x80U) ? static_cast<uint16_t>(1900 + yy)
                               : static_cast<uint16_t>(2000 + yy);
+
+    const bool fieldsValid =
+        t.second <= 59 && t.minute <= 59 && t.hour <= 23 &&
+        t.day >= 1 && t.day <= 31 && t.weekday <= 6 &&
+        t.month >= 1 && t.month <= 12 && t.year >= 1900 && t.year <= 2099;
+    t.valid = !vl && fieldsValid;
+    if (!vl && !fieldsValid) {
+        ESP_LOGW(RTC_TAG, "RTC time fields are invalid");
+    }
 
     // VL 置位时清除：写回秒值（bit7=0），恢复振荡器可靠性标志
     if (vl) {

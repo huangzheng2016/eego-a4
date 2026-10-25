@@ -19,7 +19,7 @@ struct RtcTime {
     uint8_t minute;   // 0-59
     uint8_t second;   // 0-59
     uint8_t weekday;  // 0=周日 1-6=周一到周六
-    bool valid;       // false=VL 标志置位，时间不可靠
+    bool valid;       // false=VL 置位或日期时间字段越界，时间不可靠
 };
 
 class Pcf8563Rtc {

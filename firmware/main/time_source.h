@@ -7,7 +7,7 @@
 //   1. 系统时间可信（≥ eego::net::kPlausibleUnixFloor，SNTP 已同步或启动时
 //      已从 RTC 设置）→ time(nullptr)：SNTP 每小时自同步保持准确，TLS 证书
 //      校验同源；
-//   2. RTC（PCF8563）读数有效（VL 未置位）→ RTC epoch：电池唤醒/离线兜底；
+//   2. RTC（PCF8563）读数有效（VL 未置位且字段范围合法）→ RTC epoch：电池唤醒/离线兜底；
 //   3. 都不可用 → now() 返回退化值（0 附近）且 valid()=false。
 //
 // 诚实性合同：valid()=false 时状态页/状态栏如实显示「时间不可用」，

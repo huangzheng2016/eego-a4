@@ -206,10 +206,10 @@ def phase_version(dev: Device, rep: Report) -> None:
     resp = dev.cmd("version")
     ok = (any(l.startswith("version: eego-a4-alert-panel") for l in resp)
           and any(l.startswith("chip: ") for l in resp)
-          and any(l.startswith("framebuffer: 768x552") for l in resp))
+          and any(l.startswith("framebuffer: 552x768 logical, 52992 bytes BW") for l in resp))
     detail = next((l for l in resp if l.startswith("version:")), "")
     rep.check(ok, "version", detail or "version/chip/framebuffer 行齐全",
-              "version 输出缺行（预期 eego-a4-alert-panel + chip + 768x552）")
+              "version 输出缺行（预期 eego-a4-alert-panel + chip + 552x768 logical）")
 
 
 def phase_display_smoke(dev: Device, rep: Report) -> None:

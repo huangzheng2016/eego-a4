@@ -215,7 +215,14 @@ void PanelApp::diagSmoke() {
 
   // 4. RTC
   const eego::RtcTime t = rtc_.readTime();
-  check(t.valid, "rtc", t.valid ? "time valid" : "VL flag set / read fail");
+  if (t.year == 0) {
+    check(false, "rtc", "read fail");
+  } else if (!t.valid) {
+    printf("[WARN] rtc: time not set or invalid (setup required)\n");
+    warn++;
+  } else {
+    check(true, "rtc", "time valid");
+  }
 
   // 5. 快照链路（publisher → net_task 发布）
   if (deps_.publisher != nullptr) {
