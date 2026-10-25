@@ -184,7 +184,7 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
             )}
             <TextInput label={t('panel.value_path')} value={p.value_path} onChange={(v) => set((x) => (x.value_path = v || undefined), 'value_path')} error={err('value_path')} />
             <TextInput label={t('panel.value_expression')} value={p.value_expression} onChange={(v) => set((x) => (x.value_expression = v || undefined), 'expr')} error={err('value_expression')} />
-            <NumberInput label={t('panel.refresh_ms')} min={0} step={1000} value={p.refresh_ms ?? 60000} onChange={(v) => v !== undefined && set((x) => (x.refresh_ms = v), 'refresh')} error={err('refresh_ms')} />
+            <NumberInput label={t('panel.refresh_ms')} min={0} step={1} value={(p.refresh_ms ?? 60000) / 1000} onChange={(v) => v !== undefined && v >= 0 && set((x) => (x.refresh_ms = Math.round(v * 1000)), 'refresh')} error={err('refresh_ms')} />
             <div />
             <TextInput label={t('panel.time_from')} value={p.time_window?.from ?? '-1h'} onChange={(v) => set((x) => (x.time_window = { from: v, to: x.time_window?.to ?? 'now' }), 'tw')} error={err('time_window')} />
             <TextInput label={t('panel.time_to')} value={p.time_window?.to ?? 'now'} onChange={(v) => set((x) => (x.time_window = { from: x.time_window?.from ?? '-1h', to: v }), 'tw2')} />
@@ -463,30 +463,24 @@ export function PageInspector() {
         <h4>{t('editor.dashboard_settings')}</h4>
         <div className="form-grid two">
           <TextInput label={t('editor.dashboard_id')} value={dash.id} onChange={(v) => d.update((b) => (b.dashboard.id = v.replace(/[^A-Za-z0-9_-]/g, '')), 'dash:id')} error={dashErr('id')} />
-          <TextInput label={t('editor.dashboard_title')} value={dash.title} onChange={(v) => d.update((b) => (b.dashboard.title = v), 'dash:title')} error={dashErr('title')} />
-          <NumberInput label={t('editor.refresh_ms')} min={1000} step={1000} value={dash.refresh_ms ?? 60000} onChange={(v) => v !== undefined && d.update((b) => (b.dashboard.refresh_ms = v), 'dash:refresh')} error={dashErr('refresh_ms')} />
+          <NumberInput
+            label={t('editor.refresh_ms')}
+            min={1}
+            step={1}
+            value={(dash.refresh_ms ?? 60000) / 1000}
+            onChange={(v) => v !== undefined && v >= 1 && d.update((b) => (b.dashboard.refresh_ms = Math.round(v * 1000)), 'dash:refresh')}
+            error={dashErr('refresh_ms')}
+          />
+          <TextInput wide label={t('editor.dashboard_title')} value={dash.title} onChange={(v) => d.update((b) => (b.dashboard.title = v), 'dash:title')} error={dashErr('title')} />
         </div>
       </div>
       <div className="section">
         <h4>{t('editor.variables')}</h4>
-        <div className="col">
-          {dash.variables.map((v, i) => (
-            <div key={i} className="subcard form-grid two">
-              <TextInput label="name" value={v.name} onChange={(x) => d.update((b) => (b.dashboard.variables[i].name = x.replace(/[^A-Za-z0-9_]/g, '')), `var${i}n`)} />
-              <TextInput label={t('panel.label')} value={v.label} onChange={(x) => d.update((b) => (b.dashboard.variables[i].label = x), `var${i}l`)} />
-              <TextInput label="default" value={v.default_value} onChange={(x) => d.update((b) => (b.dashboard.variables[i].default_value = x), `var${i}d`)} />
-              <div className="row" style={{ alignItems: 'flex-end', justifyContent: 'flex-end' }}>
-                <Button size="sm" variant="danger" onClick={() => d.update((b) => b.dashboard.variables.splice(i, 1))}>
-                  {t('common.delete')}
-                </Button>
-              </div>
-            </div>
-          ))}
-          <div>
-            <Button size="sm" onClick={() => d.update((b) => b.dashboard.variables.push({ name: uniqueId('var', b.dashboard.variables.map((x) => x.name)).replace(/-/g, '_'), label: '', kind: 'text', default_value: '', options: [], source_id: '', value_path: '', multi: false, include_all: false }))}>
-              <Icon name="plus" /> {t('common.add')}
-            </Button>
-          </div>
+        <div className="row">
+          <span className="dim grow">{t('editor.variables_count', { n: dash.variables.length })}</span>
+          <Button size="sm" variant="ghost" onClick={() => navigate('sources')}>
+            {t('editor.variables_moved')} <Icon name="chevr" size={14} />
+          </Button>
         </div>
       </div>
     </div>
