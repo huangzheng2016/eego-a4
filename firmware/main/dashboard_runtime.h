@@ -133,6 +133,10 @@ class DashboardRuntime {
   bool consumeDetailRequest(std::string& panel_id, std::string& identity);
   std::vector<DashboardAlertItem> alertItems(const std::string& panel_id) const;
   bool acknowledgeEvent(const std::string& identity);
+  // 当前活动、未确认的严重（critical）事件身份（空闲刷新的“新严重告警立即刷新”判定）。
+  std::vector<std::string> activeCriticalIdentities() const;
+  // web 端应用/删除 dashboard 后置位一次（取走即清）；PanelApp 视为用户交互。
+  bool consumeConfigChanged();
   std::vector<DashboardSourceInfo> sources() const;
 
   void diag(const char* args);

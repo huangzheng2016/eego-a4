@@ -49,6 +49,7 @@
 #include "net_stack/net_status.h"
 #include "panel_render.h"
 #include "panel_types.h"
+#include "refresh_policy.h"
 #include "ui_text.h"
 #include "admin/input_binding_model.h"
 #include "admin/render_preview.h"
@@ -229,6 +230,14 @@ class PanelApp {
   static void startNetIdleWait(NetIdleWait& w, int64_t nowMs, int64_t budgetMs);
   static int pollNetIdle(NetIdleWait& w, int64_t nowMs);
 
+  // ---- 空闲感知刷新节奏（refresh_policy.h）----
+  // 用户交互（触控/按键/前置键/web 应用/设置变更）：切回 Active，待刷新内容立即显示。
+  void noteInteraction(int64_t nowMs);
+  void configureRefreshPolicy();
+  // 有待显示内容时调用：Active → true；Idle → 仅墙钟边界或新严重告警时 true。
+  bool displayAllowed(int64_t nowMs);
+  void noteDisplayed();
+
   // ---- 渲染 ----
   void markDirty(bool forceFull = false) {
     dirty_ = true;
@@ -314,6 +323,11 @@ class PanelApp {
   // 快照（无锁读；renderedSeq_ 跟踪已渲染代际）
   std::shared_ptr<const alert_core::AlertSnapshot> snapshot_;
   uint64_t snapshotSeq_ = 0;
+
+  // 空闲感知刷新节奏
+  RefreshPolicy refreshPolicy_;
+  int64_t lastCriticalCheckMs_ = -100000;
+  bool idleLogged_ = false;
 
   // 渲染节流
   bool dirty_ = true;

@@ -45,6 +45,8 @@ enum class SettingId : uint8_t {
   PollNow,
   EpdFull,
   EpdNow,
+  IdleAfter,    // 空闲判定：无交互多少分钟后进入空闲刷新节奏（0 = 关闭）
+  IdleRefresh,  // 空闲刷新间隔：空闲时按本地墙钟整 N 分钟边界合并刷新
   PowerMode,
   BatteryPoll,
   IdleSleep,

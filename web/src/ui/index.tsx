@@ -190,14 +190,28 @@ export function Select({
   );
 }
 
-export function Checkbox({ label, checked, onChange, disabled, error }: { label: ReactNode; checked: boolean | undefined; onChange: (v: boolean) => void; disabled?: boolean; error?: string }) {
+export function Checkbox({
+  label,
+  checked,
+  onChange,
+  disabled,
+  error,
+  hint,
+}: {
+  label: ReactNode;
+  checked: boolean | undefined;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  error?: string;
+  hint?: ReactNode;
+}) {
   return (
     <div className={`field${error ? ' has-error' : ''}`}>
       <label className="check">
         <input type="checkbox" checked={!!checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
         <span>{label}</span>
       </label>
-      {error && <span className="err-text">{error}</span>}
+      {error ? <span className="err-text">{error}</span> : hint ? <span className="hint">{hint}</span> : null}
     </div>
   );
 }

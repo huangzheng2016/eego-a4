@@ -77,7 +77,8 @@ export const ackAllAlerts = () => request<unknown>('/alerts/ack-all', { method: 
 // ---------------------------------------------------------------- settings
 export interface SettingsFieldSchema {
   type: 'string' | 'int' | 'bool' | 'array' | 'number';
-  enum?: string[];
+  /** String enums for `string` fields; numeric choices for `int` fields (e.g. idle_refresh_min). */
+  enum?: (string | number)[];
   range?: [number, number];
   minimum_nonzero?: number;
   step?: number;

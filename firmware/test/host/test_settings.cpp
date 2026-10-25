@@ -73,6 +73,9 @@ TEST(settings, json_round_trip) {
   s.frontlight_warmth = 80;
   s.frontlight_hardware = FrontlightHardware::Absent;
   s.epd_full_refresh_s = 7200;
+  s.idle_after_min = 30;
+  s.idle_refresh_min = 15;
+  s.idle_critical_immediate = false;
   s.diagnostics_enabled = false;
   s.ble_observer_enabled = true;
   BleObserverRule rule;
@@ -148,6 +151,12 @@ TEST(settings, patch_rejects_bad_values) {
       {R"({"frontlight_warmth":-1})", "frontlight_warmth"},
       {R"({"frontlight_enabled":"yes"})", "frontlight_enabled"},
       {R"({"epd_full_refresh_s":60})", "epd_full_refresh_s"},
+      {R"({"idle_after_min":1441})", "idle_after_min"},
+      {R"({"idle_after_min":-1})", "idle_after_min"},
+      {R"({"idle_refresh_min":7})", "idle_refresh_min"},
+      {R"({"idle_refresh_min":0})", "idle_refresh_min"},
+      {R"({"idle_refresh_min":"5"})", "idle_refresh_min"},
+      {R"({"idle_critical_immediate":1})", "idle_critical_immediate"},
       {R"({"sleep_start_min":60})", "sleep_start_min"},  // end still -1
       {R"({"sleep_start_min":60,"sleep_end_min":60})", "sleep_end_min"},
       {R"({"schema_version":2})", "schema_version"},
@@ -202,4 +211,30 @@ TEST(settings, schema_mentions_frontlight_hardware) {
   JsonValue parsed;
   alert_core::JsonParseError err;
   CHECK_MSG(alert_core::jsonParse(schema, parsed, err), err.message);
+}
+
+TEST(settings, idle_refresh_fields) {
+  const Settings base;
+  CHECK_EQ(base.idle_after_min, 10u);
+  CHECK_EQ(base.idle_refresh_min, 5u);
+  CHECK(base.idle_critical_immediate);
+  Settings out;
+  FieldErrors errors;
+  for (uint32_t minutes : {2u, 5u, 10u, 15u, 30u, 60u}) {
+    const std::string patch = "{\"idle_refresh_min\":" + std::to_string(minutes) + "}";
+    CHECK_MSG(patchOk(base, patch, out, errors), patch << " -> " << describe(errors));
+    CHECK_EQ(out.idle_refresh_min, minutes);
+  }
+  CHECK_MSG(patchOk(base, R"({"idle_after_min":0,"idle_critical_immediate":false})", out, errors),
+            describe(errors));
+  CHECK_EQ(out.idle_after_min, 0u);
+  CHECK(!out.idle_critical_immediate);
+  CHECK_EQ(changedFields(base, out), static_cast<uint32_t>(kChangedIdleRefresh));
+  CHECK((kChangedAll & kChangedIdleRefresh) != 0);
+  // Older persisted records without the new keys load with defaults.
+  CHECK_MSG(patchOk(base, R"({"schema_version":1,"language":"en"})", out, errors), describe(errors));
+  CHECK_EQ(out.idle_refresh_min, 5u);
+  const std::string schema = schemaJson();
+  for (const char* key : {"idle_after_min", "idle_refresh_min", "idle_critical_immediate"})
+    CHECK_MSG(schema.find(key) != std::string::npos, key);
 }

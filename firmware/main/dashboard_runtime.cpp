@@ -317,6 +317,7 @@ struct DashboardRuntime::Impl {
   int64_t last_store_check_ms = -100000;
   uint64_t store_revision = 0;
   bool store_configured = false;
+  bool config_changed = false;  // web 端应用/删除 dashboard（PanelApp 视为一次交互）
   bool store_seen = false;
   int64_t last_rule_eval_ms = -100000;
   int64_t last_carousel_ms = 0;
@@ -1982,6 +1983,7 @@ struct DashboardRuntime::Impl {
       return;
     }
     if (document->revision == store_revision && document->configured == store_configured) return;
+    config_changed = true;
     store_revision = document->revision;
     store_configured = document->configured;
     if (!document->configured) {
@@ -2770,6 +2772,26 @@ std::vector<DashboardAlertItem> DashboardRuntime::alertItems(const std::string& 
     out.push_back(std::move(item));
   }
   return out;
+}
+
+std::vector<std::string> DashboardRuntime::activeCriticalIdentities() const {
+  std::vector<std::string> out;
+  if (impl_ == nullptr || !impl_->ready) return out;
+  for (const dash::Event& event : impl_->view.events) {
+    if (event.severity != dash::Severity::Critical || event.state != dash::EventState::Active) {
+      continue;
+    }
+    std::string identity = dashboardEventIdentity(event);
+    if (impl_->acknowledged_events.count(identity) != 0) continue;
+    out.push_back(std::move(identity));
+  }
+  return out;
+}
+
+bool DashboardRuntime::consumeConfigChanged() {
+  if (impl_ == nullptr || !impl_->config_changed) return false;
+  impl_->config_changed = false;
+  return true;
 }
 
 bool DashboardRuntime::acknowledgeEvent(const std::string& identity) {

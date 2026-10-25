@@ -36,9 +36,14 @@ enum Change : uint32_t {
   kChangedEpdRefresh = 1u << 7,
   kChangedBle = 1u << 8,
   kChangedFrontlightHardware = 1u << 9,
+  kChangedIdleRefresh = 1u << 10,  // idle_after_min / idle_refresh_min / idle_critical_immediate
   kChangedRefresh = kChangedDataRefresh | kChangedEpdRefresh,
-  kChangedAll = (1u << 10) - 1,
+  kChangedAll = (1u << 11) - 1,
 };
+
+// 空闲显示刷新间隔（分钟）允许值：均整除 60，使边界落在整点对齐的墙钟时刻。
+inline constexpr uint32_t kIdleRefreshChoices[] = {2, 5, 10, 15, 30, 60};
+inline constexpr uint32_t kIdleAfterMaxMin = 1440;
 
 inline constexpr size_t kMaxBleObserverRules = 4;
 inline constexpr size_t kMaxBleObserverFields = 4;
@@ -87,6 +92,11 @@ struct Settings {
   uint8_t frontlight_warmth = 50;
   FrontlightHardware frontlight_hardware = FrontlightHardware::Auto;
   uint32_t epd_full_refresh_s = 86400;
+  // 空闲显示刷新：idle_after_min 分钟无交互（0 = 禁用）后，屏幕更新合并到每
+  // idle_refresh_min 分钟的本地墙钟边界；新出现的活动严重告警可立即刷新。
+  uint32_t idle_after_min = 10;
+  uint32_t idle_refresh_min = 5;
+  bool idle_critical_immediate = true;
   bool diagnostics_enabled = true;
   bool ble_observer_enabled = false;
   uint32_t ble_observer_window_s = 10;
@@ -123,6 +133,8 @@ bool mergePatch(const Settings& current, const alert_core::JsonValue& patch,
                 Settings& out, FieldErrors& errors);
 
 uint32_t changedFields(const Settings& before, const Settings& after);
+
+bool validIdleRefreshMin(uint32_t minutes);
 
 // Daily local-time deep-sleep window, including overnight windows. A disabled
 // schedule or invalid `now_unix` returns false. The wake timestamp is exact

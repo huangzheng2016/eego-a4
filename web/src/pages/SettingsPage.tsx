@@ -8,7 +8,7 @@ import { useToast } from '../state/toast';
 import { errorText, fieldMap } from '../state/errors';
 import { Button, Card, Checkbox, NumberInput, Select, TextArea, TextInput, Icon, PageHeader, SkeletonCard } from '../ui';
 
-const GROUP_ORDER = ['hardware', 'display', 'refresh', 'power', 'time_language', 'ble', 'diagnostics', 'other'];
+const GROUP_ORDER = ['hardware', 'display', 'display_refresh', 'refresh', 'power', 'time_language', 'ble', 'diagnostics', 'other'];
 /** Client-side regrouping (schema groups are firmware-defined). */
 const GROUP_OVERRIDE: Record<string, string> = { frontlight_hardware: 'hardware' };
 /** Group-level capability gates in addition to per-field `capability`. */
@@ -115,14 +115,33 @@ export function SettingsPage() {
     const s = t(key);
     return s === key ? k : s;
   };
+  /** Optional localized help text (`set.h.<field>`); undefined when absent. */
+  const fieldHelp = (k: string) => {
+    const key = `set.h.${k}` as DictKey;
+    const s = t(key);
+    return s === key ? undefined : s;
+  };
 
   const renderField = (key: string, f: api.SettingsFieldSchema) => {
     const v = form[key];
     const set = (nv: unknown) => setForm((s) => ({ ...s, [key]: nv }));
-    const hint = f.range ? `${f.range[0]} – ${f.range[1]}${f.minimum_nonzero ? ` (0 / ≥${f.minimum_nonzero})` : ''}` : f.note;
+    const help = fieldHelp(key);
+    const hint = help ?? (f.range ? `${f.range[0]} – ${f.range[1]}${f.minimum_nonzero ? ` (0 / ≥${f.minimum_nonzero})` : ''}` : f.note);
     const common = { label: fieldLabel(key), error: errs[key] };
-    if (f.type === 'bool') return <Checkbox key={key} {...common} checked={!!v} onChange={set} />;
-    if (f.enum) return <Select key={key} {...common} hint={f.note} value={String(v ?? '')} options={f.enum.map((e) => ({ value: e, label: enumLabel(`set.e.${key}`, e) }))} onChange={set} />;
+    if (f.type === 'bool') return <Checkbox key={key} {...common} hint={help} checked={!!v} onChange={set} />;
+    if (f.enum) {
+      const numeric = f.type === 'int' || f.type === 'number';
+      return (
+        <Select
+          key={key}
+          {...common}
+          hint={help ?? f.note}
+          value={String(v ?? '')}
+          options={f.enum.map((e) => ({ value: String(e), label: enumLabel(`set.e.${key}`, String(e)) }))}
+          onChange={(x) => set(numeric ? Number(x) : x)}
+        />
+      );
+    }
     if (key === 'timezone_offset_min') return <Select key={key} {...common} value={String(v ?? 0)} options={TZ_OPTIONS} onChange={(x) => set(Number(x))} />;
     if (key.endsWith('_min') && f.range?.[0] === -1)
       return (

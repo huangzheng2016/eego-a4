@@ -31,6 +31,9 @@ const SETTINGS_SCHEMA = {
     frontlight_warmth: { type: 'int', range: [0, 100], default: 50, capability: 'frontlight', group: 'display' },
     frontlight_hardware: { type: 'string', enum: ['auto', 'present', 'absent'], default: 'auto', group: 'display' },
     epd_full_refresh_s: { type: 'int', range: [0, 604800], minimum_nonzero: 3600, default: 86400, group: 'refresh' },
+    idle_after_min: { type: 'int', range: [0, 1440], default: 10, group: 'display_refresh' },
+    idle_refresh_min: { type: 'int', enum: [2, 5, 10, 15, 30, 60], default: 5, group: 'display_refresh' },
+    idle_critical_immediate: { type: 'bool', default: true, group: 'display_refresh' },
     diagnostics_enabled: { type: 'bool', default: true, group: 'diagnostics' },
     ble_observer_enabled: { type: 'bool', default: false, capability: 'ble_observer', group: 'ble' },
     ble_observer_window_s: { type: 'int', range: [2, 60], default: 10, group: 'ble' },
@@ -242,8 +245,9 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
     case 'PUT settings': {
       const fields: Record<string, string> = {};
       for (const [k, v] of Object.entries(b)) {
-        const f = (SETTINGS_SCHEMA.fields as Record<string, { range?: number[] }>)[k];
+        const f = (SETTINGS_SCHEMA.fields as Record<string, { range?: number[]; enum?: (string | number)[] }>)[k];
         if (!f) fields[k] = 'unknown field';
+        else if (f.enum && !f.enum.includes(v as string | number)) fields[k] = `must be one of ${f.enum.join('|')}`;
         else if (f.range && typeof v === 'number' && (v < f.range[0] || v > f.range[1])) fields[k] = `must be in [${f.range[0]}, ${f.range[1]}]`;
       }
       if (Object.keys(fields).length) return err(400, 'validation_failed', 'settings validation failed', fields);

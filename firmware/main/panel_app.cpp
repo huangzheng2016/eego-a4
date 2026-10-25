@@ -124,6 +124,8 @@ void PanelApp::begin(const Deps& deps) {
   dashboard_.setMains(mains_);
   syncDoublePress(true);
 
+  configureRefreshPolicy();
+  refreshPolicy_.noteInteraction(nowMs());
   ESP_LOGI(TAG, "panel begin: mains=%d lang=%s bat=%umV/%u%%", mains_ ? 1 : 0,
            settings_.language.c_str(), batCache_.millivolts, batCache_.percent);
   markDirty(true);
@@ -198,6 +200,9 @@ void PanelApp::applySettings(uint32_t changed) {
   if ((changed & eego::settings::kChangedBle) != 0) {
     eego::ble::BleManager::instance().configure(settings_);
   }
+  if ((changed & (eego::settings::kChangedIdleRefresh | eego::settings::kChangedTimezone)) != 0) {
+    configureRefreshPolicy();
+  }
   if ((changed & (eego::settings::kChangedPower | eego::settings::kChangedBle)) != 0) {
     eego::ble::BleManager::instance().onPowerMode(mains_);
   }
@@ -210,6 +215,8 @@ void PanelApp::onSettingsChanged(const eego::settings::Settings& values, uint32_
   PanelApp* self = static_cast<PanelApp*>(ctx);
   self->settings_ = values;
   self->applySettings(changed);
+  // 设置变更（设备设置页或 web 端应用）视为一次用户交互。
+  if (changed != 0) self->noteInteraction(self->nowMs());
 }
 
 uint64_t PanelApp::nextWakeAt(int64_t now_ms) const {
@@ -263,6 +270,7 @@ void PanelApp::drainAdminMailbox() {
   if (adminQueue_ == nullptr) return;
   AdminMail mail;
   while (xQueueReceive(static_cast<QueueHandle_t>(adminQueue_), &mail, 0) == pdTRUE) {
+    noteInteraction(nowMs());  // 配网门户/恢复热点等管理事件：需立即显示
     switch (mail.type) {
       case kEvPortalOpened:
         enterProvision();
@@ -327,6 +335,7 @@ void PanelApp::service() {
   const bool wantMains = computeMains();
   if (wantMains != mains_) onModeChange(wantMains);
   dashboard_.service(mains_);
+  if (dashboard_.consumeConfigChanged()) noteInteraction(now);  // web 端应用/删除 dashboard
   // web 端应用/删除 dashboard 后 runtime 自行重载；主页随可用性在
   // Dashboard ↔ Onboarding 之间切换，依赖 dashboard 的告警详情一并退出。
   const bool dashboardAvailable = dashboard_.available();
@@ -403,8 +412,9 @@ void PanelApp::service() {
   }
 
   if (page_ == Page::Dashboard) {
-    if (dashboard_.needsRender()) {
+    if (dashboard_.needsRender() && displayAllowed(now)) {
       dashboard_.render();
+      noteDisplayed();
       noteInputResume();
       if (forceFull_) lastFullRenderMs_ = now;
       dirty_ = false;
@@ -422,8 +432,58 @@ void PanelApp::service() {
     if (key != renderedClockKey_) markDirty();
   }
 
-  if (dirty_ && now - lastRenderMs_ >= kRenderThrottleMs) {
+  if (dirty_ && now - lastRenderMs_ >= kRenderThrottleMs && displayAllowed(now)) {
     render(now);
+    noteDisplayed();
+  }
+}
+
+// ── 空闲感知刷新节奏 ────────────────────────────────────────────────────────
+
+void PanelApp::configureRefreshPolicy() {
+  RefreshPolicyConfig config;
+  // 电池模式：唤醒 → 渲染 → 深睡，显示节奏由电源 FSM 决定，不做空闲合并。
+  config.idle_after_min = mains_ ? settings_.idle_after_min : 0;
+  config.idle_refresh_min = settings_.idle_refresh_min;
+  config.critical_immediate = settings_.idle_critical_immediate;
+  config.timezone_offset_min = settings_.timezone_offset_min;
+  refreshPolicy_.configure(config);
+}
+
+void PanelApp::noteInteraction(int64_t now) {
+  if (idleLogged_) {
+    ESP_LOGI(TAG, "display: idle -> active (interaction)");
+    idleLogged_ = false;
+  }
+  refreshPolicy_.noteInteraction(now);
+}
+
+bool PanelApp::displayAllowed(int64_t now) {
+  // 配网（门户页 / BLE 配网倒计时）期间用户正在操作手机：始终即时刷新。
+  if (page_ == Page::Provision || eego::ble::BleManager::instance().provisioningActive()) {
+    return true;
+  }
+  if (!refreshPolicy_.idle(now)) return refreshPolicy_.allow(now, 0, false);
+  if (!idleLogged_) {
+    idleLogged_ = true;
+    ESP_LOGI(TAG, "display: active -> idle (refresh every %u min on the boundary)",
+             static_cast<unsigned>(settings_.idle_refresh_min));
+  }
+  bool critical = false;
+  if (settings_.idle_critical_immediate && now - lastCriticalCheckMs_ >= 1000) {
+    lastCriticalCheckMs_ = now;
+    critical = refreshPolicy_.criticalArrived(dashboard_.activeCriticalIdentities());
+  }
+  const uint64_t unix_now = TimeSource::valid() ? TimeSource::now() : 0;
+  return refreshPolicy_.allow(now, unix_now, critical);
+}
+
+void PanelApp::noteDisplayed() {
+  const uint64_t unix_now = TimeSource::valid() ? TimeSource::now() : 0;
+  if (settings_.idle_critical_immediate) {
+    refreshPolicy_.noteRendered(unix_now, dashboard_.activeCriticalIdentities());
+  } else {
+    refreshPolicy_.noteRendered(unix_now);
   }
 }
 
@@ -479,6 +539,7 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
   }
   if (stale) return;
   lastInputMs_ = now_us / 1000;
+  noteInteraction(lastInputMs_);
   const ConfirmSource source = buttonSource(ev.id);
   if (ev.action == eego::ButtonAction::Press) suppressButtonLong_[index] = false;
   if (ev.action == eego::ButtonAction::LongPress && suppressButtonLong_[index]) {
@@ -582,6 +643,7 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
   }
   if (stale) return;
   lastInputMs_ = now_us / 1000;
+  noteInteraction(lastInputMs_);
   const int16_t x = static_cast<int16_t>(ev.x);
   const int16_t y = static_cast<int16_t>(ev.y);
   if (ev.type == eego::TouchEventType::Press || ev.type == eego::TouchEventType::FrontPress) {
@@ -871,6 +933,8 @@ constexpr uint32_t kDataRefreshSteps[] = {0, 60, 300, 900, 1800, 3600};
 constexpr uint32_t kEpdFullSteps[] = {0, 3600, 21600, 86400, 604800};
 constexpr uint32_t kBatteryPollSteps[] = {300, 900, 1800, 3600, 10800, 21600};
 constexpr uint32_t kIdleSleepSteps[] = {0, 30, 60, 90, 180, 300, 600};
+constexpr uint32_t kIdleAfterSteps[] = {0, 1, 2, 5, 10, 15, 30, 60};  // 分钟；0 = 关闭
+constexpr uint32_t kIdleRefreshSteps[] = {2, 5, 10, 15, 30, 60};       // 分钟（整除 60）
 constexpr int kTimezoneMinMin = -720;
 constexpr int kTimezoneMaxMin = 840;
 
@@ -1121,6 +1185,8 @@ bool PanelApp::settingAdjustable(SettingId id) {
     case SettingId::Warmth:
     case SettingId::DataRefresh:
     case SettingId::EpdFull:
+    case SettingId::IdleAfter:
+    case SettingId::IdleRefresh:
     case SettingId::PowerMode:
     case SettingId::BatteryPoll:
     case SettingId::IdleSleep:
@@ -1170,6 +1236,13 @@ bool PanelApp::adjustSettingRow(SettingId id, int dir, bool coarse, bool wrap) {
     case SettingId::EpdFull:
       next.epd_full_refresh_s =
           stepChoice(kEpdFullSteps, settings_.epd_full_refresh_s, step, wrap);
+      break;
+    case SettingId::IdleAfter:
+      next.idle_after_min = stepChoice(kIdleAfterSteps, settings_.idle_after_min, step, wrap);
+      break;
+    case SettingId::IdleRefresh:
+      next.idle_refresh_min =
+          stepChoice(kIdleRefreshSteps, settings_.idle_refresh_min, step, wrap);
       break;
     case SettingId::PowerMode: {
       constexpr PowerMode kModes[] = {PowerMode::Auto, PowerMode::Mains, PowerMode::Battery};
@@ -1960,6 +2033,8 @@ bool PanelApp::computeMains() {
 
 void PanelApp::onModeChange(bool mains) {
   mains_ = mains;
+  configureRefreshPolicy();          // 电池模式不做空闲合并
+  noteInteraction(nowMs());          // 插拔电源视为一次交互
   dashboard_.setMains(mains);
   ESP_LOGI(TAG, "power mode -> %s", mains ? "mains" : "battery");
   NetStack::instance().wifi().setPowerSave(mains);  // 常供电 modem-sleep
@@ -2945,6 +3020,21 @@ void PanelApp::buildS4(S4Model& m) {
       case SettingId::EpdNow:
         label = Str::SetEpdNow;
         isAction = true;
+        break;
+      case SettingId::IdleAfter:
+        label = Str::SetIdleAfter;
+        if (settings_.idle_after_min == 0) {
+          value = tr(Str::Off);
+        } else {
+          snprintf(buf, sizeof(buf), tr(Str::IdleAfterFmt),
+                   static_cast<unsigned>(settings_.idle_after_min));
+          value = buf;
+        }
+        break;
+      case SettingId::IdleRefresh:
+        label = Str::SetIdleRefresh;
+        formatEvery(settings_.idle_refresh_min * 60, buf, sizeof(buf));
+        value = buf;
         break;
       case SettingId::PowerMode:
         label = Str::SetPowerMode;

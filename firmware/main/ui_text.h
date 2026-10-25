@@ -158,6 +158,9 @@ enum class Lang : uint8_t {
   X(SetEpdFull, "墨水屏全刷周期", "EPD FULL INTERVAL") \
   X(SetEpdNow, "立即全屏刷新", "EPD FULL NOW") \
   X(SetIdleSleep, "自动休眠", "IDLE SLEEP") \
+  X(SetIdleAfter, "空闲判定", "IDLE AFTER") \
+  X(SetIdleRefresh, "空闲刷新间隔", "IDLE REFRESH") \
+  X(IdleAfterFmt, "%u 分钟无操作", "%uMIN NO INPUT") \
   X(SetSleepPlan, "定时休眠", "SLEEP SCHEDULE") \
   X(SetNextWake, "下次唤醒时间", "NEXT WAKE") \
   X(SetLastWake, "唤醒方式", "LAST WAKE") \
