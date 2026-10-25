@@ -66,6 +66,11 @@ uint32_t CpFontRenderer::readU32(const uint8_t* data) {
 }
 
 bool CpFontRenderer::readAt(const uint32_t offset, void* destination, const size_t bytes) {
+    if (memory_) {
+        if (offset > memorySize_ || bytes > memorySize_ - offset) return false;
+        memcpy(destination, memory_ + offset, bytes);
+        return true;
+    }
     if (!file_) return false;
     if (fseek(file_, (long)offset, SEEK_SET) != 0) return false;
     return fread(destination, 1, bytes, file_) == bytes;
@@ -75,6 +80,8 @@ void CpFontRenderer::unload() {
     loaded_ = false;
     if (file_) { fclose(file_); file_ = nullptr; }
     if (intervals_) { heap_caps_free(intervals_); intervals_ = nullptr; }
+    memory_ = nullptr;
+    memorySize_ = 0;
     info_ = {};
     glyphsFileOffset_ = 0;
     bitmapFileOffset_ = 0;
@@ -94,13 +101,24 @@ bool CpFontRenderer::load(const char* path) {
         return false;
     }
 
-    // 文件大小
     if (fseek(file_, 0, SEEK_END) != 0) { unload(); return false; }
     long fsz = ftell(file_);
     if (fsz < 0) { unload(); return false; }
     info_.fileBytes = (uint32_t)fsz;
     rewind(file_);
+    return loadMetadata(path);
+}
 
+bool CpFontRenderer::loadMemory(const uint8_t* data, size_t bytes) {
+    unload();
+    if (!data || bytes == 0 || bytes > UINT32_MAX) return false;
+    memory_ = data;
+    memorySize_ = bytes;
+    info_.fileBytes = static_cast<uint32_t>(bytes);
+    return loadMetadata("embedded");
+}
+
+bool CpFontRenderer::loadMetadata(const char* sourceName) {
     uint8_t header[GLOBAL_HEADER_BYTES] = {};
     if (!readAt(0, header, sizeof(header))) {
         ESP_LOGE(TAG, "全局头读取失败");
@@ -220,7 +238,7 @@ bool CpFontRenderer::load(const char* path) {
     loaded_ = true;
     ESP_LOGI(TAG, "loaded=%s bytes=%lu style=%u intervals=%lu glyphs=%lu "
                   "advanceY=%u asc=%d desc=%d depth=%u",
-             path, (unsigned long)info_.fileBytes, info_.styleId,
+             sourceName, (unsigned long)info_.fileBytes, info_.styleId,
              (unsigned long)info_.intervalCount, (unsigned long)info_.glyphCount,
              info_.advanceY, info_.ascender, info_.descender, info_.is2Bit ? 2 : 1);
     return true;

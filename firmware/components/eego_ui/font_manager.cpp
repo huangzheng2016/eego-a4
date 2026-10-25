@@ -87,6 +87,29 @@ bool FontManager::loadUiFont(const char* path) {
     return loadInto(path, uiFmt_, uiEdc_, uiCp_);
 }
 
+bool FontManager::loadUiFontEmbedded() {
+#ifdef EEGO_EMBEDDED_FONT
+    extern const uint8_t fontStart[] asm("_binary_HarmonyOS_Sans_SC_16_eefont_start");
+    extern const uint8_t fontEnd[] asm("_binary_HarmonyOS_Sans_SC_16_eefont_end");
+    if (uiEdc_) { delete uiEdc_; uiEdc_ = nullptr; }
+    if (uiCp_) { delete uiCp_; uiCp_ = nullptr; }
+    uiFmt_ = FontFormat::Unknown;
+    uiCp_ = new (std::nothrow) CpFontRenderer();
+    if (!uiCp_) return false;
+    const size_t bytes = static_cast<size_t>(fontEnd - fontStart);
+    if (!uiCp_->loadMemory(fontStart, bytes)) {
+        delete uiCp_;
+        uiCp_ = nullptr;
+        return false;
+    }
+    uiFmt_ = FontFormat::CpFontV4;
+    ESP_LOGI(TAG, "UI font loaded: embedded HarmonyOS Sans SC 16px");
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool FontManager::loadBodyFont(const char* path) {
     if (!path) return false;
     return loadInto(path, bodyFmt_, bodyEdc_, bodyCp_);

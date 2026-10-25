@@ -36,7 +36,7 @@ ESP-IDF 及其组件的完整许可以工具链安装副本为准；二进制发
 |---|---|---|
 | miniz | Unlicense | 未采用；图片解码只用 LodePNG |
 | qrcodegen（Nayuki） | MIT | 未打包；配网无二维码渲染需求 |
-| HarmonyOS Sans SC | 华为免费商用许可 | 未打包；固件不含字体二进制 |
+| HarmonyOS Sans SC | 华为免费商用许可 | 不随仓库分发；本地嵌入由用户自备并核对许可 |
 | SdFat / Adafruit GFX / NimBLE-Arduino / arduino-esp32 | MIT / BSD-3 / Apache-2.0 / LGPL-2.1 | 未采用；本树为纯 ESP-IDF，无 Arduino 依赖 |
 
 ## 源代码输入（非第三方库）

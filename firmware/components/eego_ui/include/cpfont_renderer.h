@@ -44,6 +44,7 @@ public:
     CpFontRenderer& operator=(const CpFontRenderer&) = delete;
 
     bool load(const char* path);
+    bool loadMemory(const uint8_t* data, size_t bytes);
     void unload();
     bool loaded() const { return loaded_; }
     const FontInfo& info() const { return info_; }
@@ -88,6 +89,8 @@ private:
     uint8_t* bitmap_ = nullptr;       // 位图读取缓冲（PSRAM 优先）
     size_t bitmapCapacity_ = 0;
     FILE* file_ = nullptr;
+    const uint8_t* memory_ = nullptr;
+    size_t memorySize_ = 0;
     uint32_t glyphsFileOffset_ = 0;
     uint32_t bitmapFileOffset_ = 0;
     bool loaded_ = false;
@@ -97,6 +100,7 @@ private:
     static uint32_t readU32(const uint8_t* data);
     static bool nextCodepoint(const char*& cursor, uint32_t& codepoint);
 
+    bool loadMetadata(const char* sourceName);
     bool readAt(uint32_t offset, void* destination, size_t bytes);
     int32_t findGlyphIndex(uint32_t codepoint) const;
     bool readGlyph(uint32_t glyphIndex, Glyph& glyph);

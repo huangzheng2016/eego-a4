@@ -27,6 +27,8 @@ public:
 
     // 加载 UI 字体（固定，启动加载）
     bool loadUiFont(const char* path);
+    // 加载构建时嵌入的本地 UI 字体；无嵌入文件时返回 false
+    bool loadUiFontEmbedded();
     // 加载正文字体（可切换）
     bool loadBodyFont(const char* path);
 

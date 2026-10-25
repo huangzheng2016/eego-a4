@@ -90,7 +90,7 @@ panel::PanelApp app;
 
 // ── 字体 ─────────────────────────────────────────────────────────────────────
 
-// admin.font 指定的 SD 绝对路径优先；否则扫 SD 根目录首个 .eefont/.bin；
+// admin.font 指定的 SD 绝对路径优先，其次是本地内嵌字体和 SD 根目录字体；
 // 都失败保持内置 5x7 回退（面板始终可显示文字）。
 void tryLoadUiFont() {
   const std::string configured = admin::ConfigStore::instance().admin().font;
@@ -99,8 +99,9 @@ void tryLoadUiFont() {
       ESP_LOGI(TAG, "UI font loaded (config): %s", configured.c_str());
       return;
     }
-    ESP_LOGW(TAG, "configured font failed, fallback to scan: %s", configured.c_str());
+    ESP_LOGW(TAG, "configured font failed, fallback to embedded/SD: %s", configured.c_str());
   }
+  if (eego::FontManager::instance().loadUiFontEmbedded()) return;
   if (!eego::SdCard::instance().ready()) return;
   eego::SdCard::DirEntry entries[16];
   const int n = eego::SdCard::instance().listDir("/", entries, 16);

@@ -129,6 +129,11 @@ DELETE /api/v1/sources/credentials   {"key":"weather"}
 /sdcard/fonts/                       可选 UI 字体
 ```
 
+中文显示可将自备的 HarmonyOS Sans SC 16px 字体放到
+`firmware/components/eego_ui/fonts/HarmonyOS_Sans_SC_16.eefont` 后重新构建；该文件被
+`.gitignore` 排除，会在构建时嵌入固件，无需取出 SD。没有嵌入文件时仍按 SD 根目录
+字体或内置 ASCII 回退处理。字体由使用者自备并遵守其许可。
+
 SD 不可用时告警降级为内存运行，重启后丢失；不能把这种状态报告为已持久化。
 
 常用主机工具：
