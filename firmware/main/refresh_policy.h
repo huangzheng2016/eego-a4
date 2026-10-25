@@ -29,6 +29,17 @@ struct RefreshPolicyConfig {
 // unix_s 之后（严格大于）的下一个本地墙钟边界（unix 秒）。interval_min=0 按 1 处理。
 uint64_t nextRefreshBoundary(uint64_t unix_s, int timezone_offset_min, uint32_t interval_min);
 
+// dashboard 自动轮播的墙钟周期序号：floor((unix + tz) / period)；epoch 变化 = 该前进一屏。
+// unix 不可信时退回单调时钟（mono_ms / period）。period_min = 0 → 0（关闭）。
+uint64_t screenRotateEpoch(uint64_t unix_s, int64_t mono_ms, int timezone_offset_min,
+                           uint32_t period_min);
+
+// 轮播判定（纯逻辑）：period_min > 0、距最后一次交互满一个周期、上一次轮播已显示、
+// 且周期序号相对 last_epoch 变化时返回 true。last_epoch == 0 只记录不前进（开启/
+// 开机后先等一个完整周期）。返回 true 时调用方前进一屏并把 last_epoch 更新为 epoch。
+bool screenRotateDue(uint64_t epoch, uint64_t last_epoch, int64_t mono_ms,
+                     int64_t last_interaction_ms, uint32_t period_min, bool previous_displayed);
+
 class RefreshPolicy {
  public:
   // 低于此值的 unix 时间视为不可信（时间不可用时按单调时钟间隔兜底）。

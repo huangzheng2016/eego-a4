@@ -64,11 +64,13 @@ enum class Lang : uint8_t {
   X(DoneClear, "已删除", "DELETED") \
   X(DoneMute, "已静音", "MUTED") \
   X(ActionFailed, "操作失败", "ACTION FAILED") \
-  X(ModeMains, "持续供电", "MAINS") \
-  X(ModeBattery, "电池供电", "BATTERY") \
-  X(ModeAuto, "自动", "AUTO") \
+  X(ModeMains, "外接电源", "EXTERNAL") \
+  X(ModeBattery, "电池", "BATTERY") \
+  X(ModeAuto, "自动判断", "AUTO") \
+  X(PowerAlwaysExternal, "始终外接电源", "ALWAYS EXTERNAL") \
+  X(PowerAlwaysBattery, "始终电池", "ALWAYS BATTERY") \
+  X(PowerDetailFmt, "%s（%s）", "%s (%s)") \
   X(Charging, "充电中", "CHARGING") \
-  X(BatteryFmt, "电池 %u%% %umV", "BAT %u%% %umV") \
   X(WifiDisconnected, "WiFi 未连接", "DISCONNECTED") \
   X(WifiConnecting, "WiFi 连接中", "CONNECTING") \
   X(WifiConnected, "WiFi 已连接", "CONNECTED") \
@@ -77,6 +79,9 @@ enum class Lang : uint8_t {
   X(WifiNotTried, "未尝试", "NOT TRIED") \
   X(WifiNotSeen, "未扫描到", "NOT SEEN") \
   X(WifiDiag, "WiFi 诊断", "WIFI DIAG") \
+  X(LblSignal10m, "近10分钟", "LAST 10 MIN") \
+  X(LblTip, "建议", "TIP") \
+  X(WifiWeakHint, "移近路由器/固定信道 1·6·11/20MHz", "MOVE CLOSER / CH 1·6·11 / 20MHZ") \
   X(Sources, "数据源", "DATA SOURCES") \
   X(NoSources, "未配置数据源", "NO SOURCES") \
   X(NoDashboard, "未配置仪表盘", "NO DASHBOARD") \
@@ -91,7 +96,6 @@ enum class Lang : uint8_t {
   X(LblWifi, "WiFi", "WIFI") \
   X(LblSignal, "信号", "SIGNAL") \
   X(LblAddress, "管理地址", "ADDRESS") \
-  X(LblBattery, "电池", "BATTERY") \
   X(LblPower, "供电", "POWER") \
   X(LblStorage, "存储", "STORAGE") \
   X(LblHardware, "硬件", "HARDWARE") \
@@ -135,7 +139,7 @@ enum class Lang : uint8_t {
   X(ProvDone, "配网成功，即将重启", "PROVISIONED, REBOOTING") \
   X(ProvClosed, "配网窗口已关闭", "PORTAL CLOSED") \
   X(Busy, "忙，请稍后重试", "BUSY; TRY AGAIN") \
-  X(Sleeping, "电池供电：休眠中", "BATTERY: SLEEPING") \
+  X(Sleeping, "电池 · 休眠中", "ON BATTERY · ASLEEP") \
   X(WakeHint, "按电源键唤醒", "PRESS POWER TO WAKE") \
   X(OnbOpen, "在浏览器中打开", "OPEN IN A BROWSER") \
   X(OnbNoAddress, "等待网络连接…", "WAITING FOR NETWORK…") \
@@ -170,6 +174,7 @@ enum class Lang : uint8_t {
   X(SetEpdNow, "立即全屏刷新", "EPD FULL NOW") \
   X(SetIdleAfter, "空闲判定", "IDLE AFTER") \
   X(SetIdleRefresh, "空闲刷新间隔", "IDLE REFRESH") \
+  X(SetScreenRotate, "自动轮播", "AUTO ROTATE") \
   X(IdleAfterFmt, "%u 分钟无操作", "%uMIN NO INPUT") \
   X(SetSleepPlan, "夜间暂停", "NIGHT PAUSE") \
   X(SetNextWake, "下次唤醒时间", "NEXT WAKE") \
@@ -262,14 +267,13 @@ enum class Lang : uint8_t {
   X(OfflineCountFmt, "离线 %u", "OFF %u") \
   X(PreviewTag, "预览", "PREVIEW") \
   X(SecPower, "电源 / 休眠", "POWER / SLEEP") \
-  X(LblMode, "模式", "MODE") \
-  X(LblKeepAwake, "保持唤醒", "KEEP AWAKE") \
+  X(LblRunState, "运行状态", "STATE") \
+  X(LblCharge, "电量", "BATTERY") \
+  X(LblAutoSleep, "自动休眠", "AUTO SLEEP") \
   X(LblNextWake, "下次唤醒", "NEXT WAKE") \
-  X(LblNextRefresh, "下次刷新", "NEXT UPDATE") \
   X(LblWakeReason, "唤醒原因", "WAKE REASON") \
   X(LblSleeps, "休眠次数", "SLEEPS") \
   X(LblScreenUpdated, "屏幕更新", "SCREEN") \
-  X(KeepAwakeRemainFmt, "剩余 %u 分 · 至 %s", "%uMIN LEFT · UNTIL %s") \
   X(SetKeepAwakeFmt, "保持唤醒 %u 分钟", "KEEP AWAKE %uMIN") \
   X(KeepAwakeKey, "保持唤醒", "AWAKE") \
   X(KeepAwakeStartedFmt, "已保持唤醒 %u 分钟", "KEEPING AWAKE FOR %uMIN") \
@@ -279,13 +283,9 @@ enum class Lang : uint8_t {
   X(SleepInFmt, "无操作 %u 秒后休眠", "SLEEPS AFTER %uS IDLE") \
   X(SleepsFmt, "%u 次（上电以来）", "%u SINCE POWER-ON") \
   X(ReasonForced, "手动设定", "SET MANUALLY") \
-  X(ReasonNoBattery, "无电池读数", "NO BATTERY") \
   X(ReasonCharging, "充电中", "CHARGING") \
   X(ReasonUsbHost, "USB 已连接", "USB HOST") \
-  X(ReasonFullHold, "满电保持", "FULL, HELD") \
-  X(ReasonVoltageDrop, "电压下降", "VOLTAGE DROP") \
-  X(ReasonBelowHold, "电压偏低", "LOW VOLTAGE") \
-  X(ReasonBattery, "未检测到外部供电", "NO EXTERNAL POWER") \
+  X(ReasonFullHold, "满电", "FULL") \
   X(HelpUpDownChord, "↑+↓ 同按", "UP+DOWN TOGETHER") \
   X(HelpKeepAwake, "保持唤醒（再按延长/取消）", "KEEP AWAKE (AGAIN: EXTEND/CANCEL)")
 

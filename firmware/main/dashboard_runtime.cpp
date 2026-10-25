@@ -237,7 +237,6 @@ std::string eventKey(const dash::Event& event) {
 struct DashboardRuntime::Impl {
   struct Location {
     std::string page_id;
-    size_t page_index = 0;
     std::string panel_id;
     std::string event_id;
   };
@@ -280,8 +279,7 @@ struct DashboardRuntime::Impl {
   std::map<std::string, std::shared_ptr<const dp::SourceResult>> source_pointers;
   std::map<std::string, dp::SourceStatus> source_statuses;
 
-  std::string page_id;
-  size_t page_index = 0;
+  std::string page_id;  // current page = current screen
   size_t focus = 0;
   size_t action_focus = 0;
   std::string focused_event_id;
@@ -380,14 +378,13 @@ struct DashboardRuntime::Impl {
     return selected == nullptr ? nullptr : selected->panel;
   }
 
-  const dash::PanelSpec* findPanel(std::string_view id, const dash::Page** owner = nullptr,
-                                   size_t* subpage = nullptr) const {
+  const dash::PanelSpec* findPanel(std::string_view id,
+                                   const dash::Page** owner = nullptr) const {
     for (const dash::Page& candidate : view.pages) {
       if (!candidate.visible) continue;
       for (const dash::PanelSpec& panel : candidate.panels) {
         if (panel.id != id) continue;
         if (owner != nullptr) *owner = &candidate;
-        if (subpage != nullptr) *subpage = ui::panelScreenIndex(panel);
         return &panel;
       }
     }
@@ -411,12 +408,7 @@ struct DashboardRuntime::Impl {
       return;
     }
     const ui::LayoutConfig config = layoutConfig();
-    layout = ui::buildPageLayout(*current, page_index, config);
-    if (layout.page_count == 0) page_index = 0;
-    if (page_index >= layout.page_count) {
-      page_index = layout.page_count - 1;
-      layout = ui::buildPageLayout(*current, page_index, config);
-    }
+    layout = ui::buildPageLayout(*current, config);
     if (focus >= layout.panels.size()) focus = layout.panels.empty() ? 0 : layout.panels.size() - 1;
     if (const dash::PanelSpec* selected = focusedPanel();
         selected == nullptr || action_focus >= selected->actions.size()) {
@@ -647,7 +639,6 @@ struct DashboardRuntime::Impl {
     const dash::Page* initial = page(config, page_id);
     if (initial == nullptr) initial = defaultPage(config);
     page_id = initial->id;
-    page_index = 0;
     focus = 0;
     action_focus = 0;
     renderer.reset();
@@ -665,17 +656,15 @@ struct DashboardRuntime::Impl {
     return true;
   }
 
-  void setPage(const std::string& id, size_t subpage, bool remember) {
+  void setPage(const std::string& id, bool remember) {
     const dash::Page* target = page(view, id);
     if (target == nullptr) return;
     if (remember && currentPage() != nullptr) {
       if (navigation.size() >= 12) navigation.erase(navigation.begin());
       const dash::PanelSpec* selected = focusedPanel();
-      navigation.push_back({page_id, page_index, selected == nullptr ? "" : selected->id,
-                            focused_event_id});
+      navigation.push_back({page_id, selected == nullptr ? "" : selected->id, focused_event_id});
     }
     page_id = id;
-    page_index = subpage;
     focus = 0;
     action_focus = 0;
     focused_event_id.clear();
@@ -689,16 +678,15 @@ struct DashboardRuntime::Impl {
 
   bool gotoPage(const std::string& id, bool remember = true) {
     if (page(view, id) == nullptr) return false;
-    setPage(id, 0, remember);
+    setPage(id, remember);
     return true;
   }
 
   bool focusPanel(const std::string& id, bool remember = true) {
     const dash::Page* owner = nullptr;
-    size_t subpage = 0;
-    const dash::PanelSpec* target = findPanel(id, &owner, &subpage);
+    const dash::PanelSpec* target = findPanel(id, &owner);
     if (target == nullptr || !target->visible || owner == nullptr) return false;
-    setPage(owner->id, subpage, remember);
+    setPage(owner->id, remember);
     for (size_t i = 0; i < layout.panels.size(); ++i) {
       if (layout.panels[i].panel != nullptr && layout.panels[i].panel->id == id) {
         focus = i;
@@ -715,7 +703,7 @@ struct DashboardRuntime::Impl {
     const Location previous = navigation.back();
     navigation.pop_back();
     if (page(view, previous.page_id) == nullptr) return false;
-    setPage(previous.page_id, previous.page_index, false);
+    setPage(previous.page_id, false);
     if (!previous.panel_id.empty()) {
       for (size_t i = 0; i < layout.panels.size(); ++i) {
         if (layout.panels[i].panel != nullptr && layout.panels[i].panel->id == previous.panel_id) {
@@ -729,54 +717,46 @@ struct DashboardRuntime::Impl {
     return true;
   }
 
-  void movePage(int delta) {
+  // Screens = visible pages, in order. 0-based index of the current screen.
+  size_t screenIndex() const {
     const std::vector<const dash::Page*> pages = visiblePages();
-    if (pages.empty()) return;
-    size_t index = 0;
     for (size_t i = 0; i < pages.size(); ++i) {
-      if (pages[i]->id == page_id) index = i;
+      if (pages[i]->id == page_id) return i;
     }
-    int64_t next = (static_cast<int64_t>(index) + delta) % static_cast<int64_t>(pages.size());
-    if (next < 0) next += static_cast<int64_t>(pages.size());
-    setPage(pages[static_cast<size_t>(next)]->id, 0, false);
+    return 0;
   }
 
-  // 上/下一屏：子屏优先，跨页循环（向前跨页落在上一页的最后一个子屏）。
-  void moveScreen(int delta) {
+  size_t screenCount() const { return visiblePages().size(); }
+
+  // Previous/next screen, wrapping around.
+  void movePage(int delta) {
     const std::vector<const dash::Page*> pages = visiblePages();
     if (pages.empty() || delta == 0) return;
-    int remaining = delta;
-    while (remaining != 0) {
-      const int step = remaining > 0 ? 1 : -1;
-      remaining -= step;
-      if (step > 0 && page_index + 1 < layout.page_count) {
-        setPage(page_id, page_index + 1, false);
-        continue;
-      }
-      if (step < 0 && page_index > 0) {
-        setPage(page_id, page_index - 1, false);
-        continue;
-      }
-      size_t index = 0;
-      for (size_t i = 0; i < pages.size(); ++i) {
-        if (pages[i]->id == page_id) index = i;
-      }
-      const size_t next = (index + pages.size() + static_cast<size_t>(step)) % pages.size();
-      setPage(pages[next]->id, 0, false);
-      if (step < 0 && layout.page_count > 1) setPage(page_id, layout.page_count - 1, false);
-    }
+    const int64_t count = static_cast<int64_t>(pages.size());
+    int64_t next = (static_cast<int64_t>(screenIndex()) + delta) % count;
+    if (next < 0) next += count;
+    setPage(pages[static_cast<size_t>(next)]->id, false);
+  }
+
+  // Show screen `index` (clamped); clears the jump-back stack like home().
+  bool showScreen(size_t index) {
+    const std::vector<const dash::Page*> pages = visiblePages();
+    if (pages.empty()) return false;
+    navigation.clear();
+    setPage(pages[std::min(index, pages.size() - 1)]->id, false);
+    return true;
   }
 
   void home() {
     const dash::Page* initial = defaultPage(view);
     if (initial == nullptr) return;
     navigation.clear();
-    setPage(initial->id, 0, false);
+    setPage(initial->id, false);
   }
 
   bool atHome() const {
     const dash::Page* initial = defaultPage(view);
-    return initial != nullptr && initial->id == page_id && page_index == 0;
+    return initial != nullptr && initial->id == page_id;
   }
 
   void moveFocus(int delta) {
@@ -798,23 +778,10 @@ struct DashboardRuntime::Impl {
       }
       const int64_t next = static_cast<int64_t>(focus) + step;
       if (next < 0) {
-        if (page_index > 0) {
-          --page_index;
-          rebuildLayout();
-          focus = layout.panels.empty() ? 0 : layout.panels.size() - 1;
-          force_full = true;
-        } else {
-          movePage(-1);
-        }
+        movePage(-1);
+        focus = layout.panels.empty() ? 0 : layout.panels.size() - 1;
       } else if (next >= static_cast<int64_t>(layout.panels.size())) {
-        if (page_index + 1 < layout.page_count) {
-          ++page_index;
-          rebuildLayout();
-          focus = 0;
-          force_full = true;
-        } else {
-          movePage(1);
-        }
+        movePage(1);
       } else {
         focus = static_cast<size_t>(next);
       }
@@ -1852,7 +1819,9 @@ struct DashboardRuntime::Impl {
   void touch(int16_t x, int16_t y) {
     if (!ready) return;
     if (y >= kStatusLineY) {
-      moveScreen(x < 276 ? -1 : 1);
+      // Virtual pager: left third = previous screen, right third = next screen.
+      const int zone = statusTouchZone(x);
+      if (zone != 0) movePage(zone);
       return;
     }
     ui::HitTarget target;
@@ -2215,24 +2184,29 @@ struct DashboardRuntime::Impl {
   static_assert(kStatusLineY + kStatusLineH == 28 + 712, "status line ends at the UI safe area");
   static_assert((kStatusLineY - 28 + 8) % 8 == 0, "layout rows land on whole pixels");
 
+  // Status-line touch zones (x in screen coordinates, line spans 28..524): with
+  // more than one screen the left third pages back and the right third pages
+  // forward (165 px each); the middle third (or the whole line with one screen)
+  // opens the alert banner. Returns -1 / +1 / 0. web grid.ts mirrors this.
+  int statusTouchZone(int16_t x) const {
+    if (screenCount() < 2) return 0;
+    if (x < 28 + 496 / 3) return -1;
+    if (x >= 28 + 496 - 496 / 3) return 1;
+    return 0;
+  }
+
   // 状态行内容：左 = 状态图标 + 标签（或临时消息/告警横幅），右 = 「更新于 HH:MM」
   // + 页码（深睡帧为电量 + 固定的「更新于」）。stamp_unix = 本帧的刷屏时刻。
   StatusLineContent composeStatus(std::string& banner_id, uint64_t stamp_unix = 0) {
     banner_id.clear();
     StatusLineContent out;
     out.icon = device_state.state;
-    const std::vector<const dash::Page*> pages = visiblePages();
-    size_t number = 0;
-    for (size_t i = 0; i < pages.size(); ++i) {
-      if (pages[i]->id == page_id) number = i + 1;
-    }
+    const size_t count = screenCount();
     char screen[24] = "";
-    if (layout.page_count > 1) {
-      std::snprintf(screen, sizeof(screen), "%u/%u.%u", static_cast<unsigned>(number),
-                    static_cast<unsigned>(pages.size()), static_cast<unsigned>(page_index + 1));
-    } else if (pages.size() > 1) {
-      std::snprintf(screen, sizeof(screen), "%u/%u", static_cast<unsigned>(number),
-                    static_cast<unsigned>(pages.size()));
+    if (count > 1) {
+      std::snprintf(screen, sizeof(screen), "%u/%u", static_cast<unsigned>(screenIndex() + 1),
+                    static_cast<unsigned>(count));
+      out.pager = !sleep_frame;
     }
     if (sleep_frame) {
       const std::string updated = updatedLabel(sleep_stamp_unix, tz_offset_min);
@@ -2300,7 +2274,7 @@ struct DashboardRuntime::Impl {
   }
 
   bool renderPreview(eego::PortraitCanvas& canvas, const dash::Dashboard& candidate,
-                     const std::string& wanted_page, size_t screen,
+                     const std::string& wanted_page,
                      DashboardRuntime::PreviewInfo& info) const {
     dash::Dashboard preview = candidate;
     const ui::PreviewData data =
@@ -2308,7 +2282,6 @@ struct DashboardRuntime::Impl {
     info.data = ui::previewDataName(data);
     ui::PreviewRenderOptions options;
     options.page_id = wanted_page;
-    options.screen = screen;
     options.layout_config = layoutConfig();
     // No network image provider: a preview never fetches remote assets (SD-local
     // images still load through the renderer's built-in SD provider).
@@ -2342,7 +2315,6 @@ struct DashboardRuntime::Impl {
     rebuildLayout();
     ui::RenderOptions options;
     options.page_id = page_id;
-    options.page_index = page_index;
     options.variables = variables;
     options.force_full = force_full;
     options.layout_config = layoutConfig();
@@ -2452,9 +2424,9 @@ struct DashboardRuntime::Impl {
       printf("dashboard: loaded=0 (onboarding screen) reason=%s\n", config_error.c_str());
       return;
     }
-    printf("dashboard: loaded=1 id=%s revision=%u page=%s subpage=%u focus=%s\n",
+    printf("dashboard: loaded=1 id=%s revision=%u page=%s screen=%u/%u focus=%s\n",
            config.id.c_str(), static_cast<unsigned>(revision), page_id.c_str(),
-           static_cast<unsigned>(page_index + 1),
+           static_cast<unsigned>(screenIndex() + 1), static_cast<unsigned>(screenCount()),
            focusedPanel() == nullptr ? "-" : focusedPanel()->id.c_str());
     printf("dashboard: pages=%u panels=%u sources=%u samples=%u events=%u cache=%d power=%s\n",
            static_cast<unsigned>(config.pages.size()),
@@ -2693,7 +2665,19 @@ void DashboardRuntime::movePage(int delta) {
   if (impl_ != nullptr && impl_->ready) impl_->movePage(delta);
 }
 void DashboardRuntime::moveScreen(int delta) {
-  if (impl_ != nullptr && impl_->ready) impl_->moveScreen(delta);
+  if (impl_ != nullptr && impl_->ready) impl_->movePage(delta);
+}
+bool DashboardRuntime::showScreen(size_t index) {
+  return impl_ != nullptr && impl_->ready && impl_->showScreen(index);
+}
+size_t DashboardRuntime::screenIndex() const {
+  return impl_ == nullptr || !impl_->ready ? 0 : impl_->screenIndex();
+}
+size_t DashboardRuntime::screenCount() const {
+  return impl_ == nullptr || !impl_->ready ? 0 : impl_->screenCount();
+}
+std::string DashboardRuntime::screenPageId() const {
+  return impl_ == nullptr || !impl_->ready ? std::string() : impl_->page_id;
 }
 void DashboardRuntime::home() {
   if (impl_ != nullptr && impl_->ready) impl_->home();
@@ -2703,8 +2687,7 @@ bool DashboardRuntime::atHome() const {
 }
 bool DashboardRuntime::firstScreen() const {
   if (impl_ == nullptr || !impl_->ready) return true;
-  const std::vector<const eego::dashboard::Page*> pages = impl_->visiblePages();
-  return impl_->page_index == 0 && (pages.empty() || pages.front()->id == impl_->page_id);
+  return impl_->screenIndex() == 0;
 }
 void DashboardRuntime::refreshCurrent() {
   if (impl_ != nullptr && impl_->ready) impl_->refresh("current");
@@ -2720,7 +2703,8 @@ void DashboardRuntime::activate() {
 }
 void DashboardRuntime::touch(int16_t x, int16_t y) {
   if (impl_ == nullptr || !impl_->ready) return;
-  if (y >= Impl::kStatusLineY && !impl_->banner_event_id.empty()) {
+  if (y >= Impl::kStatusLineY && impl_->statusTouchZone(x) == 0 &&
+      !impl_->banner_event_id.empty()) {
     if (impl_->findEvent(impl_->banner_event_id) != nullptr) {
       impl_->requestDetail({}, impl_->banner_event_id);
       return;
@@ -2777,13 +2761,12 @@ std::string DashboardRuntime::focusedControl() const {
 }
 bool DashboardRuntime::renderPreview(eego::PortraitCanvas& canvas,
                                      const eego::dashboard::Dashboard& candidate,
-                                     const std::string& page_id, size_t screen,
-                                     PreviewInfo& info) const {
+                                     const std::string& page_id, PreviewInfo& info) const {
   if (impl_ == nullptr) {
     info.error = "dashboard runtime unavailable";
     return false;
   }
-  return impl_->renderPreview(canvas, candidate, page_id, screen, info);
+  return impl_->renderPreview(canvas, candidate, page_id, info);
 }
 
 std::string DashboardRuntime::touchControl(int16_t x, int16_t y) const {

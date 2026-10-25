@@ -290,3 +290,21 @@ TEST(settings, battery_fields) {
   CHECK(schema.find("battery_poll_s") == std::string::npos);
   CHECK(schema.find("idle_sleep_s") == std::string::npos);
 }
+
+TEST(settings, screen_rotate_minutes) {
+  const Settings base;
+  CHECK_EQ(base.screen_rotate_min, 0u);  // carousel off by default
+  Settings out;
+  FieldErrors errors;
+  for (uint32_t minutes : {0u, 1u, 2u, 5u, 10u, 30u}) {
+    const std::string patch = "{\"screen_rotate_min\":" + std::to_string(minutes) + "}";
+    CHECK_MSG(patchOk(base, patch, out, errors), patch << " -> " << describe(errors));
+    CHECK_EQ(out.screen_rotate_min, minutes);
+  }
+  CHECK(!patchOk(base, R"({"screen_rotate_min":3})", out, errors));
+  CHECK(!patchOk(base, R"({"screen_rotate_min":60})", out, errors));
+  CHECK_MSG(patchOk(base, R"({"screen_rotate_min":5})", out, errors), describe(errors));
+  CHECK_EQ(changedFields(base, out), static_cast<uint32_t>(kChangedScreenRotate));
+  CHECK(std::string(schemaJson()).find("screen_rotate_min") != std::string::npos);
+  CHECK(toJson(out).toString().find("\"screen_rotate_min\":5") != std::string::npos);
+}

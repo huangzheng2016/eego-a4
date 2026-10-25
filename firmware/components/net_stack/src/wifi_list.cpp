@@ -2,6 +2,7 @@
 // WiFi 网络列表纯逻辑（见 wifi_list.h）。不得输出任何密码。
 #include "net_stack/wifi_list.h"
 
+#include <cstring>
 #include <utility>
 
 namespace eego::net {
@@ -369,6 +370,106 @@ bool WifiReconnectScheduler::driverRestartDue(int64_t now) const {
   if (offline_since_ms_ < 0) return false;
   const int64_t since = last_restart_ms_ >= 0 ? last_restart_ms_ : offline_since_ms_;
   return now - since >= kWifiDriverRestartMs;
+}
+
+// ---- 信号质量 / 链路统计 / 漫游 ------------------------------------------------
+
+WifiSignal wifiSignalQuality(int rssi) {
+  if (rssi >= 0) return WifiSignal::None;
+  if (rssi >= kWifiSignalExcellentDbm) return WifiSignal::Excellent;
+  if (rssi >= kWifiSignalGoodDbm) return WifiSignal::Good;
+  if (rssi >= kWifiSignalFairDbm) return WifiSignal::Fair;
+  return WifiSignal::Weak;
+}
+
+const char* wifiSignalName(WifiSignal s) {
+  switch (s) {
+    case WifiSignal::Excellent: return "excellent";
+    case WifiSignal::Good: return "good";
+    case WifiSignal::Fair: return "fair";
+    case WifiSignal::Weak: return "weak";
+    case WifiSignal::None: break;
+  }
+  return "none";
+}
+
+const char* wifiSignalLabel(WifiSignal s, bool english) {
+  switch (s) {
+    case WifiSignal::Excellent: return english ? "EXCELLENT" : "很好";
+    case WifiSignal::Good: return english ? "GOOD" : "良好";
+    case WifiSignal::Fair: return english ? "FAIR" : "一般";
+    case WifiSignal::Weak: return english ? "WEAK" : "很弱";
+    case WifiSignal::None: break;
+  }
+  return "—";
+}
+
+int wifiSignalBars(WifiSignal s) {
+  switch (s) {
+    case WifiSignal::Excellent: return 4;
+    case WifiSignal::Good: return 3;
+    case WifiSignal::Fair: return 2;
+    case WifiSignal::Weak: return 1;
+    case WifiSignal::None: break;
+  }
+  return 0;
+}
+
+const char kWifiWeakSignalHint[] =
+    "信号很弱：建议把设备移近路由器、固定 2.4GHz 信道（1/6/11）、20MHz 频宽";
+
+void WifiLinkStats::add(int64_t now, int rssi) {
+  last_ms_ = now;
+  if (rssi >= 0 || rssi < -128) return;
+  ring_[head_] = Sample{now, static_cast<int8_t>(rssi)};
+  head_ = (head_ + 1) % kCap;
+  if (count_ < kCap) count_++;
+}
+
+WifiLinkSummary WifiLinkStats::summary(int64_t now) const {
+  WifiLinkSummary out;
+  int sum = 0;
+  int64_t newest = -1;
+  for (size_t i = 0; i < count_; i++) {
+    const Sample& s = ring_[(head_ + kCap - 1 - i) % kCap];
+    if (now - s.at > kWifiLinkWindowMs) break;  // 由新到旧，越界即止
+    if (out.samples == 0 || s.rssi < out.min) out.min = s.rssi;
+    if (s.at > newest) {
+      newest = s.at;
+      out.last = s.rssi;
+    }
+    sum += s.rssi;
+    out.samples++;
+  }
+  if (out.samples > 0) {
+    // 向零取整的负数平均会偏乐观：按四舍五入。
+    const int n = static_cast<int>(out.samples);
+    out.avg = static_cast<int8_t>((sum - n / 2) / n);
+  }
+  return out;
+}
+
+bool WifiRoamPolicy::update(int64_t now, int rssi) {
+  if (rssi >= 0 || rssi >= kWifiRoamWeakDbm) {
+    weak_since_ms_ = -1;
+    return false;
+  }
+  if (weak_since_ms_ < 0) weak_since_ms_ = now;
+  if (now - weak_since_ms_ < kWifiRoamWeakMs) return false;
+  return last_scan_ms_ < 0 || now - last_scan_ms_ >= kWifiRoamIntervalMs;
+}
+
+int pickRoamTarget(const uint8_t current_bssid[6], int current_rssi,
+                   const std::vector<WifiBssCandidate>& candidates) {
+  int best = -1;
+  for (size_t i = 0; i < candidates.size(); i++) {
+    const WifiBssCandidate& c = candidates[i];
+    if (current_bssid != nullptr && std::memcmp(c.bssid, current_bssid, 6) == 0) continue;
+    if (c.channel == 0 || c.rssi >= 0) continue;
+    if (static_cast<int>(c.rssi) < current_rssi + kWifiRoamMinGainDb) continue;
+    if (best < 0 || c.rssi > candidates[static_cast<size_t>(best)].rssi) best = static_cast<int>(i);
+  }
+  return best;
 }
 
 }  // namespace eego::net

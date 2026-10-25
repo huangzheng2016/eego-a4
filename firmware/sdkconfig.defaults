@@ -38,8 +38,13 @@ CONFIG_FATFS_MAX_LFN=255
 # WiFi — 禁用 IRAM OP（与 PSRAM 冲突会导致 mgd_probe 崩溃）
 # 禁用 WiFi NVS（ppTask 中 nvs_open 会触发 esp_partition_main_flash_region_safe 崩溃）
 CONFIG_ESP_WIFI_ENABLED=y
-# TX 功率固定 20dBm（法规上限），不用 esp_wifi_set_max_tx_power() 运行时设置
+# TX 功率固定 20dBm（法规上限）。运行时只在 start 后生效值被压低时用
+# esp_wifi_set_max_tx_power(80)（单位 0.25dBm）恢复，并记录生效值（WifiManager）。
 CONFIG_ESP_PHY_MAX_WIFI_TX_POWER=20
+# 802.11k/v：mesh/多 AP 路由器的邻居报告与 BSS 切换建议（sta rm_enabled/btm_enabled）
+CONFIG_ESP_WIFI_11KV_SUPPORT=y
+CONFIG_ESP_WIFI_RRM_SUPPORT=y
+CONFIG_ESP_WIFI_WNM_SUPPORT=y
 # CONFIG_ESP_WIFI_NVS_ENABLED is not set
 # CONFIG_ESP_WIFI_IRAM_OPT is not set
 # CONFIG_ESP_WIFI_RX_IRAM_OPT is not set

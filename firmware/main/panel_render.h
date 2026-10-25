@@ -129,7 +129,7 @@ struct StatusBarModel {
   uint16_t batMv = 0;
   bool charging = false;
   int wifiState = 0;  // eego::net::WifiState 枚举值（int 避免 net_stack 依赖）
-  bool mains = true;  // true=常供电 false=电池
+  bool mains = true;  // true=外接电源（状态栏电池旁画插头）false=电池
   bool portalOpen = false;
   bool apFallback = false;
   size_t mutedCount = 0;  // 外部告警 store 静音记录数（快照内 muted 计数）

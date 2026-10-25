@@ -17,6 +17,24 @@ uint64_t nextRefreshBoundary(uint64_t unix_s, int timezone_offset_min, uint32_t 
   return static_cast<uint64_t>(next_local - offset);
 }
 
+uint64_t screenRotateEpoch(uint64_t unix_s, int64_t mono_ms, int timezone_offset_min,
+                           uint32_t period_min) {
+  if (period_min == 0) return 0;
+  const int64_t period = static_cast<int64_t>(period_min) * 60;
+  if (unix_s >= RefreshPolicy::kMinValidUnix) {
+    const int64_t local = static_cast<int64_t>(unix_s) + static_cast<int64_t>(timezone_offset_min) * 60;
+    return static_cast<uint64_t>(std::max<int64_t>(0, local) / period) + 1;  // +1：0 保留为「未设」
+  }
+  return static_cast<uint64_t>(std::max<int64_t>(0, mono_ms) / (period * 1000)) + 1;
+}
+
+bool screenRotateDue(uint64_t epoch, uint64_t last_epoch, int64_t mono_ms,
+                     int64_t last_interaction_ms, uint32_t period_min, bool previous_displayed) {
+  if (period_min == 0 || epoch == 0 || last_epoch == 0 || epoch == last_epoch) return false;
+  if (!previous_displayed) return false;
+  return mono_ms - last_interaction_ms >= static_cast<int64_t>(period_min) * 60000;
+}
+
 void RefreshPolicy::configure(const RefreshPolicyConfig& config) {
   const bool boundary_changed = config.idle_refresh_min != config_.idle_refresh_min ||
                                 config.timezone_offset_min != config_.timezone_offset_min;

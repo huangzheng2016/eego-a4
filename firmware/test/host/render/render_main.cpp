@@ -202,7 +202,9 @@ int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const f
     StatusBarModel bar;
     std::snprintf(bar.timeText, sizeof(bar.timeText), "10:05");
     bar.batPercent = 85;
-    bar.batMv = 4020;
+    bar.batMv = 3980;
+    bar.mains = true;
+    bar.charging = true;
     bar.wifiState = 2;
     bar.state = DeviceState::KeepAwake;
     std::snprintf(bar.stateText, sizeof(bar.stateText), "%s", deviceStateLabel(keep, kTz).c_str());
@@ -221,9 +223,18 @@ int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const f
       kv.big.back() = true;  // section headings: body-size bold
     };
     heading(Str::SecPower);
-    big(Str::LblMode, deviceStateLabel(keep, kTz));
-    big(Str::LblPower, std::string(tr(Str::ModeMains)) + " 85% · " + tr(Str::ReasonUsbHost));
-    big(Str::LblKeepAwake, lang == Lang::Zh ? "剩余 25 分 · 至 10:30" : "25MIN LEFT · UNTIL 10:30");
+    PowerStatusInput power;
+    power.external = true;
+    power.detail = PowerDetail::UsbHost;
+    power.charging = true;
+    power.battery_mv = 3980;
+    power.battery_pct = 85;
+    power.state = keep;
+    for (auto& row : powerStatusRows(power, kTz)) {
+      kv.rows.emplace_back(row.first, row.second);
+      kv.big.resize(kv.rows.size(), false);
+      kv.big.back() = true;
+    }
     big(Str::LblWakeReason, tr(Str::WakeReset));
     char sleeps[48];
     std::snprintf(sleeps, sizeof(sleeps), tr(Str::SleepsFmt), 3u);
@@ -268,6 +279,7 @@ int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const f
     canvas.clear();
     canvas.useUiContentRect();
     bar.state = DeviceState::Idle;
+    bar.charging = false;  // external power, battery full: plug, no bolt
     std::snprintf(bar.stateText, sizeof(bar.stateText), "%s", deviceStateLabel(idle, kTz).c_str());
     std::snprintf(bar.stateShort, sizeof(bar.stateShort), "%s",
                   deviceStateLabels(idle, kTz)[1].c_str());
@@ -294,6 +306,37 @@ int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const f
     drawSoftKeys(canvas, skeys, 3, static_cast<size_t>(-1));
     canvas.resetClip();
     save(std::string("settings_page") + suffix);
+
+    // Status page on battery after a key wake: no plug, auto-sleep countdown.
+    canvas.clear();
+    canvas.useUiContentRect();
+    bar.mains = false;
+    bar.state = DeviceState::Awake;
+    std::snprintf(bar.stateText, sizeof(bar.stateText), "%s", deviceStateLabel(awake, kTz).c_str());
+    std::snprintf(bar.stateShort, sizeof(bar.stateShort), "%s",
+                  deviceStateLabels(awake, kTz)[1].c_str());
+    drawStatusBar(canvas, bar);
+    kv = KvModel{};
+    heading(Str::SecPower);
+    power = PowerStatusInput{};
+    power.external = false;
+    power.battery_mv = 3870;
+    power.battery_pct = 62;
+    power.state = awake;
+    power.auto_sleep = true;
+    power.sleep_timeout_s = 60;
+    for (auto& row : powerStatusRows(power, kTz)) {
+      kv.rows.emplace_back(row.first, row.second);
+      kv.big.resize(kv.rows.size(), false);
+      kv.big.back() = true;
+    }
+    big(Str::LblWakeReason, tr(Str::WakeReset));
+    big(Str::LblSleeps, sleeps);
+    std::snprintf(kv.pageText, sizeof(kv.pageText), "1/3");
+    drawStatus(canvas, kv);
+    drawSoftKeys(canvas, keys, 3, 1);
+    canvas.resetClip();
+    save(std::string("status_page_battery") + suffix);
   }
   setLang(Lang::Zh);
   return failures;
@@ -377,6 +420,9 @@ int main(int argc, char** argv) {
     VariableValues variables;
     std::string error;
     defaultVariableValues(dash.variables, {}, variables, error);
+    size_t screens = 0;
+    for (const Page& page : dash.pages) screens += page.visible ? 1 : 0;
+    size_t screen = 0;
     for (const Page& page : dash.pages) {
       if (!page.visible) continue;
       ui::LayoutConfig config;
@@ -384,33 +430,33 @@ int main(int argc, char** argv) {
       config.content = ui::Rect{ui::kDashboardContent.x, ui::kDashboardContent.y,
                                 ui::kDashboardContent.w,
                                 static_cast<int16_t>(kStatusLineY - ui::kDashboardContent.y)};
-      const ui::PageLayout probe = ui::buildPageLayout(page, 0, config);
-      const size_t screens = std::max<size_t>(1, probe.page_count);
-      for (size_t screen = 0; screen < screens; ++screen) {
-        ui::DashboardRenderer renderer;
-        renderer.setImageProvider(&images);
-        ui::RenderOptions options;
-        options.page_id = page.id;
-        options.page_index = screen;
-        options.variables = variables;
-        options.force_full = true;
-        options.layout_config = config;
-        canvas.clear();
-        renderer.render(canvas, dash, options);
-        // Status line as the runtime draws it (state icon + label, updated time, screen).
-        panel::StatusLineContent line;
-        line.left = panel::deviceStateLabel(panel::DeviceStateInfo{}, kTz);
-        line.right = panel::updatedLabel(kSampleUnix, kTz) + " · " + std::to_string(screen + 1) +
-                     "/" + std::to_string(screens);
-        panel::drawStatusLine(canvas, 28, kStatusLineY, 496, kStatusLineH, line);
-        const std::string stem = name + "__" + page.id + "_" + std::to_string(screen) + ".png";
-        if (!writePng(display, out / stem, false) || !writePng(display, out / "fast" / stem, true)) {
-          std::fprintf(stderr, "%s: png write failed\n", stem.c_str());
-          ++failures;
-        } else {
-          sheet.add(display);
-          ++written;
-        }
+      ui::DashboardRenderer renderer;
+      renderer.setImageProvider(&images);
+      ui::RenderOptions options;
+      options.page_id = page.id;
+      options.variables = variables;
+      options.force_full = true;
+      options.layout_config = config;
+      canvas.clear();
+      renderer.render(canvas, dash, options);
+      // Status line as the runtime draws it (state icon + label, updated time, screen n/N,
+      // pager chevrons with more than one screen).
+      panel::StatusLineContent line;
+      line.left = panel::deviceStateLabel(panel::DeviceStateInfo{}, kTz);
+      line.right = panel::updatedLabel(kSampleUnix, kTz);
+      if (screens > 1) {
+        line.right += " · " + std::to_string(screen + 1) + "/" + std::to_string(screens);
+        line.pager = true;
+      }
+      panel::drawStatusLine(canvas, 28, kStatusLineY, 496, kStatusLineH, line);
+      const std::string stem = name + "__" + std::to_string(screen) + "_" + page.id + ".png";
+      ++screen;
+      if (!writePng(display, out / stem, false) || !writePng(display, out / "fast" / stem, true)) {
+        std::fprintf(stderr, "%s: png write failed\n", stem.c_str());
+        ++failures;
+      } else {
+        sheet.add(display);
+        ++written;
       }
     }
   }

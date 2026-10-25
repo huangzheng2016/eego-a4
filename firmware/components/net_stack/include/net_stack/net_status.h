@@ -24,6 +24,14 @@ struct WifiStatus {
   uint32_t disconnects = 0;            // 已连接后掉线的累计次数
   uint32_t driver_restarts = 0;        // 长时间离线触发的 esp_wifi stop/start 次数
   uint32_t offline_ms = 0;             // 当前连续离线时长（在线为 0）
+  // 链路质量（WifiManager::linkInfo；信号分档见 wifi_list.h wifiSignalQuality）
+  uint32_t rssi_samples = 0;           // 近 10 分钟 RSSI 样本数（0 = 无，min/avg 无意义）
+  int rssi_min = 0;
+  int rssi_avg = 0;
+  uint32_t beacon_timeouts = 0;        // beacon 丢失事件累计
+  uint32_t roams = 0;                  // 成功漫游次数
+  int32_t last_dhcp_ms = -1;           // 最近一次连接 关联→拿到 IP 耗时（-1 = 无）
+  int tx_power_qdbm = 0;               // 生效最大发射功率（0.25 dBm；0 = 未知）
 };
 
 // 统一时间源状态（net_task 用 time_fn/time_valid_fn 填充；SNTP 状态由

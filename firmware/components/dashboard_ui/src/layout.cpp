@@ -15,36 +15,26 @@ int32_t edge(uint64_t boundary, uint64_t cells, int32_t length, int32_t gap) {
 
 }  // namespace
 
-PageLayout buildPageLayout(const Page& page, size_t page_index, const LayoutConfig& config) {
+PageLayout buildPageLayout(const Page& page, const LayoutConfig& config) {
   PageLayout out;
-  out.page_index = page_index;
   out.content = config.content;
-
-  uint64_t last_screen = 0;
-  for (const PanelSpec& panel : page.panels) {
-    if (!panel.visible) continue;
-    last_screen = std::max<uint64_t>(last_screen, gridScreenIndex(panel.grid));
-  }
-  out.page_count = static_cast<size_t>(last_screen + 1);
-
   if (page.grid_columns == 0 || config.content.empty() || config.gap_x < 0 ||
       config.gap_y < 0 || config.panel_inset < 0) {
     return out;
   }
   out.valid = true;
-  if (page_index >= out.page_count) return out;
 
   const int32_t width = config.content.w;
   const int32_t height = config.content.h;
   for (size_t index = 0; index < page.panels.size(); ++index) {
     const PanelSpec& panel = page.panels[index];
-    if (!panel.visible || panel.grid.w == 0 || panel.grid.h == 0) continue;
-    if (gridScreenIndex(panel.grid) != page_index || panel.grid.x >= page.grid_columns) continue;
+    if (!panel.visible || panel.grid.w == 0 || !gridFitsScreen(panel.grid)) continue;
+    if (panel.grid.x >= page.grid_columns) continue;
 
     const uint32_t column = panel.grid.x;
     const uint32_t column_span = std::min<uint32_t>(panel.grid.w, page.grid_columns - column);
-    const uint32_t row = gridScreenRow(panel.grid);
-    const uint32_t row_span = std::min<uint32_t>(panel.grid.h, kRowsPerPage - row);
+    const uint32_t row = panel.grid.y;
+    const uint32_t row_span = panel.grid.h;
 
     const int32_t left = edge(column, page.grid_columns, width, config.gap_x);
     const int32_t right = edge(static_cast<uint64_t>(column) + column_span, page.grid_columns,

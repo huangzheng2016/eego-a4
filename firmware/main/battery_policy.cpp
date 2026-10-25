@@ -402,70 +402,139 @@ const char* powerReasonName(PowerReason reason) {
   return "battery";
 }
 
-void MainsDetector::latch(uint16_t mv, int64_t now_ms) {
-  latched_ = true;
-  peak_mv_ = mv;
-  peak_ms_ = now_ms;
+void MainsDetector::decide(bool mains, PowerReason reason) {
+  mains_ = mains;
+  reason_ = reason;
 }
 
-void MainsDetector::seedColdBoot(uint16_t battery_mv, int64_t now_ms) {
-  if (battery_mv >= kMainsHoldMv) latch(battery_mv, now_ms);
+uint16_t MainsDetector::filteredMv() const {
+  if (raw_count_ == 0) return 0;
+  if (raw_count_ < 3) return raw_[raw_count_ - 1];
+  uint16_t v[3] = {raw_[0], raw_[1], raw_[2]};
+  std::sort(v, v + 3);
+  return v[1];
+}
+
+void MainsDetector::pushHistory(int64_t ms, uint16_t mv) {
+  size_t keep = 0;
+  for (size_t i = 0; i < history_count_; ++i) {
+    if (ms - history_[i].ms <= kDropWindowMs) history_[keep++] = history_[i];
+  }
+  history_count_ = keep;
+  if (history_count_ == kHistoryCap) {
+    for (size_t i = 1; i < kHistoryCap; ++i) history_[i - 1] = history_[i];
+    --history_count_;
+  }
+  history_[history_count_++] = Point{ms, mv};
+}
+
+bool MainsDetector::dropDetected(uint16_t filtered) const {
+  uint16_t peak = 0;
+  for (size_t i = 0; i < history_count_; ++i) peak = std::max(peak, history_[i].mv);
+  return peak >= filtered && peak - filtered >= kUnplugDropMv;
 }
 
 bool MainsDetector::update(uint8_t power_mode, const PowerSample& s, int64_t now_ms) {
+  // 证据在任何模式下都跟踪：切回 auto 时立即可用。
+  const bool host_dropped = usb_host_prev_ && !s.usb_host;
+  usb_host_prev_ = s.usb_host;
+  if (s.charging) {
+    charging_ = true;
+    charge_off_since_ms_ = -1;
+  } else if (charging_) {
+    if (host_dropped) {
+      charging_ = false;  // 从电脑上拔下：不等去抖
+    } else {
+      if (charge_off_since_ms_ < 0) charge_off_since_ms_ = now_ms;
+      if (now_ms - charge_off_since_ms_ >= kChargeOffDebounceMs) charging_ = false;
+    }
+  }
+  if (charging_) last_charge_ms_ = now_ms;
+
+  const int64_t read_ms = s.battery_read_ms >= 0 ? s.battery_read_ms : now_ms;
+  const bool fresh = s.battery_mv > 0 && read_ms != last_read_ms_;
+  if (fresh) {
+    last_read_ms_ = read_ms;
+    if (raw_count_ == 3) {
+      raw_[0] = raw_[1];
+      raw_[1] = raw_[2];
+      raw_count_ = 2;
+    }
+    raw_[raw_count_++] = s.battery_mv;
+  }
+  const uint16_t filtered = filteredMv();
+
   if (power_mode == 1) {
-    mains_ = true;
-    reason_ = PowerReason::ForcedMains;
+    decide(true, PowerReason::ForcedMains);
     return mains_;
   }
   if (power_mode == 2) {
-    mains_ = false;
-    reason_ = PowerReason::ForcedBattery;
     latched_ = false;
+    decide(false, PowerReason::ForcedBattery);
     return mains_;
   }
   if (s.battery_mv == 0) {
-    mains_ = true;
-    reason_ = PowerReason::NoBattery;
+    decide(true, PowerReason::NoBattery);
     return mains_;
   }
-  if (s.charging || s.usb_host) {
-    // 外部供电确凿：锁存并以当前电压为峰值基准（充电中电压被抬高，停充后回落
-    // 到满电静置电压不算拔电——峰值在不充电时才开始跟踪）。
-    latch(s.battery_mv, now_ms);
-    mains_ = true;
-    reason_ = s.charging ? PowerReason::Charging : PowerReason::UsbHost;
+  if (charging_) {
+    armed_ = !s.usb_host;
+    latched_ = false;
+    history_count_ = 0;
+    // 接着电脑充电时报 usb_host（「充电中」由电量行显示，避免重复）。
+    decide(true, s.usb_host ? PowerReason::UsbHost : PowerReason::Charging);
     return mains_;
   }
-  if (latched_) {
-    if (reason_ == PowerReason::Charging || reason_ == PowerReason::UsbHost) {
-      // 刚停止充电/USB 主机断开：从此刻重新建立峰值基准。
-      peak_mv_ = s.battery_mv;
-      peak_ms_ = now_ms;
+  if (s.usb_host) {
+    armed_ = false;
+    latched_ = false;
+    decide(true, PowerReason::UsbHost);
+    return mains_;
+  }
+  if (host_dropped) {
+    armed_ = false;
+    latched_ = false;
+    decide(false, PowerReason::Battery);
+    return mains_;
+  }
+  if (armed_) {
+    if (!latched_) {
+      // 刚停充：电压仍在满电区才锁存（充电头供电、电池已满），否则是拔电。
+      if (filtered < kHoldEnterMv) {
+        armed_ = false;
+        decide(false, PowerReason::BelowHold);
+        return mains_;
+      }
+      latched_ = true;
+      settle_until_ms_ = now_ms + kSettleMs;
+      history_count_ = 0;
     }
-    if (s.battery_mv < kMainsHoldMv) {
-      latched_ = false;
-      mains_ = false;
-      reason_ = PowerReason::BelowHold;
+    PowerReason release = PowerReason::FullHold;
+    if (now_ms - last_charge_ms_ > kChargeRecentMs) {
+      release = PowerReason::Battery;
+    } else if (filtered < kHoldExitMv) {
+      release = PowerReason::BelowHold;
+    } else if (now_ms < settle_until_ms_) {
+      history_count_ = 0;  // 停充后的电压回落不算拔电
+    } else {
+      if (fresh) pushHistory(read_ms, filtered);
+      if (dropDetected(filtered)) release = PowerReason::VoltageDrop;
+    }
+    if (release == PowerReason::FullHold) {
+      decide(true, PowerReason::FullHold);
       return mains_;
     }
-    if (s.battery_mv >= peak_mv_) {
-      peak_mv_ = s.battery_mv;
-      peak_ms_ = now_ms;
-    } else if (peak_mv_ - s.battery_mv >= kUnplugDropMv && now_ms - peak_ms_ >= kUnplugWindowMs) {
-      latched_ = false;
-      mains_ = false;
-      reason_ = PowerReason::VoltageDrop;
-      return mains_;
-    }
-    mains_ = true;
-    reason_ = PowerReason::FullHold;
+    armed_ = false;
+    latched_ = false;
+    history_count_ = 0;
+    decide(false, release);
     return mains_;
   }
-  mains_ = false;
-  if (reason_ != PowerReason::VoltageDrop && reason_ != PowerReason::BelowHold) {
+  // 保留最近一次「为什么判为电池」的原因（电压下降/偏低），否则为 battery。
+  if (mains_ || (reason_ != PowerReason::VoltageDrop && reason_ != PowerReason::BelowHold)) {
     reason_ = PowerReason::Battery;
   }
+  mains_ = false;
   return mains_;
 }
 

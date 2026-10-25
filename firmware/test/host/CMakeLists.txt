@@ -84,7 +84,7 @@ target_link_options(fw_under_test PUBLIC ${HT_SAN})
 set(TEST_SUITES dashboard layout expression pipeline gesture settings probe_mask alert_store atomic_file
     refresh_policy battery_policy confirm wifi_list)
 list(APPEND TEST_SUITES touch_cal)
-list(APPEND TEST_SUITES keep_awake power_source)
+list(APPEND TEST_SUITES keep_awake power_source device_screen screen_rotate)
 add_executable(firmware_host_tests
   test_main.cpp
   test_dashboard.cpp

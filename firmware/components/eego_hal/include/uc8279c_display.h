@@ -75,6 +75,10 @@ public:
     void requestFullRefresh() { fullRequested_ = true; }  // 下一次 display() 走 Full
     void setFastRefreshLimit(uint8_t n) { fastRefreshLimit_ = n; }  // 0=不自动升级
     uint8_t fastRefreshLimit() const { return fastRefreshLimit_; }
+    // 任一实屏实例正在刷新（面板高压/波形进行中）。WiFi 扫描/关联据此短暂避让
+    // 刷新期间的射频噪声（见 net_stack WifiManager）。任意任务可调用。
+    static bool refreshActive();
+
     void setAutoPowerOff(bool on) { autoPowerOff_ = on; }  // 每次刷新后关闭面板高压
     bool autoPowerOff() const { return autoPowerOff_; }
 

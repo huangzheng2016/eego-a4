@@ -194,25 +194,44 @@ void rtcSeal(RtcState& state);
 bool rtcValid(const RtcState& state);
 
 // 简单供电判定（DeviceSettings PowerMode：0 auto / 1 mains / 2 battery）：auto 时
-// 无电池读数或充电中视为常供电。注意：GPIO11 是「充电状态」而非 VBUS——电池充满
+// 无电池读数或充电中视为外接电源（深睡定时唤醒的快速路径用）。注意：GPIO11 是「充电状态」而非 VBUS——电池充满
 // 后充电停止，单凭它会把插着 USB 的设备误判为电池供电。设备侧一律用 MainsDetector。
 bool mainsPowered(uint8_t power_mode, bool charging, uint16_t battery_mv);
 
-// ── 供电来源判定（带锁存与滞回）──────────────────────────────────────────────
+// ── 供电来源判定（证据 + 有限锁存）──────────────────────────────────────────
 //
-// auto 模式下按优先级：
-//   1. 无电池读数（0 mV）                  → 常供电（no_battery）
-//   2. 充电中                              → 常供电，并锁存（charging）
-//   3. USB 主机已连接（USB-Serial-JTAG SOF）→ 常供电，并锁存（usb_host）
-//   4. 已锁存（曾判定为常供电，或冷启动时电压 ≥ kMainsHoldMv）：电池满电后充电停止，
-//      只要电压仍 ≥ kMainsHoldMv 且未持续下降就保持常供电（full_hold）；锁存期内
-//      记录电压峰值，自峰值起 ≥ kUnplugWindowMs 后电压仍低于峰值 kUnplugDropMv 以上，
-//      或电压跌破 kMainsHoldMv → 判定拔电（voltage_drop / below_hold）；
-//   5. 其余                                → 电池（battery）。
-// 强制模式：mains → 常供电（forced_mains）；battery → 电池（forced_battery）。
-inline constexpr uint16_t kMainsHoldMv = 4050;
-inline constexpr uint16_t kUnplugDropMv = 60;
-inline constexpr int64_t kUnplugWindowMs = 120000;
+// 硬件事实：没有 VBUS 检测脚，只有两条正面证据：
+//   * 充电状态（GPIO11 / 电量计）：只在「正在充电」时有效，充满或拔掉时都无效；
+//   * USB 主机（usb_serial_jtag_is_connected）：接的是电脑（有 SOF）；纯充电头没有。
+//
+// auto 模式按优先级：
+//   1. 无电池读数（0 mV）                         → 外接电源（no_battery）
+//   2. 充电中（去抖：置位立即生效，清除需持续 kChargeOffDebounceMs）→ 外接电源（charging）
+//   3. USB 主机已连接                             → 外接电源（usb_host）
+//   4. USB 主机刚断开且未在充电                   → 立即判为电池（从电脑上拔下，不锁存）
+//   5. 锁存（只在最后一条正面证据是「充电中」且无 USB 主机，即充电头供电时）：
+//      停充瞬间滤波电压 ≥ kHoldEnterMv 才锁存为外接电源（full_hold）；锁存期间
+//      不充电且满足任一条件即判为电池：
+//        - 滤波电压 < kHoldExitMv（below_hold）；
+//        - 停充 kSettleMs 之后，kDropWindowMs 内滤波电压自窗口最高值下降
+//          ≥ kUnplugDropMv（voltage_drop）；
+//        - 距上次看到充电已超过 kChargeRecentMs（battery；充电头满电时会周期性补电，
+//          补电重新置位锁存）。
+//      滤波 = 最近 3 次电压读数的中值。
+//   6. 其余                                       → 电池（battery）。
+// 开机不凭电压锁存：只有开机期间看到充电才可能进入锁存。
+// 强制模式：mains → 外接电源（forced_mains）；battery → 电池（forced_battery）。
+// 残余滞后：从充电头上拔下满电设备，要等电压在负载下下降 ≥ 25 mV（典型 2–3 分钟），
+// 最长 kChargeRecentMs；需要立即生效时用 设置 → 供电模式 强制。
+inline constexpr uint16_t kHoldEnterMv = 4150;
+inline constexpr uint16_t kHoldExitMv = 4120;
+inline constexpr uint16_t kUnplugDropMv = 25;
+inline constexpr int64_t kDropWindowMs = 180000;
+inline constexpr int64_t kSettleMs = 120000;
+inline constexpr int64_t kChargeRecentMs = 20 * 60000;
+inline constexpr int64_t kChargeOffDebounceMs = 10000;
+// 锁存/充电头充电期间设备侧的电压采样间隔（平时 60 s）。
+inline constexpr int64_t kFastBatterySampleMs = 10000;
 
 enum class PowerReason : uint8_t {
   ForcedMains = 0,
@@ -231,26 +250,45 @@ struct PowerSample {
   bool charging = false;
   bool usb_host = false;
   uint16_t battery_mv = 0;
+  // 这次电压读数的时刻（同一读数重复传入不会重复进滤波/历史）；<0 = 用 now_ms。
+  int64_t battery_read_ms = -1;
 };
 
 class MainsDetector {
  public:
-  // 冷启动（非深睡唤醒）且电压 ≥ kMainsHoldMv：插着充电器开机、电池已满时充电
-  // 指示不亮，预先锁存，随后由滞回在几分钟内识别是否真的在用电池。
-  void seedColdBoot(uint16_t battery_mv, int64_t now_ms);
-  // 每次新采样（或模式变化）调用；返回是否常供电。
+  // 每次新采样（或模式变化）调用；返回是否外接电源。
   bool update(uint8_t power_mode, const PowerSample& sample, int64_t now_ms);
   bool mains() const { return mains_; }
   PowerReason reason() const { return reason_; }
   bool latched() const { return latched_; }
+  // 充电头充电/锁存期间需要更密的电压采样（拔电检测靠电压下降）。
+  bool wantsFastSamples() const { return armed_; }
 
  private:
-  void latch(uint16_t mv, int64_t now_ms);
-  bool mains_ = true;
-  PowerReason reason_ = PowerReason::NoBattery;
-  bool latched_ = false;
-  uint16_t peak_mv_ = 0;
-  int64_t peak_ms_ = 0;
+  struct Point {
+    int64_t ms;
+    uint16_t mv;
+  };
+  static constexpr size_t kHistoryCap = 48;
+  void decide(bool mains, PowerReason reason);
+  uint16_t filteredMv() const;
+  bool dropDetected(uint16_t filtered) const;
+  void pushHistory(int64_t ms, uint16_t mv);
+
+  bool mains_ = false;
+  PowerReason reason_ = PowerReason::Battery;
+  bool charging_ = false;          // 去抖后的充电状态
+  int64_t charge_off_since_ms_ = -1;
+  int64_t last_charge_ms_ = 0;
+  bool usb_host_prev_ = false;
+  bool armed_ = false;             // 最后一条正面证据 = 充电（无 USB 主机）
+  bool latched_ = false;           // 满电保持中
+  int64_t settle_until_ms_ = 0;
+  int64_t last_read_ms_ = -1;
+  uint16_t raw_[3] = {0, 0, 0};
+  size_t raw_count_ = 0;
+  Point history_[kHistoryCap] = {};
+  size_t history_count_ = 0;
 };
 
 // 电池交互期 / 常供电夜间暂停是否应进入深睡：保持唤醒（keep_awake_until_ms 为单调

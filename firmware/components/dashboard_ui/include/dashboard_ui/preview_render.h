@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Offscreen preview render of one page/screen of a dashboard with the real
+// Offscreen preview render of one page (= one screen) of a dashboard with the real
 // renderer, plus 4-bpp packing of the result (admin render-preview endpoint).
 // The canvas must wrap an offscreen Uc8279cDisplay (beginOffscreen()), never
 // the live display.
@@ -19,7 +19,6 @@ namespace eego::dashboard::ui {
 
 struct PreviewRenderOptions {
   std::string page_id;          // empty = default page / first visible page
-  size_t screen = 0;
   LayoutConfig layout_config;   // same content area as the device runtime
   const VariableValues* variables = nullptr;  // null = the dashboard's defaults
   ImageProvider* images = nullptr;            // null = image panels show their fallback
@@ -27,14 +26,14 @@ struct PreviewRenderOptions {
 
 struct PreviewRenderResult {
   bool ok = false;
-  bool bad_request = false;  // unknown page / screen out of range (vs. internal failure)
+  bool bad_request = false;  // unknown page (vs. internal failure)
   std::string error;
   std::string page_id;
-  size_t screen = 0;
-  size_t screen_count = 0;
+  size_t screen = 0;        // index of the page among visible pages
+  size_t screen_count = 0;  // visible pages (= device screens)
 };
 
-// Clears the canvas and renders the page/screen with a fresh DashboardRenderer.
+// Clears the canvas and renders the page with a fresh DashboardRenderer.
 PreviewRenderResult renderPreviewPage(PortraitCanvas& canvas, const Dashboard& dashboard,
                                       const PreviewRenderOptions& options);
 

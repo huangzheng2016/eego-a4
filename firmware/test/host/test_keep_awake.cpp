@@ -2,6 +2,7 @@
 // Keep-awake ("config mode") override: timing helpers (admin/keep_awake.h), its
 // interplay with the idle refresh cadence (refresh_policy) and battery sleep gating
 // (battery_policy), plus the mains/battery source detector with latch + hysteresis.
+#include "admin/device_screen.h"
 #include "admin/keep_awake.h"
 #include "battery_policy.h"
 #include "refresh_policy.h"
@@ -110,6 +111,31 @@ TEST(keep_awake, blocks_battery_interactive_sleep) {
   CHECK(!bat::keepAwakeBlocks(2, 0));
 }
 
+namespace {
+
+constexpr int64_t kSec = 1000;
+
+// Feeds samples every `step` ms; returns the first time the detector says battery
+// (or -1). `mv(t)` gives the voltage at absolute time t.
+template <typename Mv>
+int64_t runUntilBattery(bat::MainsDetector& d, bat::PowerSample s, int64_t from, int64_t to,
+                        int64_t step, Mv mv) {
+  for (int64_t t = from; t <= to; t += step) {
+    s.battery_mv = mv(t);
+    s.battery_read_ms = t;
+    if (!d.update(0, s, t)) return t;
+  }
+  return -1;
+}
+
+// Deterministic ±10 mV ADC noise.
+uint16_t noisy(int base, int64_t t) {
+  const uint32_t x = static_cast<uint32_t>(t / 1000) * 2654435761u;
+  return static_cast<uint16_t>(base + static_cast<int>((x >> 16) % 21) - 10);
+}
+
+}  // namespace
+
 TEST(power_source, charging_and_usb_are_always_mains) {
   bat::MainsDetector d;
   bat::PowerSample s;
@@ -117,13 +143,15 @@ TEST(power_source, charging_and_usb_are_always_mains) {
   s.charging = true;
   CHECK(d.update(0, s, 0));
   CHECK(d.reason() == bat::PowerReason::Charging);
-  s.charging = false;
   s.usb_host = true;
   CHECK(d.update(0, s, 1000));
+  CHECK(d.reason() == bat::PowerReason::UsbHost);  // charging shown in the battery row
+  s.charging = false;
+  CHECK(d.update(0, s, 2000));
   CHECK(d.reason() == bat::PowerReason::UsbHost);
   s.usb_host = false;
   s.battery_mv = 0;
-  CHECK(d.update(0, s, 2000));
+  CHECK(d.update(0, s, 3000));
   CHECK(d.reason() == bat::PowerReason::NoBattery);
 }
 
@@ -139,71 +167,170 @@ TEST(power_source, forced_modes) {
   CHECK_EQ(std::string(bat::powerReasonName(bat::PowerReason::FullHold)), std::string("full_hold"));
 }
 
-TEST(power_source, full_battery_on_usb_stays_mains) {
+TEST(power_source, unplug_from_host_is_battery_within_one_sample) {
+  // Full battery on a computer: CHG inactive, only the USB host is evidence.
   bat::MainsDetector d;
   bat::PowerSample s;
-  s.battery_mv = 4120;
+  s.usb_host = true;
+  s.battery_mv = 4190;
+  for (int64_t t = 0; t < 30 * kMin; t += 5 * kSec) CHECK(d.update(0, s, t));
+  CHECK(d.reason() == bat::PowerReason::UsbHost);
+  s.usb_host = false;  // unplugged: voltage still at full
+  CHECK(!d.update(0, s, 30 * kMin));
+  CHECK(d.reason() == bat::PowerReason::Battery);
+  // Charging on the computer, then unplugged: no charge debounce delay either.
+  bat::MainsDetector e;
+  s.usb_host = true;
   s.charging = true;
-  CHECK(d.update(0, s, 0));
-  // Charger terminates: CHG pin goes inactive, voltage settles near full.
+  s.battery_mv = 4170;
+  CHECK(e.update(0, s, 0));
+  s.usb_host = false;
   s.charging = false;
-  s.battery_mv = 4180;
-  int64_t t = 60000;
-  for (int i = 0; i < 120; ++i, t += 60000) {  // two hours, ±20 mV ADC noise
-    s.battery_mv = static_cast<uint16_t>(4170 + (i % 3) * 10 - 10);
-    CHECK(d.update(0, s, t));
-  }
-  CHECK(d.reason() == bat::PowerReason::FullHold);
-  // Recharge cycle restarts: still mains.
+  CHECK(!e.update(0, s, 5 * kSec));
+  // Charging finished while on the computer: no voltage latch after unplug.
+  bat::MainsDetector f;
+  s.usb_host = true;
   s.charging = true;
-  s.battery_mv = 4100;
-  CHECK(d.update(0, s, t));
+  f.update(0, s, 0);
+  s.charging = false;
+  for (int64_t t = 5 * kSec; t < 5 * kMin; t += 5 * kSec) CHECK(f.update(0, s, t));
+  s.usb_host = false;
+  CHECK(!f.update(0, s, 5 * kMin));
+  CHECK(!f.latched());
 }
 
-TEST(power_source, unplug_detected_within_minutes) {
+TEST(power_source, wall_charger_full_battery_stays_external_with_recharge_cycles) {
   bat::MainsDetector d;
   bat::PowerSample s;
   s.charging = true;
-  s.battery_mv = 4190;
-  d.update(0, s, 0);
-  s.charging = false;
-  d.update(0, s, 60000);
-  // Unplugged at t=2 min: voltage sags under WiFi load ~10 mV/min.
-  int64_t detected = -1;
-  for (int i = 0; i <= 15; ++i) {
-    const int64_t t = 120000 + i * 60000;
-    s.battery_mv = static_cast<uint16_t>(4190 - 10 * i);
-    if (!d.update(0, s, t)) {
-      detected = t;
-      break;
+  s.battery_mv = 4200;
+  CHECK(d.update(0, s, 0));
+  CHECK(d.wantsFastSamples());
+  // Two hours: charger idle for 15 min (voltage relaxes 4200 → ~4170 with ±10 mV
+  // noise), then a 1-minute top-up, repeat.
+  int64_t t = 10 * kSec;
+  const int64_t step = 10 * kSec;
+  while (t < 2 * 60 * kMin) {
+    const int64_t idle_end = t + 15 * kMin;
+    const int64_t idle_start = t;
+    for (; t < idle_end; t += step) {
+      s.charging = false;
+      const int64_t since = t - idle_start;
+      const int base = since < 2 * kMin ? 4200 - static_cast<int>(since / (4 * kSec)) : 4170;
+      s.battery_mv = noisy(base, t);
+      s.battery_read_ms = t;
+      CHECK(d.update(0, s, t));
+    }
+    CHECK(d.reason() == bat::PowerReason::FullHold);
+    for (const int64_t end = t + kMin; t < end; t += step) {
+      s.charging = true;
+      s.battery_mv = noisy(4195, t);
+      s.battery_read_ms = t;
+      CHECK(d.update(0, s, t));
     }
   }
-  CHECK(detected > 0);
-  CHECK(detected <= 120000 + 8 * 60000);
-  CHECK(d.reason() == bat::PowerReason::VoltageDrop);
-  // Unplugged mid-charge (below the hold voltage) → battery immediately.
+  // No top-up for longer than 20 min → no longer trusted as external power.
   bat::MainsDetector e;
   s.charging = true;
-  s.battery_mv = 3950;
-  CHECK(e.update(0, s, 0));
+  s.battery_mv = 4190;
+  e.update(0, s, 0);
   s.charging = false;
-  s.battery_mv = 3930;
-  CHECK(!e.update(0, s, 1000));
-  CHECK(e.reason() == bat::PowerReason::BelowHold);
+  const int64_t gone = runUntilBattery(e, s, 10 * kSec, 30 * kMin, 10 * kSec,
+                                       [](int64_t) -> uint16_t { return 4175; });
+  CHECK(gone > 20 * kMin);
+  CHECK(gone <= 20 * kMin + 20 * kSec);
+  CHECK(e.reason() == bat::PowerReason::Battery);
 }
 
-TEST(power_source, cold_boot_seed_and_plain_battery) {
+TEST(power_source, unplug_from_wall_charger_with_full_battery) {
+  bat::MainsDetector d;
   bat::PowerSample s;
-  s.battery_mv = 4150;
-  bat::MainsDetector seeded;
-  seeded.seedColdBoot(4150, 0);
-  CHECK(seeded.update(0, s, 0));
-  CHECK(seeded.reason() == bat::PowerReason::FullHold);
+  s.charging = true;
+  s.battery_mv = 4195;
+  d.update(0, s, 0);
+  s.charging = false;
+  // Holding at full for 5 minutes.
+  CHECK(runUntilBattery(d, s, 10 * kSec, 5 * kMin, 10 * kSec,
+                        [](int64_t t) { return noisy(4175, t); }) < 0);
+  CHECK(d.reason() == bat::PowerReason::FullHold);
+  // Unplugged at 5 min: load moves to the battery, ~10 mV/min decline (WiFi on).
+  const int64_t unplug = 5 * kMin;
+  const int64_t found =
+      runUntilBattery(d, s, unplug + 10 * kSec, unplug + 20 * kMin, 10 * kSec, [&](int64_t t) {
+        return noisy(4175 - static_cast<int>((t - unplug) / 6000), t);
+      });
+  CHECK(found > 0);
+  CHECK(found - unplug <= 3 * kMin + 30 * kSec);
+  CHECK(d.reason() == bat::PowerReason::VoltageDrop);
+  // A single low ADC spike does not release the latch (median filter).
+  bat::MainsDetector e;
+  s.charging = true;
+  e.update(0, s, 0);
+  s.charging = false;
+  CHECK(runUntilBattery(e, s, 10 * kSec, 10 * kMin, 10 * kSec, [](int64_t t) -> uint16_t {
+          return t == 5 * kMin ? 4100 : 4175;
+        }) < 0);
+  // Unplugged mid-charge (below the hold voltage) → battery once the charge pin settles.
+  bat::MainsDetector f;
+  s.charging = true;
+  s.battery_mv = 3950;
+  s.battery_read_ms = -1;
+  CHECK(f.update(0, s, 0));
+  s.charging = false;
+  s.battery_mv = 3930;
+  CHECK(f.update(0, s, 5 * kSec));  // charge pin debounce (10 s)
+  CHECK(!f.update(0, s, 15 * kSec));
+  CHECK(f.reason() == bat::PowerReason::BelowHold);
+}
+
+TEST(power_source, boot_does_not_latch_from_voltage_alone) {
+  bat::PowerSample s;
+  s.battery_mv = 4190;
   bat::MainsDetector plain;
   CHECK(!plain.update(0, s, 0));
   CHECK(plain.reason() == bat::PowerReason::Battery);
-  bat::MainsDetector low;
-  low.seedColdBoot(3900, 0);
-  s.battery_mv = 3900;
-  CHECK(!low.update(0, s, 0));
+  CHECK(!plain.update(0, s, 60 * kSec));
+  // Charging seen during boot → latches once the charger tops off.
+  bat::MainsDetector charged;
+  s.charging = true;
+  CHECK(charged.update(0, s, 0));
+  s.charging = false;
+  CHECK(charged.update(0, s, 5 * kSec));
+  CHECK(charged.update(0, s, 30 * kSec));
+  CHECK(charged.reason() == bat::PowerReason::FullHold);
+}
+
+// ---- Multi-screen dashboard: remote screen target + carousel timing ----
+
+TEST(device_screen, resolve_index_and_wrapping_step) {
+  namespace ds = eego::admin::device_screen;
+  CHECK_EQ(ds::resolveTarget(true, 2, 0, 0, 5), int64_t{2});
+  CHECK_EQ(ds::resolveTarget(true, 5, 0, 0, 5), int64_t{-1});
+  CHECK_EQ(ds::resolveTarget(true, -1, 0, 0, 5), int64_t{-1});
+  CHECK_EQ(ds::resolveTarget(false, 0, 1, 4, 5), int64_t{0});   // last -> first
+  CHECK_EQ(ds::resolveTarget(false, 0, -1, 0, 5), int64_t{4});  // first -> last
+  CHECK_EQ(ds::resolveTarget(false, 0, 2, 1, 5), int64_t{3});
+  CHECK_EQ(ds::resolveTarget(false, 0, 0, 1, 5), int64_t{-1});
+  CHECK_EQ(ds::resolveTarget(false, 0, 9, 1, 5), int64_t{-1});
+  CHECK_EQ(ds::resolveTarget(false, 0, 1, 0, 0), int64_t{-1});  // no dashboard
+}
+
+TEST(screen_rotate, wall_clock_epochs_and_gating) {
+  CHECK_EQ(panel::screenRotateEpoch(kUnix, 0, 0, 0), uint64_t{0});  // off
+  const uint64_t e = panel::screenRotateEpoch(kUnix, 0, 0, 5);
+  CHECK(e != 0);
+  CHECK_EQ(panel::screenRotateEpoch(kUnix + 299, 0, 0, 5), e);
+  CHECK_EQ(panel::screenRotateEpoch(kUnix + 300, 0, 0, 5), e + 1);
+  // Untrusted wall clock: monotonic fallback.
+  CHECK_EQ(panel::screenRotateEpoch(0, 4 * kMin, 0, 5), uint64_t{1});
+  CHECK_EQ(panel::screenRotateEpoch(0, 5 * kMin, 0, 5), uint64_t{2});
+
+  const int64_t now = 100 * kMin;
+  // Due: new epoch, idle for a full period, previous rotation displayed.
+  CHECK(panel::screenRotateDue(e + 1, e, now, now - 5 * kMin, 5, true));
+  CHECK(!panel::screenRotateDue(e, e, now, now - 5 * kMin, 5, true));      // same period
+  CHECK(!panel::screenRotateDue(e + 1, 0, now, now - 5 * kMin, 5, true));  // first sample
+  CHECK(!panel::screenRotateDue(e + 1, e, now, now - 4 * kMin, 5, true));  // recent input
+  CHECK(!panel::screenRotateDue(e + 1, e, now, now - 5 * kMin, 5, false)); // not shown yet
+  CHECK(!panel::screenRotateDue(e + 1, e, now, now - 5 * kMin, 0, true));  // disabled
 }

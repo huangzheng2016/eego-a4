@@ -13,6 +13,8 @@
 #include "esp_timer.h"
 #include "freertos/task.h"
 #include "net_stack/wifi_list.h"
+#include "sdkconfig.h"
+#include "uc8279c_display.h"
 
 namespace eego::net {
 
@@ -20,7 +22,21 @@ static const char* TAG = "net.wifi";
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
+#define WIFI_ASSOC_BIT BIT2  // 本次 connect() 期间已关联（STA_CONNECTED），等 DHCP
 static constexpr uint32_t kFastConnectTimeoutMs = 6000;
+// beacon 超时断线后按原 BSSID/信道快速重连的单次超时（关联后仍有 DHCP 宽限）。
+static constexpr uint32_t kRelinkTimeoutMs = 10000;
+// STA beacon 丢失容忍（esp_wifi_set_inactive_time，默认 6s，最小 3s）：-90 dBm 级链路
+// 偶发连续丢 beacon，6s 就断线重连代价远大于多等几秒。
+static constexpr uint16_t kWifiStaInactiveS = 15;
+// 墨水屏刷新（面板高压）期间推迟扫描/关联的最长等待。
+static constexpr int64_t kRfQuietMaxWaitMs = 4000;
+// 期望的最大发射功率（0.25 dBm 单位）：与 sdkconfig CONFIG_ESP_PHY_MAX_WIFI_TX_POWER 一致。
+#ifdef CONFIG_ESP_PHY_MAX_WIFI_TX_POWER
+static constexpr int8_t kWantTxPowerQdbm = CONFIG_ESP_PHY_MAX_WIFI_TX_POWER * 4;
+#else
+static constexpr int8_t kWantTxPowerQdbm = 80;
+#endif
 
 const char* wifiStateName(WifiState s) {
   switch (s) {
@@ -128,10 +144,14 @@ std::string WifiManager::summary() const {
   }
   char country[4] = "--";
   if (initialized_) esp_wifi_get_country_code(country);
-  char buf[160];
-  snprintf(buf, sizeof(buf), "mode=%s started=%d state=%s ps=%s country=%s fast_hint=%s",
+  const int tx = tx_power_qdbm_;
+  char buf[200];
+  snprintf(buf, sizeof(buf),
+           "mode=%s started=%d state=%s ps=%s bw=HT20 tx=%d.%02ddBm inactive=%us country=%s "
+           "fast_hint=%s",
            mode_name, started_ ? 1 : 0, wifiStateName(state_),
-           (ps_enabled_ ? "min_modem(after-connect)" : "none"), country,
+           (ps_enabled_ ? "min_modem(battery-interactive)" : "none"), tx / 4, (tx % 4) * 25,
+           (unsigned)kWifiStaInactiveS, country,
            fast_hint_.valid ? "pending" : (fast_hint_used_ ? "used" : "no"));
   return buf;
 }
@@ -158,7 +178,9 @@ esp_err_t WifiManager::init() {
     ESP_LOGE(TAG, "esp_wifi_init failed: %s", esp_err_to_name(err));
     return err;
   }
-  // 国家码在 start 前设置；ieee80211d=true：连上后跟随 AP 通告的国家信息。
+  // 国家码在 start 前设置；ieee80211d=true：连上后跟随 AP 通告的国家信息。CN 表的
+  // 最大功率为 20 dBm（与 PHY 上限一致，不会压低）；start 后 checkTxPower 记录生效值，
+  // 若被压到配置值以下则恢复（连上后 802.11d 跟随 AP 的值只记录不覆盖）。
   err = esp_wifi_set_country_code(EEGO_WIFI_COUNTRY_CODE, true);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "set country %s failed: %s", EEGO_WIFI_COUNTRY_CODE, esp_err_to_name(err));
@@ -174,9 +196,10 @@ esp_err_t WifiManager::init() {
   if (err != ESP_OK) return err;
   started_ = true;
 
-  applyPowerSave();
-  // TX 功率由 sdkconfig CONFIG_ESP_PHY_MAX_WIFI_TX_POWER=20 控制，无需运行时设置
+  // HT20 / beacon 容忍 / 省电 / 发射功率检查。TX 功率由 sdkconfig
+  // CONFIG_ESP_PHY_MAX_WIFI_TX_POWER=20 控制；只有生效值被压低时才运行时恢复
   // （esp_wifi_set_max_tx_power 单位是 0.25dBm，误传 20 会变 5dBm，weread 教训）。
+  applyRadioTuning();
 
   event_group_ = xEventGroupCreate();
   if (!event_group_) return ESP_ERR_NO_MEM;
@@ -195,7 +218,7 @@ esp_err_t WifiManager::ensureStarted() {
     return err;
   }
   started_ = true;
-  applyPowerSave();  // start 会把省电重置为默认值
+  applyRadioTuning();  // start 会把省电等重置为默认值
   ESP_LOGI(TAG, "wifi driver started");
   return ESP_OK;
 }
@@ -225,6 +248,54 @@ void WifiManager::applyPowerSave() {
   esp_wifi_set_ps(ps ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
 }
 
+void WifiManager::checkTxPower(const char* when) {
+  int8_t q = 0;
+  if (esp_wifi_get_max_tx_power(&q) != ESP_OK) return;
+  // 只在 start 后修正（国家码/PHY 初始化把上限压到配置值以下）；连上后的值可能是
+  // 802.11d 跟随 AP 通告的法规上限，只记录。
+  const bool at_start = strcmp(when, "start") == 0;
+  if (at_start && q < kWantTxPowerQdbm) {
+    ESP_LOGW(TAG, "max tx power %d.%02d dBm below configured %d dBm; restoring", q / 4,
+             (q % 4) * 25, kWantTxPowerQdbm / 4);
+    const esp_err_t err = esp_wifi_set_max_tx_power(kWantTxPowerQdbm);  // 单位 0.25 dBm
+    if (err != ESP_OK) ESP_LOGW(TAG, "set_max_tx_power failed: %s", esp_err_to_name(err));
+    esp_wifi_get_max_tx_power(&q);
+  }
+  tx_power_qdbm_ = q;
+  ESP_LOGI(TAG, "max tx power %d.%02d dBm (%s, country %s)", q / 4, (q % 4) * 25, when,
+           EEGO_WIFI_COUNTRY_CODE);
+}
+
+void WifiManager::applyRadioTuning() {
+  if (!started_) return;
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  if (esp_wifi_get_mode(&mode) != ESP_OK) return;
+  const bool sta = mode == WIFI_MODE_STA || mode == WIFI_MODE_APSTA;
+  const bool ap = mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA;
+  // HT20：灵敏度/抗干扰优于 HT40（2.4G 拥挤信道上 40MHz 反而更易丢包）。
+  if (sta) {
+    esp_err_t err = esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
+    if (err != ESP_OK) ESP_LOGW(TAG, "set STA HT20 failed: %s", esp_err_to_name(err));
+    err = esp_wifi_set_inactive_time(WIFI_IF_STA, kWifiStaInactiveS);
+    if (err != ESP_OK) ESP_LOGW(TAG, "set STA inactive time failed: %s", esp_err_to_name(err));
+  }
+  if (ap) {
+    const esp_err_t err = esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+    if (err != ESP_OK) ESP_LOGW(TAG, "set AP HT20 failed: %s", esp_err_to_name(err));
+  }
+  applyPowerSave();
+  checkTxPower("start");
+}
+
+void WifiManager::waitRfQuiet(const char* what) {
+  if (!eego::Uc8279cDisplay::refreshActive()) return;
+  const int64_t start = nowMs();
+  while (eego::Uc8279cDisplay::refreshActive() && nowMs() - start < kRfQuietMaxWaitMs) {
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+  ESP_LOGI(TAG, "%s deferred %lldms for e-ink refresh", what, (long long)(nowMs() - start));
+}
+
 void WifiManager::setState(WifiState s) {
   if (state_ == s) return;
   state_ = s;
@@ -245,8 +316,15 @@ void WifiManager::wifiEventHandler(void* arg, esp_event_base_t base, int32_t id,
         memcpy(self->last_ap_.bssid, evt->bssid, sizeof(self->last_ap_.bssid));
         self->last_ap_.channel = evt->channel;
         self->last_ap_.valid = evt->channel != 0;
+        self->assoc_at_ms_ = static_cast<uint32_t>(nowMs());
+        if (self->event_group_) xEventGroupSetBits(self->event_group_, WIFI_ASSOC_BIT);
         break;
       }
+      case WIFI_EVENT_STA_BEACON_TIMEOUT:
+        // 驱动检测到 beacon 丢失（inactive time 内仍可能恢复）；只计数，不重置。
+        self->beacon_timeouts_ = self->beacon_timeouts_ + 1;
+        ESP_LOGW(TAG, "beacon timeout #%u (weak signal?)", (unsigned)self->beacon_timeouts_);
+        break;
       case WIFI_EVENT_STA_DISCONNECTED: {
         wifi_event_sta_disconnected_t* evt = (wifi_event_sta_disconnected_t*)data;
         ESP_LOGW(TAG, "STA disconnected from %.*s, reason=%d (%s)",
@@ -257,6 +335,11 @@ void WifiManager::wifiEventHandler(void* arg, esp_event_base_t base, int32_t id,
         if (self->connecting_) {
           xEventGroupSetBits(self->event_group_, WIFI_FAIL_BIT);
         } else {
+          // 已连接后的 beacon 超时：单次丢 beacon 不当作整体故障——下一轮先按原
+          // BSSID/信道快速重连，不做全信道扫描与整表遍历。
+          if (evt->reason == WIFI_REASON_BEACON_TIMEOUT && self->state_ == WifiState::Connected) {
+            self->relink_pending_ = true;
+          }
           self->setState(WifiState::Disconnected);
         }
         break;
@@ -284,11 +367,12 @@ WifiState WifiManager::connect(const WifiAccount& acc, uint32_t timeout_ms, cons
   }
 
   const bool fast = hint != nullptr && hint->valid && hint->channel != 0;
+  const bool was_linked = state_ == WifiState::Connected;
   esp_wifi_disconnect();
   // 等底层完成断开，避免紧随其后的 esp_wifi_connect() 触发驱动竞态（weread 实证）。
-  // 快连只发生在本次启动的首次连接（之前从未关联），无断开可等。
-  if (!fast) vTaskDelay(pdMS_TO_TICKS(200));
-  xEventGroupClearBits(event_group_, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+  // 开机快连（之前从未关联）无断开可等；漫游（正连着）仍要等。
+  if (!fast || was_linked) vTaskDelay(pdMS_TO_TICKS(200));
+  xEventGroupClearBits(event_group_, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT | WIFI_ASSOC_BIT);
   last_reason_ = 0;
 
   // 关联/握手/DHCP 期间关闭省电（拿到 IP 后再按 setPowerSave 应用）。
@@ -307,6 +391,13 @@ WifiState WifiManager::connect(const WifiAccount& acc, uint32_t timeout_ms, cons
   cfg.sta.pmf_cfg.required = false;
   cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;  // WPA3/过渡模式：H2E 与 hunting-and-pecking 都接受
   cfg.sta.failure_retry_cnt = 2;            // 同一 SSID 多 AP 时失败后换下一个 BSSID
+  // 只对 WIFI_PS_MAX_MODEM 生效（本固件只用 NONE/MIN_MODEM，后者按 DTIM 醒来）；显式
+  // 写 3（驱动对 0 的默认值）避免误读。
+  cfg.sta.listen_interval = 3;
+  // 802.11k/v（需 sdkconfig ESP_WIFI_RRM/WNM_SUPPORT）：mesh/多 AP 路由器可下发邻居
+  // 报告与 BSS 切换建议，supplicant 据此切到更好的节点。
+  cfg.sta.rm_enabled = 1;
+  cfg.sta.btm_enabled = 1;
   if (fast) {
     // 固定 BSSID + 信道：驱动只在该信道探测该 AP，跳过全信道扫描。
     cfg.sta.bssid_set = true;
@@ -333,6 +424,8 @@ WifiState WifiManager::connect(const WifiAccount& acc, uint32_t timeout_ms, cons
   setState(WifiState::Connecting);
   diagAttempt(acc.ssid);
 
+  waitRfQuiet("connect");
+  const int64_t start_ms = nowMs();
   err = esp_wifi_connect();
   if (err != ESP_OK) {
     connecting_ = false;
@@ -342,24 +435,65 @@ WifiState WifiManager::connect(const WifiAccount& acc, uint32_t timeout_ms, cons
     return state_;
   }
 
-  EventBits_t bits = xEventGroupWaitBits(event_group_, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                         pdFALSE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
+  // 关联时刻（STA_CONNECTED 事件记录的 32 位 ms）还原为 64 位；未关联返回 -1。
+  auto assocMs = [&](EventBits_t b) -> int64_t {
+    if (!(b & WIFI_ASSOC_BIT)) return -1;
+    const int32_t delta =
+        static_cast<int32_t>(assoc_at_ms_ - static_cast<uint32_t>(start_ms));
+    return start_ms + (delta < 0 ? 0 : delta);
+  };
+  // 已关联但 DHCP 慢（弱信号丢包，实测 23s）：截止延到关联后 kWifiDhcpGraceMs，
+  // 不把本次尝试判失败（失败会断开重来，DHCP 从头再走一遍）。
+  int64_t deadline = wifiConnectDeadlineMs(start_ms, timeout_ms, -1);
+  EventBits_t bits = 0;
+  for (;;) {
+    const int64_t now = nowMs();
+    const int64_t wait = deadline > now ? deadline - now : 0;
+    bits = xEventGroupWaitBits(event_group_, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,
+                               pdMS_TO_TICKS(static_cast<uint32_t>(wait)));
+    if (bits & (WIFI_CONNECTED_BIT | WIFI_FAIL_BIT)) break;
+    const int64_t assoc = assocMs(bits);
+    const int64_t extended = wifiConnectDeadlineMs(start_ms, timeout_ms, assoc);
+    if (assoc < 0 || extended <= deadline || extended <= nowMs()) break;
+    ESP_LOGW(TAG, "%s associated %lldms ago, still no IP (weak link?); waiting for DHCP up to %llds",
+             acc.ssid.c_str(), (long long)(nowMs() - assoc), (long long)(extended - nowMs()) / 1000);
+    deadline = extended;
+  }
   connecting_ = false;
+  const int64_t done_ms = nowMs();
+  const int64_t assoc_ms = assocMs(xEventGroupGetBits(event_group_));
 
   if (bits & WIFI_CONNECTED_BIT) {
-    ESP_LOGI(TAG, "connected to %s", acc.ssid.c_str());
+    const int64_t assoc_took = assoc_ms >= 0 ? assoc_ms - start_ms : -1;
+    const int64_t dhcp_took = assoc_ms >= 0 ? done_ms - assoc_ms : -1;
+    if (dhcp_took > kWifiDhcpSlowMs) {
+      ESP_LOGW(TAG, "connected to %s: assoc %lldms, slow DHCP %lldms", acc.ssid.c_str(),
+               (long long)assoc_took, (long long)dhcp_took);
+    } else {
+      ESP_LOGI(TAG, "connected to %s: assoc %lldms, dhcp %lldms", acc.ssid.c_str(),
+               (long long)assoc_took, (long long)dhcp_took);
+    }
     diagResult(acc.ssid, WifiAttemptResult::Connected, 0);
     {
       MutexLock lock(diag_mutex_);
       fallback_policy_.onConnected();
+      roam_policy_.onConnected();
+      last_assoc_ms_ = static_cast<int32_t>(assoc_took);
+      last_dhcp_ms_ = static_cast<int32_t>(dhcp_took);
     }
     applyPowerSave();
+    checkTxPower("connected");
     return state_;
   }
   if (!(bits & WIFI_FAIL_BIT)) {
     esp_wifi_disconnect();  // 超时：主动断开停止底层尝试
     last_reason_ = 0;
-    ESP_LOGW(TAG, "connect timeout to %s", acc.ssid.c_str());
+    if (assoc_ms >= 0) {
+      ESP_LOGW(TAG, "connect timeout to %s: associated after %lldms but no IP after %lldms",
+               acc.ssid.c_str(), (long long)(assoc_ms - start_ms), (long long)(done_ms - assoc_ms));
+    } else {
+      ESP_LOGW(TAG, "connect timeout to %s (not associated)", acc.ssid.c_str());
+    }
     diagResult(acc.ssid, WifiAttemptResult::Timeout, 0);
   } else {
     ESP_LOGW(TAG, "connect failed to %s, reason=%d (%s)", acc.ssid.c_str(), (int)last_reason_,
@@ -384,15 +518,28 @@ WifiState WifiManager::connectMulti(const std::vector<WifiAccount>& accounts) {
   }
 
   // 快连（电池定时唤醒）：一次固定 BSSID/信道的短超时尝试；失败回退常规路径。
+  // beacon 超时断线同理：先按原 BSSID/信道重连一次（不扫描），失败再整表遍历。
+  ApHint hint;
+  uint32_t hint_timeout = kFastConnectTimeoutMs;
+  bool boot_hint = false;
+  const bool relink = relink_pending_;
+  relink_pending_ = false;
   if (fast_hint_.valid) {
-    const ApHint hint = fast_hint_;
+    hint = fast_hint_;
     fast_hint_ = ApHint{};
+    boot_hint = true;
+  } else if (relink && last_ap_.valid) {
+    hint = last_ap_;
+    hint_timeout = kRelinkTimeoutMs;
+  }
+  if (hint.valid) {
     for (const WifiAccount& account : accounts) {
       if (account.ssid != hint.ssid) continue;
-      fast_hint_used_ = true;
-      ESP_LOGI(TAG, "fast connect %s (ch %u)", account.ssid.c_str(), (unsigned)hint.channel);
-      if (connect(account, kFastConnectTimeoutMs, &hint) == WifiState::Connected) return state_;
-      ESP_LOGW(TAG, "fast connect failed; falling back to scan");
+      if (boot_hint) fast_hint_used_ = true;
+      ESP_LOGI(TAG, "%s %s (ch %u)", boot_hint ? "fast connect" : "relink after beacon loss",
+               account.ssid.c_str(), (unsigned)hint.channel);
+      if (connect(account, hint_timeout, &hint) == WifiState::Connected) return state_;
+      ESP_LOGW(TAG, "%s failed; falling back to scan", boot_hint ? "fast connect" : "relink");
       break;
     }
   }
@@ -449,6 +596,7 @@ WifiState WifiManager::connectMulti(const std::vector<WifiAccount>& accounts) {
 }
 
 bool WifiManager::scanLocked(std::vector<WifiScanHit>* hits) {
+  waitRfQuiet("scan");
   wifi_scan_config_t scan_cfg = {};
   scan_cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
   scan_cfg.show_hidden = true;
@@ -488,6 +636,101 @@ bool WifiManager::scanNow() {
   if (ensureStarted() != ESP_OK) return false;
   if (state_ == WifiState::Connecting) return false;
   return scanLocked(nullptr);
+}
+
+bool WifiManager::serviceLink(int64_t now_ms) {
+  if (!initialized_ || state_ != WifiState::Connected) return false;
+  {
+    MutexLock lock(diag_mutex_);
+    if (!link_stats_.sampleDue(now_ms)) return false;
+  }
+  const int r = rssi();
+  MutexLock lock(diag_mutex_);
+  link_stats_.add(now_ms, r);
+  return roam_policy_.update(now_ms, r);
+}
+
+bool WifiManager::roam(const std::vector<WifiAccount>& accounts) {
+  RadioLock radio(radio_mutex_, 0);
+  if (!radio.held || state_ != WifiState::Connected) return false;
+  {
+    MutexLock lock(diag_mutex_);
+    roam_policy_.onScanned(nowMs());  // 无论结果如何都计入限速
+    roam_scans_++;
+  }
+  wifi_ap_record_t cur = {};
+  if (esp_wifi_sta_get_ap_info(&cur) != ESP_OK) return false;
+  const std::string ssid = current_ssid_;
+  const WifiAccount* account = nullptr;
+  for (const auto& a : accounts) {
+    if (a.ssid == ssid) account = &a;
+  }
+  if (account == nullptr || ssid.empty()) return false;
+
+  waitRfQuiet("roam scan");
+  uint8_t ssid_buf[33] = {};
+  memcpy(ssid_buf, ssid.data(), std::min<size_t>(ssid.size(), 32));
+  wifi_scan_config_t scan_cfg = {};
+  scan_cfg.ssid = ssid_buf;  // 只扫同名网络（已连接时扫描会短暂离开信道）
+  scan_cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+  std::vector<WifiBssCandidate> candidates;
+  uint16_t ap_num = 0;
+  if (esp_wifi_scan_start(&scan_cfg, true) != ESP_OK ||
+      esp_wifi_scan_get_ap_num(&ap_num) != ESP_OK) {
+    ESP_LOGW(TAG, "roam scan failed");
+    return false;
+  }
+  if (ap_num > 0) {
+    wifi_ap_record_t* aps = (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * ap_num);
+    if (aps == nullptr) return false;
+    if (esp_wifi_scan_get_ap_records(&ap_num, aps) == ESP_OK) {
+      for (uint16_t i = 0; i < ap_num; i++) {
+        if (strncmp((const char*)aps[i].ssid, ssid.c_str(), 33) != 0) continue;
+        WifiBssCandidate c;
+        memcpy(c.bssid, aps[i].bssid, sizeof(c.bssid));
+        c.channel = aps[i].primary;
+        c.rssi = aps[i].rssi;
+        candidates.push_back(c);
+      }
+    }
+    free(aps);
+  }
+  const int idx = pickRoamTarget(cur.bssid, cur.rssi, candidates);
+  if (idx < 0) {
+    ESP_LOGI(TAG, "roam: no AP >= %d dB stronger for %s (current %d dBm, %u BSSIDs seen)",
+             kWifiRoamMinGainDb, ssid.c_str(), (int)cur.rssi, (unsigned)candidates.size());
+    return false;
+  }
+  const WifiBssCandidate& target = candidates[static_cast<size_t>(idx)];
+  ApHint hint;
+  hint.valid = true;
+  hint.ssid = ssid;
+  memcpy(hint.bssid, target.bssid, sizeof(hint.bssid));
+  hint.channel = target.channel;
+  ESP_LOGW(TAG, "roam: %s %d dBm (ch %u) -> %02x:%02x:%02x:%02x:%02x:%02x ch %u %d dBm",
+           ssid.c_str(), (int)cur.rssi, (unsigned)cur.primary, target.bssid[0], target.bssid[1],
+           target.bssid[2], target.bssid[3], target.bssid[4], target.bssid[5],
+           (unsigned)target.channel, (int)target.rssi);
+  if (connect(*account, kWifiVisibleRetryTimeoutMs, &hint) == WifiState::Connected) {
+    MutexLock lock(diag_mutex_);
+    roams_++;
+    return true;
+  }
+  ESP_LOGW(TAG, "roam failed; reconnecting through saved networks");
+  return false;
+}
+
+WifiManager::LinkInfo WifiManager::linkInfo() const {
+  LinkInfo info;
+  MutexLock lock(diag_mutex_);
+  info.rssi = link_stats_.summary(nowMs());
+  info.beacon_timeouts = beacon_timeouts_;
+  info.roams = roams_;
+  info.roam_scans = roam_scans_;
+  info.last_assoc_ms = last_assoc_ms_;
+  info.last_dhcp_ms = last_dhcp_ms_;
+  info.tx_power_qdbm = tx_power_qdbm_;
+  return info;
 }
 
 void WifiManager::disconnect() {

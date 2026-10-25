@@ -12,8 +12,14 @@
 //   * 日志只打 SSID/原因码，绝不输出密码（M13 日志边界）。
 //
 // 省电默认 WIFI_PS_NONE（weread 真机结论：MIN_MODEM 在弱信号下 4-way handshake
-// 超时/关联断开；常供电设备以连接稳定为先）。http_push 即时可达性不受影响——
-// PS_NONE 只是不禁 modem sleep，STA 始终可收包。需要省电可 setPowerSave(true)。
+// 超时/关联断开；常供电设备以连接稳定为先）。组合根只在电池交互窗口调用
+// setPowerSave(true)（见 wifiModemSleepWanted）；常供电/保持唤醒始终 PS_NONE。
+//
+// 弱信号加固（每次 esp_wifi_start 后 applyRadioTuning 重新应用）：STA/AP 固定
+// HT20、STA beacon 丢失容忍 kWifiStaInactiveS 秒、按需修正被压低的最大发射功率
+// 并记录生效值；beacon 超时断线先按原 BSSID/信道快速重连（不做整表扫描）；
+// 已关联但 DHCP 慢时把单次尝试截止延到关联后 30s；持续弱信号时在同名 BSSID 间
+// 简单漫游（wifi_list.h WifiRoamPolicy）。墨水屏刷新（面板高压）期间推迟扫描/关联。
 
 #include <cstdint>
 #include <string>
@@ -114,6 +120,28 @@ class WifiManager {
   std::string summary() const;
   bool fastHintPending() const { return fast_hint_.valid; }
 
+  // 重新应用射频调优（HT20 / beacon 容忍 / 省电 / 发射功率检查）。esp_wifi_start
+  // 或切换 AP/APSTA 模式后调用（WifiManager 内部的 start 已自动调用）。
+  void applyRadioTuning();
+
+  // ---- 链路质量（net_task 在已连接时每轮调用）----
+  // 按 kWifiLinkSampleMs 采样 RSSI；返回 true = 漫游扫描到期（调用方随后 roam()）。
+  bool serviceLink(int64_t now_ms);
+  // 同名扫描 + 选更强 BSSID（≥8 dB）并切换。accounts 用于取当前 SSID 的密码。
+  // 返回 true = 已切到新 BSSID；无更好目标/扫描失败返回 false（链路保持）。
+  bool roam(const std::vector<WifiAccount>& accounts);
+
+  struct LinkInfo {
+    WifiLinkSummary rssi;           // 近 10 分钟 RSSI min/avg/last
+    uint32_t beacon_timeouts = 0;   // WIFI_EVENT_STA_BEACON_TIMEOUT 累计
+    uint32_t roams = 0;             // 成功漫游次数
+    uint32_t roam_scans = 0;        // 漫游评估扫描次数
+    int32_t last_assoc_ms = -1;     // 最近一次连接：开始 → 关联（-1 = 无）
+    int32_t last_dhcp_ms = -1;      // 最近一次连接：关联 → 拿到 IP（-1 = 无）
+    int8_t tx_power_qdbm = 0;       // 生效的最大发射功率（0.25 dBm；0 = 未知）
+  };
+  LinkInfo linkInfo() const;
+
   // AP 兜底是否到期（见 wifi_list.h ApFallbackPolicy：连续 3 轮失败 / 已存网络
   // 2 分钟都不可见 / 没有已存网络）。now_ms = esp_timer 毫秒。
   bool apFallbackDue(int64_t now_ms) const;
@@ -144,8 +172,22 @@ class WifiManager {
   WifiDiagLog diag_;
   ApFallbackPolicy fallback_policy_;  // diag_mutex_ 保护
 
+  // 链路统计/漫游（diag_mutex_ 保护）
+  WifiLinkStats link_stats_;
+  WifiRoamPolicy roam_policy_;
+  volatile uint32_t beacon_timeouts_ = 0;
+  uint32_t roams_ = 0;
+  uint32_t roam_scans_ = 0;
+  int32_t last_assoc_ms_ = -1;
+  int32_t last_dhcp_ms_ = -1;
+  int8_t tx_power_qdbm_ = 0;
+  volatile uint32_t assoc_at_ms_ = 0;     // STA_CONNECTED 时刻（esp_timer ms 低 32 位）
+  volatile bool relink_pending_ = false;  // beacon 超时断线：下一轮先按原 BSSID 快连
+
   void setState(WifiState s);
   void applyPowerSave();
+  void checkTxPower(const char* when);
+  void waitRfQuiet(const char* what);
   esp_err_t ensureStarted();
   bool scanLocked(std::vector<WifiScanHit>* hits);  // 调用方持 radio_mutex_
   void diagAttempt(const std::string& ssid);

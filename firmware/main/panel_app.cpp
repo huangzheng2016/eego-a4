@@ -10,6 +10,7 @@
 #include <ctime>
 
 #include "admin/admin.h"
+#include "admin/device_screen.h"
 #include "admin/keep_awake.h"
 #include "admin/provision_portal.h"
 #include "dashboard_ui/preview_render.h"
@@ -17,6 +18,7 @@
 #include "ble/ble_manager.h"
 #include "driver/gpio.h"
 #include "esp_app_desc.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_heap_caps.h"
@@ -112,19 +114,16 @@ void PanelApp::begin(const Deps& deps) {
   lastFullRenderMs_ = lastBatMs_;
 
   usbHost_ = eego::PowerManager::instance().usbHostConnected();
-  // 冷启动（插充电器开机、电池已满 → 充电指示不亮）预先锁存常供电；深睡唤醒不锁存。
-  if (!battery::deepSleepWake(wakeSource_)) {
-    mainsDetector_.seedColdBoot(batCache_.millivolts, lastBatMs_);
-  }
+  // 开机不凭电压锁存外接电源：只认充电中 / USB 主机（见 battery::MainsDetector）。
   mains_ = computeMains();
   ESP_LOGI(TAG, "power source: %s (reason: %s, %umV, charging=%d, usb=%d)",
            mains_ ? "mains" : "battery", battery::powerReasonName(mainsDetector_.reason()),
            batCache_.millivolts, (charging_ || batCache_.charging) ? 1 : 0, usbHost_ ? 1 : 0);
-  NetStack::instance().wifi().setPowerSave(mains_);
   phaseStartMs_ = lastBatMs_;
   wakeStartUnix_ = TimeSource::valid() ? TimeSource::now() : 0;
   if (battery::interactiveWake(wakeSource_)) wakePressGuardUntilMs_ = lastBatMs_ + kWakePressGuardMs;
   if (!mains_) battPhase_ = fastWake_ ? BattPhase::Fetching : BattPhase::Interactive;
+  applyWifiPowerSave();
 
   applySettings(eego::settings::kChangedAll);
 
@@ -483,6 +482,7 @@ void PanelApp::service() {
       }
     }
   }
+  serviceScreens(now);
   batteryService(now);
   serviceSleep(now);
   // 定时唤醒快速路径不做交互式渲染：深睡帧由 presentSleepFrame 统一决定。
@@ -521,6 +521,7 @@ void PanelApp::service() {
     if (dashboard_.needsRender() && displayAllowed(now)) {
       syncDeviceState(now, true);  // 「空闲 · 下次」以本次刷屏时刻为参照
       dashboard_.render();
+      rotateShown_ = true;
       displayedThisBoot_ = true;
       noteDisplayed();
       noteInputResume();
@@ -1353,6 +1354,7 @@ bool PanelApp::settingAdjustable(SettingId id) {
     case SettingId::EpdFull:
     case SettingId::IdleAfter:
     case SettingId::IdleRefresh:
+    case SettingId::ScreenRotate:
     case SettingId::PowerMode:
     case SettingId::BatteryRefresh:
     case SettingId::BatteryMaxStale:
@@ -1410,6 +1412,10 @@ bool PanelApp::adjustSettingRow(SettingId id, int dir, bool coarse, bool wrap) {
     case SettingId::IdleRefresh:
       next.idle_refresh_min =
           stepChoice(kIdleRefreshSteps, settings_.idle_refresh_min, step, wrap);
+      break;
+    case SettingId::ScreenRotate:
+      next.screen_rotate_min = stepChoice(eego::settings::kScreenRotateChoices,
+                                          settings_.screen_rotate_min, step, wrap);
       break;
     case SettingId::PowerMode: {
       constexpr PowerMode kModes[] = {PowerMode::Auto, PowerMode::Mains, PowerMode::Battery};
@@ -1989,8 +1995,8 @@ bool PanelApp::renderDashboardPreview(const admin::RenderPreviewRequest& request
   }
   eego::PortraitCanvas canvas(offscreen);
   DashboardRuntime::PreviewInfo info;
-  const bool ok = dashboard_.renderPreview(canvas, request.document->dashboard, request.page_id,
-                                           request.has_screen ? request.screen : 0, info);
+  const bool ok =
+      dashboard_.renderPreview(canvas, request.document->dashboard, request.page_id, info);
   result.page_id = info.page_id;
   result.screen = static_cast<uint32_t>(info.screen);
   result.screen_count = static_cast<uint32_t>(info.screen_count);
@@ -2201,6 +2207,7 @@ bool PanelApp::computeMains() {
   sample.charging = charging_ || batCache_.charging;
   sample.usb_host = usbHost_;
   sample.battery_mv = batCache_.millivolts;
+  sample.battery_read_ms = lastBatMs_;
   return mainsDetector_.update(static_cast<uint8_t>(settings_.power_mode), sample, nowMs());
 }
 
@@ -2211,7 +2218,6 @@ void PanelApp::onModeChange(bool mains) {
   ESP_LOGI(TAG, "power mode -> %s (reason: %s, %umV, charging=%d, usb=%d)",
            mains ? "mains" : "battery", battery::powerReasonName(mainsDetector_.reason()),
            batCache_.millivolts, (charging_ || batCache_.charging) ? 1 : 0, usbHost_ ? 1 : 0);
-  NetStack::instance().wifi().setPowerSave(mains);  // 常供电 modem-sleep
   eego::ble::BleManager::instance().onPowerMode(mains);
   eego::ble::BleManager::instance().setBatteryScanWindow(false);
   if (mains) {
@@ -2224,7 +2230,14 @@ void PanelApp::onModeChange(bool mains) {
     enterInteractive(nowMs());  // 拔电时用户就在旁边：先保持交互，超时后对齐深睡
   }
   dashboard_.setMains(dashboardLive());
+  applyWifiPowerSave();
   markDirty(true);
+}
+
+void PanelApp::applyWifiPowerSave() {
+  const int64_t now = nowMs();
+  NetStack::instance().wifi().setPowerSave(eego::net::wifiModemSleepWanted(
+      mains_, keepAwakeUntil(now) != 0, battPhase_ == BattPhase::Interactive));
 }
 
 void PanelApp::enterInteractive(int64_t now) {
@@ -2235,6 +2248,7 @@ void PanelApp::enterInteractive(int64_t now) {
   dashboard_.setSleepFrame(false);
   // BLE 被动扫描：电池模式每个交互窗口最多扫一轮（与旧 Serving 窗口一致）。
   eego::ble::BleManager::instance().setBatteryScanWindow(true);
+  applyWifiPowerSave();
 }
 
 void PanelApp::startNetIdleWait(NetIdleWait& w, int64_t now, int64_t budgetMs) {
@@ -2466,6 +2480,74 @@ void PanelApp::drawNotice(const char* title, const char* line1, const char* line
   c.resetClip();
 }
 
+// 跨深睡的轮播位置（RTC 慢速内存：深睡保持，上电清零）。
+RTC_DATA_ATTR static uint32_t s_rotateScreen = 0;
+RTC_DATA_ATTR static uint64_t s_rotateEpoch = 0;
+
+void PanelApp::rotateForSleepFrame(uint64_t slotUnix) {
+  const size_t count = dashboard_.screenCount();
+  if (settings_.screen_rotate_min == 0 || count < 2) {
+    s_rotateScreen = 0;
+    s_rotateEpoch = 0;
+    return;
+  }
+  // 每次唤醒至多前进一屏：周期序号（按本次刷屏的名义时刻）变化才前进。
+  const uint64_t epoch = screenRotateEpoch(slotUnix, nowMs(), settings_.timezone_offset_min,
+                                           settings_.screen_rotate_min);
+  uint32_t index = s_rotateScreen;
+  if (s_rotateEpoch != 0 && epoch != s_rotateEpoch) ++index;
+  s_rotateEpoch = epoch;
+  s_rotateScreen = static_cast<uint32_t>(index % count);
+  dashboard_.showScreen(s_rotateScreen);
+}
+
+void PanelApp::serviceScreens(int64_t now) {
+  // 远程切屏（web「在设备上显示此屏」/ API）：视为一次交互，立即显示。
+  uint32_t requested = 0;
+  if (admin::consumeScreenRequest(requested) && dashboard_.available() &&
+      battPhase_ != BattPhase::Fetching) {
+    dashboard_.showScreen(requested);
+    if (page_ != Page::Dashboard) gotoPage(Page::Dashboard);
+    noteInteraction(now);
+  }
+
+  // 空闲自动轮播：只在 dashboard 页、非定时唤醒批次；渲染仍受空闲刷新节奏约束，
+  // 上一次轮播画面未显示前不再前进（不跳屏）。
+  const uint32_t period = settings_.screen_rotate_min;
+  if (period == 0 || page_ != Page::Dashboard || dashboard_.screenCount() < 2 ||
+      battPhase_ == BattPhase::Fetching) {
+    rotateEpoch_ = 0;
+  } else {
+    const uint64_t epoch =
+        screenRotateEpoch(nowUnix(), now, settings_.timezone_offset_min, period);
+    if (rotateEpoch_ == 0) {
+      rotateEpoch_ = epoch;
+    } else if (screenRotateDue(epoch, rotateEpoch_, now, refreshPolicy_.lastInteractionMs(),
+                               period, rotateShown_)) {
+      rotateEpoch_ = epoch;
+      rotateShown_ = false;
+      dashboard_.moveScreen(1);
+      s_rotateScreen = static_cast<uint32_t>(dashboard_.screenIndex());
+    } else if (epoch != rotateEpoch_ &&
+               now - refreshPolicy_.lastInteractionMs() <
+                   static_cast<int64_t>(period) * 60000) {
+      rotateEpoch_ = epoch;  // 用户最近操作过：本周期不轮播
+    }
+  }
+
+  if (now - lastScreenPublishMs_ >= 500) {
+    lastScreenPublishMs_ = now;
+    admin::ScreenState state;
+    state.available = dashboard_.available();
+    state.index = static_cast<uint32_t>(dashboard_.screenIndex());
+    state.count = static_cast<uint32_t>(dashboard_.screenCount());
+    state.page_id = dashboard_.screenPageId();
+    state.shown = page_ == Page::Dashboard;
+    state.rotate_min = period;
+    admin::publishScreenState(state);
+  }
+}
+
 void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_unix) {
   if (!deps_.boot.displayReady || deps_.canvas == nullptr || deps_.display == nullptr) return;
   battery::RtcState& rtc = battery::rtcState();
@@ -2503,6 +2585,7 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
       deps_.canvas->clear();
       dashboard_.invalidateAll();
     }
+    rotateForSleepFrame(slot);
     // 深睡帧 = 最后一次刷屏：状态行显示「休眠中/夜间暂停 · 按键唤醒」，右侧「更新于」
     // 固定为名义时刻，屏幕一眼可见设备在睡、数据截至何时。
     if (night) {
@@ -2617,6 +2700,7 @@ void PanelApp::serviceKeepAwake(int64_t now) {
     keepAwakeWasActive_ = active;
     ESP_LOGI(TAG, "keep-awake %s", active ? "on" : "off (expired/cancelled)");
     if (!active && admin::keepAwakeUntilMs() != 0) admin::setKeepAwakeMinutes(0);
+    applyWifiPowerSave();
     if (page_ == Page::Settings || page_ == Page::Status) markDirty();
   }
   refreshPolicy_.setHoldUntil(until);
@@ -2677,19 +2761,15 @@ void PanelApp::syncDeviceState(int64_t now, bool before_render) {
   if (page_ != Page::Dashboard && !before_render) markDirty();
 }
 
-const char* PanelApp::powerReasonText() const {
+PowerDetail PanelApp::powerDetail() const {
   switch (mainsDetector_.reason()) {
     case battery::PowerReason::ForcedMains:
-    case battery::PowerReason::ForcedBattery: return tr(Str::ReasonForced);
-    case battery::PowerReason::NoBattery: return tr(Str::ReasonNoBattery);
-    case battery::PowerReason::Charging: return tr(Str::ReasonCharging);
-    case battery::PowerReason::UsbHost: return tr(Str::ReasonUsbHost);
-    case battery::PowerReason::FullHold: return tr(Str::ReasonFullHold);
-    case battery::PowerReason::VoltageDrop: return tr(Str::ReasonVoltageDrop);
-    case battery::PowerReason::BelowHold: return tr(Str::ReasonBelowHold);
-    case battery::PowerReason::Battery: return tr(Str::ReasonBattery);
+    case battery::PowerReason::ForcedBattery: return PowerDetail::Forced;
+    case battery::PowerReason::Charging: return PowerDetail::Charging;
+    case battery::PowerReason::UsbHost: return PowerDetail::UsbHost;
+    case battery::PowerReason::FullHold: return PowerDetail::Full;
+    default: return PowerDetail::None;
   }
-  return "";
 }
 
 void PanelApp::publishPowerState(int64_t now) {
@@ -2722,7 +2802,10 @@ void PanelApp::publishPowerState(int64_t now) {
 // ── 数据辅助 ────────────────────────────────────────────────────────────────
 
 void PanelApp::refreshBattery(int64_t now) {
-  if (now - lastBatMs_ < 60000) return;
+  // 充电头充电/满电保持期间拔电只能靠电压下降识别：采样加密到 10 s（ADC 读数很便宜）。
+  const int64_t period =
+      mainsDetector_.wantsFastSamples() ? battery::kFastBatterySampleMs : 60000;
+  if (now - lastBatMs_ < period) return;
   lastBatMs_ = now;
   batCache_ = eego::PowerManager::instance().readBattery();
 }
@@ -3220,46 +3303,24 @@ void PanelApp::buildStatus(KvModel& m) {
   section(Str::SecPower);
   {
     const int64_t now = nowMs();
-    addBig(Str::LblMode, deviceStateLabel(deviceState_, settings_.timezone_offset_min));
-    const char* source = mains_ ? tr(Str::ModeMains) : tr(Str::ModeBattery);
-    std::string power = source;
-    if (batCache_.millivolts > 0) {
-      snprintf(buf, sizeof(buf), " %u%%", static_cast<unsigned>(batCache_.percent));
-      power += buf;
-    }
-    power += std::string(" · ") + powerReasonText();
-    addBig(Str::LblPower, power);
     const int64_t until = keepAwakeUntil(now);
-    if (until != 0) {
-      const uint32_t left = admin::keep_awake::remainingS(now, until);
-      char when[24] = "--:--";
-      if (TimeSource::valid()) {
-        struct tm tm_buf;
-        localTm(settings_, TimeSource::now() + left, tm_buf);
-        snprintf(when, sizeof(when), "%02d:%02d", tm_buf.tm_hour, tm_buf.tm_min);
-      }
-      snprintf(buf, sizeof(buf), tr(Str::KeepAwakeRemainFmt),
-               static_cast<unsigned>((left + 59) / 60), when);
-      addBig(Str::LblKeepAwake, buf);
-    } else {
-      addBig(Str::LblKeepAwake, tr(Str::Off));
+    const bool interactive = !mains_ && battPhase_ == BattPhase::Interactive;
+    PowerStatusInput in;
+    in.external = mains_;
+    in.detail = powerDetail();
+    in.charging = charging_ || batCache_.charging;
+    in.battery_mv = batCache_.millivolts;
+    in.battery_pct = batCache_.percent;
+    in.state = deviceState_;
+    in.auto_sleep = interactive && until == 0;
+    in.sleep_timeout_s = settings_.battery_interactive_timeout_s;
+    for (auto& row : powerStatusRows(in, settings_.timezone_offset_min)) {
+      addBigText(row.first, std::move(row.second));
     }
     const uint64_t wake = plannedWakeAt();
-    if (!mains_ && battPhase_ == BattPhase::Interactive) {
-      if (until != 0) {
-        addBig(Str::LblNextWake, tr(Str::SleepNever));
-      } else {
-        snprintf(buf, sizeof(buf), tr(Str::SleepInFmt),
-                 static_cast<unsigned>(settings_.battery_interactive_timeout_s));
-        addBig(Str::LblNextWake, buf);
-      }
-    } else if (wake != 0) {
+    if (!interactive && wake != 0) {
       formatTs(wake, buf, sizeof(buf));
       addBig(Str::LblNextWake, buf);
-    }
-    if (deviceState_.state == DeviceState::Idle && deviceState_.next_unix != 0) {
-      formatTs(deviceState_.next_unix, buf, sizeof(buf));
-      addBig(Str::LblNextRefresh, buf);
     }
     addBig(Str::LblWakeReason, tr(wakeSourceText(wakeSource_)));
     snprintf(buf, sizeof(buf), tr(Str::SleepsFmt),
@@ -3269,12 +3330,22 @@ void PanelApp::buildStatus(KvModel& m) {
 
   // 网络（正文字号；未连接时逐个已存网络给出最近一次失败原因）
   section(Str::SecNetwork);
+  // 行标签已是「WiFi」：值里去掉状态文案的「WiFi 」前缀（「WiFi 已连接」→「已连接」）。
   std::string wifi = wifiStateText(ns.wifi.state);
+  if (wifi.rfind("WiFi ", 0) == 0) wifi.erase(0, 5);
   if (!ns.wifi.ssid.empty()) wifi += " · " + ns.wifi.ssid;
   addBig(Str::LblWifi, wifi);
   if (ns.wifi.state == 2) {
-    snprintf(buf, sizeof(buf), "%d dBm", ns.wifi.rssi);
+    const bool en = currentLang() == Lang::En;
+    const eego::net::WifiSignal q = eego::net::wifiSignalQuality(ns.wifi.rssi);
+    snprintf(buf, sizeof(buf), "%d dBm · %s", ns.wifi.rssi, eego::net::wifiSignalLabel(q, en));
     addBig(Str::LblSignal, buf);
+    if (ns.wifi.rssi_samples >= 3) {
+      snprintf(buf, sizeof(buf), en ? "MIN %d · AVG %d dBm" : "最低 %d · 平均 %d dBm",
+               ns.wifi.rssi_min, ns.wifi.rssi_avg);
+      addBig(Str::LblSignal10m, buf);
+    }
+    if (q == eego::net::WifiSignal::Weak) addBig(Str::LblTip, tr(Str::WifiWeakHint));
   }
   if (!ns.wifi.ip.empty()) {
     addBig(Str::LblAddress, "http://" + ns.wifi.ip + "/");
@@ -3319,23 +3390,7 @@ void PanelApp::buildStatus(KvModel& m) {
   addBig(Str::TimeLabel, buf);
 
   // 设备
-  section(Str::SecDevice);
-  const bool charging = charging_ || batCache_.charging;
-  if (batCache_.millivolts > 0) {
-    snprintf(buf, sizeof(buf), "%u%% · %umV%s%s", static_cast<unsigned>(batCache_.percent),
-             static_cast<unsigned>(batCache_.millivolts), charging ? " · " : "",
-             charging ? tr(Str::Charging) : "");
-  } else {
-    snprintf(buf, sizeof(buf), "%s", tr(Str::ModeMains));
-  }
-  add(tr(Str::LblBattery), buf);
-  const char* pmode = tr(Str::ModeAuto);
-  if (settings_.power_mode == PowerMode::Mains) pmode = tr(Str::ModeMains);
-  if (settings_.power_mode == PowerMode::Battery) pmode = tr(Str::ModeBattery);
-  snprintf(buf, sizeof(buf), "%s → %s · %s", pmode,
-           mains_ ? tr(Str::ModeMains) : tr(Str::ModeBattery),
-           battery::powerReasonName(mainsDetector_.reason()));
-  add(tr(Str::SetPowerMode), buf);
+  section(Str::SecDevice);  // 供电/电量只在「电源 / 休眠」分节出现一次
   if (eego::SdCard::instance().ready()) {
     std::string storage = tr(Str::SdReady);
     if (ns.alert_db.attached) {
@@ -3602,10 +3657,19 @@ void PanelApp::buildS4(S4Model& m) {
         formatEvery(settings_.idle_refresh_min * 60, buf, sizeof(buf));
         value = buf;
         break;
+      case SettingId::ScreenRotate:
+        label = Str::SetScreenRotate;
+        if (settings_.screen_rotate_min == 0) {
+          value = tr(Str::Off);
+        } else {
+          formatEvery(settings_.screen_rotate_min * 60, buf, sizeof(buf));
+          value = buf;
+        }
+        break;
       case SettingId::PowerMode:
         label = Str::SetPowerMode;
-        value = tr(settings_.power_mode == PowerMode::Mains     ? Str::ModeMains
-                   : settings_.power_mode == PowerMode::Battery ? Str::ModeBattery
+        value = tr(settings_.power_mode == PowerMode::Mains     ? Str::PowerAlwaysExternal
+                   : settings_.power_mode == PowerMode::Battery ? Str::PowerAlwaysBattery
                                                                 : Str::ModeAuto);
         break;
       case SettingId::BatteryRefresh:

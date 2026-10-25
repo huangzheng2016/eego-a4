@@ -248,19 +248,16 @@ SOURCE_DEFAULTS = {
 
 
 # Device layout rule (mirrors kGridRowsPerScreen in dashboard_core/model.h):
-# columns map proportionally onto the screen width; every screen holds exactly
-# GRID_ROWS_PER_SCREEN grid rows; a visible panel must fit inside one screen and
-# must not overlap another visible panel.
+# each page is exactly one device screen of GRID_ROWS_PER_SCREEN grid rows;
+# columns map proportionally onto the screen width; every panel must fit the
+# screen (y + h <= 8) and visible panels must not overlap.
 GRID_ROWS_PER_SCREEN = 8
 
 
 def screen_fit_error(grid):
     """Return the firmware's screen-fit message for a grid, or None when it fits."""
-    height = grid.get("h", 4)
-    if height > GRID_ROWS_PER_SCREEN:
-        return "panel is taller than one screen (8 grid rows)"
-    if grid.get("y", 0) % GRID_ROWS_PER_SCREEN + height > GRID_ROWS_PER_SCREEN:
-        return "panel crosses a screen boundary (screens are 8 grid rows)"
+    if grid.get("y", 0) + grid.get("h", 4) > GRID_ROWS_PER_SCREEN:
+        return "panel exceeds the screen (y + h must be <= 8 grid rows)"
     return None
 
 
@@ -791,6 +788,9 @@ def validate_bundle(bundle, schema, raw_bytes=None, strict_layout=True):
                 errors.append(f"{path}.grid: panel size must be nonzero")
             if grid["x"] + grid["w"] > page["grid_columns"]:
                 errors.append(f"{path}.grid: panel exceeds page grid columns")
+            fit_error = screen_fit_error(grid) if grid["h"] > 0 else None
+            if fit_error:
+                errors.append(f"{path}.grid: {fit_error}")
             if not _valid_variant(panel["kind"], panel.get("style", {}).get("variant", "default")):
                 errors.append(f"{path}.style.variant: unsupported variant for panel kind")
             links = panel.get("linked_panel_ids", [])
@@ -838,9 +838,6 @@ def validate_bundle(bundle, schema, raw_bytes=None, strict_layout=True):
             if strict_layout and panel.get("visible", True):
                 grid = panel["grid"]
                 rect = (grid["x"], grid["y"], grid["x"] + grid["w"], grid["y"] + grid["h"])
-                fit_error = screen_fit_error(grid)
-                if fit_error:
-                    errors.append(f"{path}.grid: {fit_error}")
                 for other_id, other in occupied:
                     if max(rect[0], other[0]) < min(rect[2], other[2]) and max(rect[1], other[1]) < min(rect[3], other[3]):
                         errors.append(f"{path}.grid: overlaps visible panel {other_id}")

@@ -451,6 +451,8 @@ esp_err_t ProvisionPortal::startAp() {
     return err;
   }
   esp_wifi_start();
+  // APSTA 下 AP/STA 同样固定 HT20、重新应用省电与 beacon 容忍（见 WifiManager）。
+  net::WifiManager::instance().applyRadioTuning();
   ADMIN_LOG_INFO("ap started: %s (open, ch %u)", kApSsid, static_cast<unsigned>(ap_channel));
   return ESP_OK;
 }

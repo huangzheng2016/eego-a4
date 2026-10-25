@@ -311,6 +311,16 @@ struct NetStack::Impl {
         p->snapshot.wifi.disconnects = wifi_disconnects_;
         p->snapshot.wifi.driver_restarts = self->wifi_.driverRestarts();
         {
+          const WifiManager::LinkInfo link = self->wifi_.linkInfo();
+          p->snapshot.wifi.rssi_samples = link.rssi.samples;
+          p->snapshot.wifi.rssi_min = link.rssi.min;
+          p->snapshot.wifi.rssi_avg = link.rssi.avg;
+          p->snapshot.wifi.beacon_timeouts = link.beacon_timeouts;
+          p->snapshot.wifi.roams = link.roams;
+          p->snapshot.wifi.last_dhcp_ms = link.last_dhcp_ms;
+          p->snapshot.wifi.tx_power_qdbm = link.tx_power_qdbm;
+        }
+        {
           const int64_t since = wifi_sched_.offlineSinceMs();
           p->snapshot.wifi.offline_ms =
               since < 0 ? 0 : static_cast<uint32_t>(std::min<int64_t>(nowMs() - since, UINT32_MAX));
@@ -375,6 +385,15 @@ struct NetStack::Impl {
         // data_pipeline 自行重试（离线退避到期即拉取）。
         wifi_sched_.onConnected(now);
         self->time_sync_.onWifiConnected();
+      }
+      // 链路采样（10s 一次）；持续弱信号且有更强的同名 BSSID 时简单漫游（限速）。
+      // 漫游失败时状态变为 Failed，下一轮按常规断线路径整表重连。
+      if (self->wifi_.serviceLink(now)) {
+        std::vector<WifiAccount> accounts;
+        CredentialStore::loadWifiAccounts(accounts);
+        self->wifi_.roam(accounts);
+        for (auto& account : accounts) CredentialStore::secureErase(account.password);
+        // st 保持 Connected：漫游失败的话下一轮按"链路丢失"处理（计数 + 立即重连）。
       }
     } else if (st != WifiState::Connecting) {
       if (last_wifi_state_ == WifiState::Connected) {

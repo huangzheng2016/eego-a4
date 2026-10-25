@@ -170,7 +170,7 @@ TEST(preview, renders_page_to_4bpp_bmp) {
   (void)gray;
 }
 
-TEST(preview, rejects_unknown_page_and_screen) {
+TEST(preview, rejects_unknown_page) {
   eego::render_host::useFallbackFont();
   Dashboard dash = metricDraft();
   auto display = std::make_unique<eego::Uc8279cDisplay>();
@@ -181,12 +181,8 @@ TEST(preview, rejects_unknown_page_and_screen) {
   CHECK(!result.ok);
   CHECK(result.bad_request);
   options.page_id = "main";
-  options.screen = 1;
-  result = ui::renderPreviewPage(canvas, dash, options);
-  CHECK(!result.ok);
-  CHECK(result.bad_request);
-  CHECK_EQ(result.screen_count, size_t{1});
-  options.screen = 0;
   result = ui::renderPreviewPage(canvas, dash, options);
   CHECK(result.ok);
+  CHECK_EQ(result.screen, size_t{0});
+  CHECK_EQ(result.screen_count, size_t{1});
 }

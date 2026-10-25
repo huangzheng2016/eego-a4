@@ -179,6 +179,112 @@ class ApFallbackPolicy {
   int64_t invisible_since_ms_ = -1;
 };
 
+// ---- 信号质量（设备状态页 / API / 诊断页 / web 共用的分档）------------------------
+//
+// ≥ -60 很好；-60..-70 良好；-70..-80 一般；< -80 很弱。rssi ≥ 0 视为未知（未连接时
+// rssi() 返回 0）。档位边界与 web/src/model/wifi.ts signalQuality 保持一致。
+
+enum class WifiSignal : uint8_t { None = 0, Weak, Fair, Good, Excellent };
+
+constexpr int kWifiSignalExcellentDbm = -60;
+constexpr int kWifiSignalGoodDbm = -70;
+constexpr int kWifiSignalFairDbm = -80;
+
+WifiSignal wifiSignalQuality(int rssi);
+const char* wifiSignalName(WifiSignal s);                 // "excellent"/"good"/"fair"/"weak"/"none"
+const char* wifiSignalLabel(WifiSignal s, bool english);  // 很好/良好/一般/很弱/—
+int wifiSignalBars(WifiSignal s);                         // 0..4
+// 很弱时给用户的建议（中文；API/诊断页原样展示）。
+extern const char kWifiWeakSignalHint[];
+
+// ---- 链路统计（RSSI 采样历史，近 10 分钟 min/avg）---------------------------------
+
+constexpr int64_t kWifiLinkSampleMs = 10000;
+constexpr int64_t kWifiLinkWindowMs = 10 * 60 * 1000;
+
+struct WifiLinkSummary {
+  uint32_t samples = 0;  // 窗口内样本数（0 = 无数据，min/avg 无意义）
+  int8_t min = 0;
+  int8_t avg = 0;
+  int8_t last = 0;
+};
+
+class WifiLinkStats {
+ public:
+  bool sampleDue(int64_t now) const { return last_ms_ < 0 || now - last_ms_ >= kWifiLinkSampleMs; }
+  // rssi ≥ 0（未知）不记录，但仍推进采样节拍。
+  void add(int64_t now, int rssi);
+  WifiLinkSummary summary(int64_t now) const;
+
+ private:
+  static constexpr size_t kCap = kWifiLinkWindowMs / kWifiLinkSampleMs + 4;
+  struct Sample {
+    int64_t at = 0;
+    int8_t rssi = 0;
+  };
+  Sample ring_[kCap];
+  size_t head_ = 0;  // 下一个写入位置
+  size_t count_ = 0;
+  int64_t last_ms_ = -1;
+};
+
+// ---- 简单漫游（mesh/多 AP 同名网络）------------------------------------------------
+//
+// 已连接且 RSSI < kWifiRoamWeakDbm 持续 kWifiRoamWeakMs → 到期做一次同名扫描；
+// 另一个 BSSID 比当前强 ≥ kWifiRoamMinGainDb 才切过去。扫描至少间隔
+// kWifiRoamIntervalMs（扫描本身要离开信道，弱链路上不能频繁做）。
+
+constexpr int kWifiRoamWeakDbm = -80;
+constexpr int64_t kWifiRoamWeakMs = 60 * 1000;
+constexpr int kWifiRoamMinGainDb = 8;
+constexpr int64_t kWifiRoamIntervalMs = 5 * 60 * 1000;
+
+struct WifiBssCandidate {
+  uint8_t bssid[6] = {0, 0, 0, 0, 0, 0};
+  uint8_t channel = 0;
+  int8_t rssi = 0;
+};
+
+class WifiRoamPolicy {
+ public:
+  // 新连接（含漫游后）：弱信号计时清零；扫描限速不清。
+  void onConnected() { weak_since_ms_ = -1; }
+  // 已连接时每次 RSSI 采样调用；true = 现在应做一次漫游扫描。
+  bool update(int64_t now, int rssi);
+  void onScanned(int64_t now) {
+    last_scan_ms_ = now;
+    weak_since_ms_ = -1;  // 重新累计 60s 才再评估
+  }
+  int64_t weakSinceMs() const { return weak_since_ms_; }
+
+ private:
+  int64_t weak_since_ms_ = -1;
+  int64_t last_scan_ms_ = -1;
+};
+
+// 候选中选漫游目标：BSSID ≠ 当前、信号 ≥ current_rssi + kWifiRoamMinGainDb 的最强者。
+// 返回下标；无合适目标返回 -1。
+int pickRoamTarget(const uint8_t current_bssid[6], int current_rssi,
+                   const std::vector<WifiBssCandidate>& candidates);
+
+// ---- 省电策略 / DHCP 宽限（纯逻辑）-------------------------------------------------
+
+// MIN_MODEM 只用于电池交互窗口；常供电或保持唤醒一律 PS_NONE（弱信号下 modem
+// sleep 的 DTIM 唤醒延迟与漏 beacon 会显著放大丢包与时延）。
+constexpr bool wifiModemSleepWanted(bool mains, bool keep_awake, bool battery_interactive) {
+  return !mains && !keep_awake && battery_interactive;
+}
+
+// 已关联但 DHCP 慢（弱信号丢包）：单次尝试的截止至少延到关联后 kWifiDhcpGraceMs。
+constexpr int64_t kWifiDhcpGraceMs = 30000;
+constexpr int64_t kWifiDhcpSlowMs = 10000;  // 超过即打日志提示
+constexpr int64_t wifiConnectDeadlineMs(int64_t start_ms, uint32_t timeout_ms, int64_t assoc_ms) {
+  const int64_t base = start_ms + static_cast<int64_t>(timeout_ms);
+  if (assoc_ms < 0) return base;
+  const int64_t grace = assoc_ms + kWifiDhcpGraceMs;
+  return grace > base ? grace : base;
+}
+
 // ---- 管理端整表编辑 ------------------------------------------------------------
 
 struct WifiListEntry {

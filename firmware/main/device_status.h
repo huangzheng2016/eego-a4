@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace eego {
@@ -55,6 +56,24 @@ std::string deviceStateLabel(const DeviceStateInfo& info, int tz_offset_min);
 std::vector<std::string> deviceStateLabels(const DeviceStateInfo& info, int tz_offset_min);
 // 「更新于 HH:MM」（unix < 2000 年 = 时间不可用 → 「更新于 --:--」）。
 std::string updatedLabel(uint64_t unix_s, int tz_offset_min);
+// 状态页「电源 / 休眠」分节的前四行（每个事实只出现一次）：
+//   供电      外接电源（USB 已连接 / 充电中 / 满电 / 手动设定）或 电池（手动设定）
+//   电量      85% · 3.98 V（· 充电中，若供电行未写）；无电池读数时省略
+//   运行状态  运行中 / 保持唤醒 · 剩余 N 分 / 空闲 · 下次 HH:MM / 已唤醒
+//   自动休眠  不会自动休眠 / 无操作 60 秒后休眠
+enum class PowerDetail : uint8_t { None = 0, Forced, UsbHost, Charging, Full };
+struct PowerStatusInput {
+  bool external = true;
+  PowerDetail detail = PowerDetail::None;
+  bool charging = false;
+  uint16_t battery_mv = 0;  // 0 = 无电池读数
+  uint8_t battery_pct = 0;
+  DeviceStateInfo state;
+  bool auto_sleep = false;  // 电池交互期且未保持唤醒
+  uint32_t sleep_timeout_s = 0;
+};
+std::vector<std::pair<std::string, std::string>> powerStatusRows(const PowerStatusInput& in,
+                                                                 int tz_offset_min);
 // API 名：active | keep_awake | idle | awake | sleeping | night_pause。
 const char* deviceStateApiName(DeviceState state);
 
@@ -76,6 +95,8 @@ struct StatusLineContent {
   // 个完整放得下的组合；都放不下则用最短的一对并对左侧省略号截断。
   std::vector<std::string> left_alt;
   std::vector<std::string> right_alt;
+  // 多屏：两端画细 ‹ › 翻屏提示（左/右三分之一为虚拟翻屏键，见 dashboard_runtime）。
+  bool pager = false;
 };
 // 正文字号（2x）放得下 h-3 时用 2x，否则回退 1x。
 int16_t statusLineScale(int16_t h);

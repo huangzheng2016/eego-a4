@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // net_stack wifi_list: build-time defaults, seeding, admin list edits, attempt plan.
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -297,4 +298,103 @@ TEST(wifi_list, ap_fallback_when_no_saved_network_visible) {
   q.onPassFailed(0, false);
   q.onPassFailed(kApFallbackInvisibleMs - 10, true);  // became visible: timer resets
   CHECK(!q.due(kApFallbackInvisibleMs + 10, 2));
+}
+
+TEST(wifi_list, signal_quality_bands) {
+  CHECK(wifiSignalQuality(0) == WifiSignal::None);  // unknown / not connected
+  CHECK(wifiSignalQuality(-40) == WifiSignal::Excellent);
+  CHECK(wifiSignalQuality(-60) == WifiSignal::Excellent);
+  CHECK(wifiSignalQuality(-61) == WifiSignal::Good);
+  CHECK(wifiSignalQuality(-70) == WifiSignal::Good);
+  CHECK(wifiSignalQuality(-71) == WifiSignal::Fair);
+  CHECK(wifiSignalQuality(-80) == WifiSignal::Fair);
+  CHECK(wifiSignalQuality(-81) == WifiSignal::Weak);
+  CHECK(wifiSignalQuality(-93) == WifiSignal::Weak);
+  CHECK_EQ(std::string(wifiSignalLabel(WifiSignal::Weak, false)), std::string("很弱"));
+  CHECK_EQ(std::string(wifiSignalLabel(WifiSignal::Excellent, false)), std::string("很好"));
+  CHECK_EQ(std::string(wifiSignalName(WifiSignal::Fair)), std::string("fair"));
+  CHECK(wifiSignalBars(WifiSignal::Excellent) == 4 && wifiSignalBars(WifiSignal::Weak) == 1 &&
+        wifiSignalBars(WifiSignal::None) == 0);
+}
+
+TEST(wifi_list, link_stats_window_min_avg) {
+  WifiLinkStats s;
+  CHECK(s.sampleDue(0));
+  CHECK(s.summary(0).samples == 0);
+  s.add(0, -70);
+  CHECK(!s.sampleDue(kWifiLinkSampleMs - 1));
+  CHECK(s.sampleDue(kWifiLinkSampleMs));
+  s.add(10000, -90);
+  s.add(20000, 0);  // unknown: skipped
+  s.add(30000, -80);
+  WifiLinkSummary sum = s.summary(30000);
+  CHECK(sum.samples == 3);
+  CHECK(sum.min == -90);
+  CHECK(sum.avg == -80);
+  CHECK(sum.last == -80);
+  // The first samples age out of the 10-minute window.
+  sum = s.summary(10000 + kWifiLinkWindowMs + 1);
+  CHECK(sum.samples == 1 && sum.min == -80);
+  // Ring overflow keeps only the newest samples.
+  WifiLinkStats r;
+  for (int i = 0; i < 200; i++) r.add(int64_t(i) * kWifiLinkSampleMs, i < 150 ? -50 : -85);
+  sum = r.summary(199 * kWifiLinkSampleMs);
+  CHECK(sum.samples == kWifiLinkWindowMs / kWifiLinkSampleMs + 1);
+  CHECK(sum.min == -85 && sum.last == -85);
+}
+
+TEST(wifi_list, roam_policy_needs_sustained_weak_signal_and_rate_limit) {
+  WifiRoamPolicy p;
+  CHECK(!p.update(0, -85));
+  CHECK(!p.update(kWifiRoamWeakMs - 1, -85));
+  CHECK(p.update(kWifiRoamWeakMs, -85));
+  p.onScanned(kWifiRoamWeakMs);
+  // Still weak, but the next scan must wait for the rate limit.
+  CHECK(!p.update(kWifiRoamWeakMs + 1000, -85));
+  CHECK(!p.update(2 * kWifiRoamWeakMs + 1000, -85));
+  CHECK(p.update(kWifiRoamWeakMs + kWifiRoamIntervalMs, -85));
+  // A good sample resets the weak timer.
+  WifiRoamPolicy q;
+  q.update(0, -85);
+  q.update(30000, -75);
+  CHECK(!q.update(kWifiRoamWeakMs + 1, -85));
+  CHECK(!q.update(kWifiRoamWeakMs + 10, 0));  // unknown never counts as weak
+  q.update(100000, -81);
+  CHECK(q.update(100000 + kWifiRoamWeakMs, -81));
+  CHECK(!q.update(100000 + kWifiRoamWeakMs + 1, -80));  // -80 is not below the threshold
+}
+
+TEST(wifi_list, roam_target_requires_other_bssid_and_gain) {
+  const uint8_t cur[6] = {1, 2, 3, 4, 5, 6};
+  std::vector<WifiBssCandidate> c(4);
+  std::memcpy(c[0].bssid, cur, 6);
+  c[0].channel = 6;
+  c[0].rssi = -60;  // the current AP itself (e.g. scan sees it stronger): never a target
+  c[1].bssid[5] = 1;
+  c[1].channel = 1;
+  c[1].rssi = -79;  // only +7 dB
+  c[2].bssid[5] = 2;
+  c[2].channel = 11;
+  c[2].rssi = -78;  // +8 dB: eligible
+  c[3].bssid[5] = 3;
+  c[3].channel = 0;
+  c[3].rssi = -50;  // no channel: unusable
+  CHECK(pickRoamTarget(cur, -86, c) == 2);
+  c[1].rssi = -70;
+  CHECK(pickRoamTarget(cur, -86, c) == 1);  // strongest eligible wins
+  CHECK(pickRoamTarget(cur, -60, c) == -1);
+  CHECK(pickRoamTarget(cur, -86, {}) == -1);
+}
+
+TEST(wifi_list, power_save_and_dhcp_grace) {
+  CHECK(!wifiModemSleepWanted(true, false, false));
+  CHECK(!wifiModemSleepWanted(true, true, true));
+  CHECK(!wifiModemSleepWanted(false, true, true));   // keep-awake on battery
+  CHECK(!wifiModemSleepWanted(false, false, false));  // battery fetch burst
+  CHECK(wifiModemSleepWanted(false, false, true));
+  CHECK(wifiConnectDeadlineMs(1000, 15000, -1) == 16000);
+  // Associated after 12 s but DHCP is slow: wait until 30 s after association.
+  CHECK(wifiConnectDeadlineMs(1000, 15000, 13000) == 13000 + kWifiDhcpGraceMs);
+  // Early association never shortens the normal timeout.
+  CHECK(wifiConnectDeadlineMs(0, 60000, 1000) == 60000);
 }

@@ -84,6 +84,9 @@ std::string diagJson() {
   }
 
   const net::WifiState st = wifi.state();
+  const int cur_rssi = wifi.rssi();
+  const net::WifiSignal q = net::wifiSignalQuality(cur_rssi);
+  const net::WifiManager::LinkInfo link = wifi.linkInfo();
   return JsonValue::makeObject({
              {"mode", JsonValue::makeString(mode)},
              {"current",
@@ -94,7 +97,13 @@ std::string diagJson() {
                                                      ? wifi.currentSsid()
                                                      : std::string())},
                   {"ip", JsonValue::makeString(wifi.currentIp())},
-                  {"rssi", JsonValue::makeInt(wifi.rssi())},
+                  {"rssi", JsonValue::makeInt(cur_rssi)},
+                  {"signal", JsonValue::makeString(net::wifiSignalName(q))},
+                  {"signal_label", JsonValue::makeString(net::wifiSignalLabel(q, false))},
+                  {"signal_bars", JsonValue::makeInt(net::wifiSignalBars(q))},
+                  {"signal_hint", JsonValue::makeString(q == net::WifiSignal::Weak
+                                                            ? net::kWifiWeakSignalHint
+                                                            : "")},
                   {"last_disconnect_reason", JsonValue::makeInt(wifi.lastDisconnectReason())},
                   {"last_disconnect_text",
                    JsonValue::makeString(wifi.lastDisconnectReason() != 0
@@ -102,6 +111,18 @@ std::string diagJson() {
                                              : "")},
               })},
              {"radio", JsonValue::makeString(wifi.summary())},
+             {"link",
+              JsonValue::makeObject({
+                  {"rssi_samples_10m", JsonValue::makeInt(link.rssi.samples)},
+                  {"rssi_min_10m", JsonValue::makeInt(link.rssi.samples ? link.rssi.min : 0)},
+                  {"rssi_avg_10m", JsonValue::makeInt(link.rssi.samples ? link.rssi.avg : 0)},
+                  {"beacon_timeouts", JsonValue::makeInt(link.beacon_timeouts)},
+                  {"roams", JsonValue::makeInt(link.roams)},
+                  {"roam_scans", JsonValue::makeInt(link.roam_scans)},
+                  {"last_assoc_ms", JsonValue::makeInt(link.last_assoc_ms)},
+                  {"last_dhcp_ms", JsonValue::makeInt(link.last_dhcp_ms)},
+                  {"tx_power_qdbm", JsonValue::makeInt(link.tx_power_qdbm)},
+              })},
              {"failed_passes", JsonValue::makeInt(d.failed_passes)},
              {"ap_clients", JsonValue::makeInt(ProvisionPortal::instance().apClientCount())},
              {"networks", JsonValue::makeArray(std::move(networks))},
@@ -164,7 +185,9 @@ input{width:100%;box-sizing:border-box;font-size:16px;padding:8px;margin:8px 0;b
 .dim{color:#777;font-size:14px}
 .ok{color:#1a7f37}.bad{color:#c00}.err{color:#c00;margin-top:12px}
 .ap{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #e4e4e4;font-size:14px}
-.ap b{font-weight:600})CSS";
+.ap b{font-weight:600}
+.bars{display:inline-flex;align-items:flex-end;gap:2px;vertical-align:middle}
+.bars i{display:inline-block;width:4px;background:#ccc;border-radius:1px}.bars i.on{background:currentColor})CSS";
 
 const char kJs[] = R"JS((function(){
 var token=null,timer=null;
@@ -173,6 +196,7 @@ function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=c
 function hdrs(json){var h={};if(json)h['Content-Type']='application/json';if(token)h['Authorization']='Bearer '+token;return h;}
 function age(s){if(s<0)return '本次开机未尝试';if(s<60)return s+' 秒前';if(s<3600)return Math.floor(s/60)+' 分钟前';return Math.floor(s/3600)+' 小时前';}
 var RES={none:'未尝试',connecting:'连接中',connected:'已连接',failed:'失败',timeout:'超时'};
+function bars(n){var b=el('span','bars');for(var i=1;i<=4;i++){var x=el('i',i<=n?'on':'');x.style.height=(3+i*3)+'px';b.appendChild(x);}return b;}
 function needLogin(){$('main').hidden=true;$('login').hidden=false;if(timer){clearInterval(timer);timer=null;}}
 function load(){
  fetch('/api/v1/wifi/diag',{headers:hdrs(false),cache:'no-store'}).then(function(r){
@@ -187,7 +211,14 @@ function render(d){
  var c=$('cur');c.textContent='';
  var cur=d.current||{};
  if(cur.state==='connected'){
-  c.appendChild(el('div','ok','已连接：'+cur.ssid+'  IP '+cur.ip+'  信号 '+cur.rssi+' dBm'));
+  var ok=el('div','ok','已连接：'+cur.ssid+'  IP '+cur.ip+'  信号 '+cur.rssi+' dBm ');
+  ok.appendChild(bars(cur.signal_bars||0));
+  ok.appendChild(el('span',cur.signal==='weak'?'bad':'dim',' '+(cur.signal_label||'')));
+  c.appendChild(ok);
+  if(cur.signal_hint)c.appendChild(el('div','bad',cur.signal_hint));
+  var L=d.link||{};
+  if(L.rssi_samples_10m)c.appendChild(el('div','dim','近 10 分钟信号：最低 '+L.rssi_min_10m+' / 平均 '+L.rssi_avg_10m+' dBm'));
+  c.appendChild(el('div','dim','beacon 丢失 '+(L.beacon_timeouts||0)+' 次 · 漫游 '+(L.roams||0)+' 次'+(L.last_dhcp_ms>=0?' · 上次 DHCP '+(L.last_dhcp_ms/1000).toFixed(1)+' 秒':'')+(L.tx_power_qdbm?' · 发射功率 '+(L.tx_power_qdbm/4)+' dBm':'')));
  }else{
   c.appendChild(el('div','bad','未连接（'+cur.state+'）'));
   if(cur.last_disconnect_reason)c.appendChild(el('div','dim','最近断开原因 '+cur.last_disconnect_reason+'：'+cur.last_disconnect_text));

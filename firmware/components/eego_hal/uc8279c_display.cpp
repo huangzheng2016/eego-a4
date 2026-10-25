@@ -16,12 +16,20 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <atomic>
 #include <cstring>
 
 static const char* TAG_UC = "eego.display";
 
 namespace eego {
 namespace {
+
+// 进行中的实屏刷新数（display()/displayGray() 期间 > 0）。
+std::atomic<int> g_refreshDepth{0};
+struct RefreshScope {
+    RefreshScope() { g_refreshDepth.fetch_add(1, std::memory_order_relaxed); }
+    ~RefreshScope() { g_refreshDepth.fetch_sub(1, std::memory_order_relaxed); }
+};
 
 // UC8279C 命令寄存器
 constexpr uint8_t CMD_PANEL_SETTING = 0x00;
@@ -375,8 +383,13 @@ bool Uc8279cDisplay::refresh(bool turnOff) {
     return true;
 }
 
+bool Uc8279cDisplay::refreshActive() {
+    return g_refreshDepth.load(std::memory_order_relaxed) > 0;
+}
+
 void Uc8279cDisplay::display(RefreshMode mode, bool turnOff) {
     if (offscreen_) return;  // 离屏实例没有面板
+    RefreshScope scope;
     ensureController();
     // 仅在控制器仍忙时等待（阻塞刷新返回时已空闲，避免每帧白等 settle 窗口）
     waitIfBusy("pre-wait");
@@ -455,6 +468,7 @@ void Uc8279cDisplay::waitRefreshComplete() {
 
 void Uc8279cDisplay::displayGray(bool turnOff) {
     if (offscreen_) return;
+    RefreshScope scope;
     ensureController();
     prevFrame_ = nullptr;
     waitIfBusy("gray-pre-wait");

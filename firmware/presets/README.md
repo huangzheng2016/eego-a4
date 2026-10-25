@@ -14,8 +14,8 @@ python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
 python3 firmware/tools/preset_tool.py validate-library
 ```
 
-布局遵循设备规则：每屏 8 个 grid 行，可见 panel 不重叠、不跨屏；列按
-`grid_columns` 比例映射。`validate-library` 会检查这些规则以及内置样板 dashboard。
+布局遵循设备规则：dashboard 最多 8 屏，每个 page 就是一屏（8 个 grid 行，
+panel 须满足 `y + h <= 8`），可见 panel 不重叠；列按 `grid_columns` 比例映射。`validate-library` 会检查这些规则以及内置样板 dashboard。
 
 预设库同时内置在固件里（`GET /api/v1/dashboard/templates`）。修改本目录后运行
 `python3 firmware/tools/preset_tool.py embed` 重新生成

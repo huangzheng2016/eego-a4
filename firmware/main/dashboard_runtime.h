@@ -110,9 +110,15 @@ class DashboardRuntime {
 
   void moveFocus(int delta, bool adjust);
   void movePage(int delta);
-  // 上/下一屏：先在页面子屏（page_index）间移动，再跨页（循环）。
+  // 上/下一屏（每个可见页 = 一屏，循环）。
   void moveScreen(int delta);
-  // 主页：默认页第一屏，清空返回栈与面板焦点。
+  // 显示第 index 屏（0 起，越界取最后一屏；清空返回栈）。未加载 → false。
+  bool showScreen(size_t index);
+  // 当前屏序号（0 起）与屏数（可见页数；未加载 = 0）。
+  size_t screenIndex() const;
+  size_t screenCount() const;
+  std::string screenPageId() const;
+  // 主页：默认页（默认 = 第一屏），清空返回栈与面板焦点。
   void home();
   bool atHome() const;
   bool firstScreen() const;
@@ -155,7 +161,7 @@ class DashboardRuntime {
   bool smoke();
 
   // Offscreen preview of a candidate dashboard (admin render-preview). app_task
-  // only. Renders page/screen of `candidate` into `canvas` (which must wrap an
+  // only. Renders one page (= screen) of `candidate` into `canvas` (which must wrap an
   // offscreen display) with the device layout; values come from the candidate's
   // samples/events, else live data of same-id sources, else placeholders.
   struct PreviewInfo {
@@ -167,7 +173,7 @@ class DashboardRuntime {
     std::string data;  // "bundle" | "live" | "mixed" | "placeholder" | "none"
   };
   bool renderPreview(eego::PortraitCanvas& canvas, const eego::dashboard::Dashboard& candidate,
-                     const std::string& page_id, size_t screen, PreviewInfo& info) const;
+                     const std::string& page_id, PreviewInfo& info) const;
 
  private:
   struct Impl;

@@ -20,6 +20,7 @@
 
 #include "admin/admin.h"
 #include "admin/display_snapshot.h"
+#include "admin/device_screen.h"
 #include "admin/keep_awake.h"
 
 #include <cctype>
@@ -750,6 +751,8 @@ alert_core::JsonValue keepAwakeJson() {
   });
 }
 
+alert_core::JsonValue screenJson();
+
 esp_err_t h_status(httpd_req_t* req) {
   using alert_core::JsonValue;
   JsonValue::Object root;
@@ -791,12 +794,28 @@ esp_err_t h_status(httpd_req_t* req) {
                         JsonValue::makeInt(ns.wifi.last_disconnect_reason));
     netobj.emplace_back("reconnect_attempts", JsonValue::makeInt(ns.wifi.reconnect_attempts));
     netobj.emplace_back("disconnects", JsonValue::makeInt(ns.wifi.disconnects));
+    netobj.emplace_back("rssi_min_10m", JsonValue::makeInt(ns.wifi.rssi_samples ? ns.wifi.rssi_min : 0));
+    netobj.emplace_back("rssi_avg_10m", JsonValue::makeInt(ns.wifi.rssi_samples ? ns.wifi.rssi_avg : 0));
+    netobj.emplace_back("beacon_timeouts", JsonValue::makeInt(ns.wifi.beacon_timeouts));
+    netobj.emplace_back("roams", JsonValue::makeInt(ns.wifi.roams));
+    netobj.emplace_back("last_dhcp_ms", JsonValue::makeInt(ns.wifi.last_dhcp_ms));
+    netobj.emplace_back("tx_power_qdbm", JsonValue::makeInt(ns.wifi.tx_power_qdbm));
   } else {
     netobj.emplace_back("ssid", JsonValue::makeString(net::WifiManager::instance().currentSsid()));
     netobj.emplace_back("ip", JsonValue::makeString(net::WifiManager::instance().currentIp()));
     netobj.emplace_back("rssi", JsonValue::makeInt(net::WifiManager::instance().rssi()));
     netobj.emplace_back("wifi_state",
                         JsonValue::makeInt(static_cast<int>(net::WifiManager::instance().state())));
+  }
+  {
+    // 信号分档（≥-60 很好 / -60..-70 良好 / -70..-80 一般 / <-80 很弱；未连接 none）
+    const int rssi = ns_ok ? ns.wifi.rssi : net::WifiManager::instance().rssi();
+    const net::WifiSignal q = net::wifiSignalQuality(rssi);
+    netobj.emplace_back("signal", JsonValue::makeString(net::wifiSignalName(q)));
+    netobj.emplace_back("signal_label", JsonValue::makeString(net::wifiSignalLabel(q, false)));
+    netobj.emplace_back("signal_bars", JsonValue::makeInt(net::wifiSignalBars(q)));
+    netobj.emplace_back("signal_hint", JsonValue::makeString(
+                                           q == net::WifiSignal::Weak ? net::kWifiWeakSignalHint : ""));
   }
   netobj.emplace_back("ap_active", JsonValue::makeBool(ProvisionPortal::instance().apActive()));
   root.emplace_back("network", JsonValue::makeObject(std::move(netobj)));
@@ -860,6 +879,7 @@ esp_err_t h_status(httpd_req_t* req) {
                          JsonValue::makeBool(AuthManager::instance().hasPassword())},
                     }));
 
+  root.emplace_back("screen", screenJson());
   // 保持唤醒 + 电源/休眠状态（app_task 定期发布的快照；设备是否会很快休眠一目了然）
   root.emplace_back("keep_awake", keepAwakeJson());
   const PowerSnapshot power = powerSnapshot();
@@ -890,6 +910,61 @@ esp_err_t h_status(httpd_req_t* req) {
 // ---------------------------------------------------------------------------
 // 保持唤醒（配置模式）：POST /device/keep-awake {"minutes":N}（0 = 取消，≤240）
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 当前屏：POST /device/screen {"index":n} 或 {"step":±1}（循环）
+// ---------------------------------------------------------------------------
+alert_core::JsonValue screenJson() {
+  using alert_core::JsonValue;
+  const ScreenState state = screenState();
+  return JsonValue::makeObject({
+      {"available", JsonValue::makeBool(state.available)},
+      {"index", JsonValue::makeInt(state.index)},
+      {"count", JsonValue::makeInt(state.count)},
+      {"page_id", JsonValue::makeString(state.page_id)},
+      {"shown", JsonValue::makeBool(state.shown)},
+      {"rotate_min", JsonValue::makeInt(state.rotate_min)},
+  });
+}
+
+esp_err_t h_screen_post(httpd_req_t* req) {
+  using alert_core::JsonValue;
+  if (!contentTypeJsonOk(req)) {
+    return sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
+  }
+  std::string body;
+  if (readBodyBudget(req, kBodyBudgetConfirm, body) != 0) return ESP_OK;
+  JsonValue root;
+  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  const JsonValue* index = root.find("index");
+  const JsonValue* step = root.find("step");
+  const bool index_ok = index != nullptr && index->type() == JsonValue::Type::Int;
+  const bool step_ok = step != nullptr && step->type() == JsonValue::Type::Int;
+  if (index_ok == step_ok || (index != nullptr && !index_ok) || (step != nullptr && !step_ok)) {
+    FieldErrors errs = fieldErr("index", "give exactly one of integer index (0-based) or step");
+    return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
+  }
+  const ScreenState state = screenState();
+  if (!state.available || state.count == 0) {
+    return sendError(req, 409, errc::kConflict, "no dashboard loaded");
+  }
+  const int64_t target = device_screen::resolveTarget(
+      index_ok, index_ok ? index->intValue() : 0, step_ok ? step->intValue() : 0, state.index,
+      state.count);
+  if (target < 0) {
+    FieldErrors errs = index_ok ? fieldErr("index", "must be in [0, " +
+                                                        std::to_string(state.count - 1) + "]")
+                                : fieldErr("step", "must be a nonzero integer in [-8, 8]");
+    return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
+  }
+  requestScreen(static_cast<uint32_t>(target));
+  ADMIN_LOG_INFO("screen %d/%u via api", static_cast<int>(target + 1),
+                 static_cast<unsigned>(state.count));
+  return sendJson(req, 200, JsonValue::makeObject({
+                                {"index", JsonValue::makeInt(target)},
+                                {"count", JsonValue::makeInt(state.count)},
+                            }).toString());
+}
+
 esp_err_t h_keep_awake_get(httpd_req_t* req) {
   return sendJson(req, 200, keepAwakeJson().toString());
 }
@@ -1455,6 +1530,20 @@ std::string wifiListJson() {
   current.emplace_back("driver_restarts", JsonValue::makeInt(ns.wifi.driver_restarts));
   current.emplace_back("offline_ms", JsonValue::makeInt(ns.wifi.offline_ms));
   current.emplace_back("reconnect_backoff_ms", JsonValue::makeInt(ns.wifi.reconnect_backoff_ms));
+  {
+    const net::WifiSignal q = net::wifiSignalQuality(connected ? rssi : 0);
+    current.emplace_back("signal", JsonValue::makeString(net::wifiSignalName(q)));
+    current.emplace_back("signal_bars", JsonValue::makeInt(net::wifiSignalBars(q)));
+    current.emplace_back("signal_hint", JsonValue::makeString(
+                                            q == net::WifiSignal::Weak ? net::kWifiWeakSignalHint : ""));
+    current.emplace_back("rssi_min_10m",
+                         JsonValue::makeInt(ns.wifi.rssi_samples ? ns.wifi.rssi_min : 0));
+    current.emplace_back("rssi_avg_10m",
+                         JsonValue::makeInt(ns.wifi.rssi_samples ? ns.wifi.rssi_avg : 0));
+    current.emplace_back("beacon_timeouts", JsonValue::makeInt(ns.wifi.beacon_timeouts));
+    current.emplace_back("roams", JsonValue::makeInt(ns.wifi.roams));
+    current.emplace_back("last_dhcp_ms", JsonValue::makeInt(ns.wifi.last_dhcp_ms));
+  }
   return JsonValue::makeObject({
                                    {"networks", JsonValue::makeArray(std::move(networks))},
                                    {"max", JsonValue::makeInt(net::kMaxWifiNetworks)},
@@ -1822,6 +1911,10 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
       if (!requireBearer(req, token, false)) return ESP_OK;
       return h_keep_awake_get(req);
     }
+    if (strcmp(path, "device/screen") == 0) {
+      if (!requireBearer(req, token, false)) return ESP_OK;
+      return sendJson(req, 200, screenJson().toString());
+    }
     if (strcmp(path, "types") == 0) {
       if (!bearer()) return ESP_OK;
       return h_types_list(req);
@@ -1945,6 +2038,11 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
       if (!bearer()) return ESP_OK;
       if (!rateLimit(req, "keep-awake:" + token.substr(0, 8), 60, 30)) return ESP_OK;
       return h_keep_awake_post(req);
+    }
+    if (strcmp(path, "device/screen") == 0) {
+      if (!bearer()) return ESP_OK;
+      if (!rateLimit(req, "screen:" + token.substr(0, 8), 60, 60)) return ESP_OK;
+      return h_screen_post(req);
     }
     if (strcmp(path, "system/factory-reset") == 0) {
       if (!bearer()) return ESP_OK;

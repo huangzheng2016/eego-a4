@@ -19,7 +19,7 @@ struct Limits {
   size_t max_sources = 12;
   size_t max_variables = 24;
   size_t max_variable_options = 64;
-  size_t max_pages = 12;
+  size_t max_pages = 8;  // one page = one device screen
   size_t max_panels_per_page = 24;
   size_t max_total_panels = 72;
   size_t max_actions_per_panel = 8;

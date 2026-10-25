@@ -36,6 +36,7 @@ idf_component_register(
         "src/wifi_diag.cpp"
         "src/source_credential_usage.cpp"
         "src/keep_awake.cpp"
+        "src/device_screen.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
         alert_core

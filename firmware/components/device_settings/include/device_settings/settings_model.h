@@ -38,14 +38,17 @@ enum Change : uint32_t {
   kChangedFrontlightHardware = 1u << 9,
   kChangedIdleRefresh = 1u << 10,  // idle_after_min / idle_refresh_min / idle_critical_immediate / keep_awake_min
   kChangedBattery = 1u << 11,      // battery_refresh_min / battery_max_stale_min / battery_interactive_timeout_s
+  kChangedScreenRotate = 1u << 12, // screen_rotate_min
   kChangedRefresh = kChangedDataRefresh | kChangedEpdRefresh,
-  kChangedAll = (1u << 12) - 1,
+  kChangedAll = (1u << 13) - 1,
 };
 
 // 空闲显示刷新间隔（分钟）允许值：均整除 60，使边界落在整点对齐的墙钟时刻。
 inline constexpr uint32_t kIdleRefreshChoices[] = {2, 5, 10, 15, 30, 60};
 // 「保持唤醒」时长（分钟）：设备设置行/状态页软键/↑+↓ 一次开启的时长。
 inline constexpr uint32_t kKeepAwakeChoices[] = {10, 30, 60, 120};
+// dashboard 自动轮播间隔（分钟）：0 = 关；空闲时每隔这么久切到下一屏。
+inline constexpr uint32_t kScreenRotateChoices[] = {0, 1, 2, 5, 10, 30};
 inline constexpr uint32_t kIdleAfterMaxMin = 1440;
 
 // 电池模式：唤醒间隔（分钟，均整除 60，唤醒对齐本地墙钟边界）与最长不刷屏时长。
@@ -113,6 +116,9 @@ struct Settings {
   bool idle_critical_immediate = true;
   // 保持唤醒（配置模式）一次开启的时长；状态只在 RAM，到期自动结束。
   uint32_t keep_awake_min = 30;
+  // dashboard 多屏自动轮播（分钟，0 = 关）：无交互满一个间隔后按墙钟对齐切到下一屏；
+  // 空闲节奏下随空闲刷新显示，电池模式每次定时唤醒至多前进一屏。
+  uint32_t screen_rotate_min = 0;
   bool diagnostics_enabled = true;
   bool ble_observer_enabled = false;
   uint32_t ble_observer_window_s = 10;
@@ -152,6 +158,7 @@ uint32_t changedFields(const Settings& before, const Settings& after);
 
 bool validIdleRefreshMin(uint32_t minutes);
 bool validKeepAwakeMin(uint32_t minutes);
+bool validScreenRotateMin(uint32_t minutes);
 bool validBatteryRefreshMin(uint32_t minutes);
 bool validBatteryMaxStaleMin(uint32_t minutes);
 

@@ -205,6 +205,23 @@ int16_t drawBatteryIcon(PortraitCanvas& c, int16_t x, int16_t y, int16_t h, uint
   return batteryIconWidth(h);
 }
 
+int16_t plugIconWidth(int16_t h) { return static_cast<int16_t>(std::max<int16_t>(8, h * 3 / 5)); }
+
+// 插头（外接电源）：上方两根插脚、中间实心插头体、下方电线，h 高。
+void drawPlugIcon(PortraitCanvas& c, int16_t x, int16_t y, int16_t h) {
+  const int16_t w = plugIconWidth(h);
+  const int16_t pinH = static_cast<int16_t>(h / 4);
+  const int16_t bodyH = static_cast<int16_t>(h * 2 / 5);
+  const int16_t cordH = static_cast<int16_t>(h - pinH - bodyH);
+  const int16_t pinW = 2;
+  c.fillRect(static_cast<int16_t>(x + w / 4 - pinW / 2), y, pinW, pinH, 0);
+  c.fillRect(static_cast<int16_t>(x + w - w / 4 - pinW / 2), y, pinW, pinH, 0);
+  c.fillRoundRectGray(x, static_cast<int16_t>(y + pinH), w, bodyH,
+                      static_cast<int16_t>(std::min<int16_t>(3, w / 4)), 0);
+  c.fillRect(static_cast<int16_t>(x + w / 2 - 1), static_cast<int16_t>(y + pinH + bodyH), 2,
+             cordH, 0);
+}
+
 int16_t wifiIconWidth(int16_t h) { return static_cast<int16_t>(h * 13 / 10 + 1); }
 
 // WiFi 扇形：底部中心为原点，±45° 内一个圆点 + 两道弧。
@@ -454,10 +471,17 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
     rx = static_cast<int16_t>(rx - 6);
   }
   const int16_t batH = static_cast<int16_t>(capH & ~1);
-  rx = static_cast<int16_t>(rx - batteryIconWidth(batH));
-  // 无电池（纯外接供电）= 满格 + 闪电；充电 = 实际电量 + 闪电
-  drawBatteryIcon(c, rx, static_cast<int16_t>(y + (barH - batH) / 2), batH,
-                  hasBattery ? m.batPercent : 100, m.charging || !hasBattery);
+  // 电池图标只在有电池读数时画；闪电只表示「正在充电」。外接电源 = 左侧小插头。
+  if (hasBattery) {
+    rx = static_cast<int16_t>(rx - batteryIconWidth(batH));
+    drawBatteryIcon(c, rx, static_cast<int16_t>(y + (barH - batH) / 2), batH, m.batPercent,
+                    m.charging);
+  }
+  if (m.mains || !hasBattery) {
+    const int16_t plugH = static_cast<int16_t>(batH + 4);
+    rx = static_cast<int16_t>(rx - (hasBattery ? 5 : 0) - plugIconWidth(plugH));
+    drawPlugIcon(c, rx, static_cast<int16_t>(y + (barH - plugH) / 2), plugH);
+  }
   rx = static_cast<int16_t>(rx - 12);
 
   const int16_t wifiH = static_cast<int16_t>(capH + 2);

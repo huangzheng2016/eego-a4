@@ -115,6 +115,47 @@ std::string updatedLabel(uint64_t unix_s, int tz) {
   return buf;
 }
 
+std::vector<std::pair<std::string, std::string>> powerStatusRows(const PowerStatusInput& in,
+                                                                 int tz) {
+  std::vector<std::pair<std::string, std::string>> rows;
+  char buf[96];
+  const char* source = tr(in.external ? Str::ModeMains : Str::ModeBattery);
+  const char* detail = nullptr;
+  switch (in.detail) {
+    case PowerDetail::Forced: detail = tr(Str::ReasonForced); break;
+    case PowerDetail::UsbHost: detail = in.external ? tr(Str::ReasonUsbHost) : nullptr; break;
+    case PowerDetail::Charging: detail = in.external ? tr(Str::ReasonCharging) : nullptr; break;
+    case PowerDetail::Full: detail = in.external ? tr(Str::ReasonFullHold) : nullptr; break;
+    case PowerDetail::None: break;
+  }
+  if (detail != nullptr) {
+    snprintf(buf, sizeof(buf), tr(Str::PowerDetailFmt), source, detail);
+    rows.emplace_back(tr(Str::LblPower), buf);
+  } else {
+    rows.emplace_back(tr(Str::LblPower), source);
+  }
+  if (in.battery_mv > 0) {
+    snprintf(buf, sizeof(buf), "%u%% · %.2f V", static_cast<unsigned>(in.battery_pct),
+             static_cast<double>(in.battery_mv) / 1000.0);
+    std::string charge = buf;
+    if (in.charging && !(detail != nullptr && in.detail == PowerDetail::Charging)) {
+      charge += std::string(" · ") + tr(Str::Charging);
+    }
+    rows.emplace_back(tr(Str::LblCharge), charge);
+  }
+  // 已唤醒的长标签含「无操作 N 秒后休眠」，与自动休眠行重复 → 用短写法。
+  rows.emplace_back(tr(Str::LblRunState), in.state.state == DeviceState::Awake
+                                               ? std::string(tr(Str::StateAwake))
+                                               : deviceStateLabel(in.state, tz));
+  if (in.auto_sleep) {
+    snprintf(buf, sizeof(buf), tr(Str::SleepInFmt), static_cast<unsigned>(in.sleep_timeout_s));
+    rows.emplace_back(tr(Str::LblAutoSleep), buf);
+  } else {
+    rows.emplace_back(tr(Str::LblAutoSleep), tr(Str::SleepNever));
+  }
+  return rows;
+}
+
 const char* deviceStateApiName(DeviceState state) {
   switch (state) {
     case DeviceState::Running: return "active";
@@ -196,9 +237,22 @@ void drawStatusLine(eego::PortraitCanvas& c, int16_t x, int16_t y, int16_t w, in
   const int16_t band_y = static_cast<int16_t>(y + 1);
   const int16_t band_h = static_cast<int16_t>(h - 1);
   const int16_t ty = static_cast<int16_t>(band_y + std::max(0, (band_h - th) / 2));
-  const int16_t pad = 12;
+  const int16_t pad = content.pager ? 22 : 12;
   const int16_t left_x = static_cast<int16_t>(x + pad);
   const int16_t right_edge = static_cast<int16_t>(x + w - pad);
+  if (content.pager) {
+    // 细 ‹ ›（2px 线宽）：虚拟翻屏键的提示，紧贴两端。
+    const int16_t cy = static_cast<int16_t>(band_y + band_h / 2);
+    const int16_t half = static_cast<int16_t>(std::max<int>(4, band_h / 5));
+    for (int16_t d = 0; d < 2; ++d) {
+      const int16_t lx = static_cast<int16_t>(x + 6 + d);
+      const int16_t rx = static_cast<int16_t>(x + w - 7 - d);
+      c.drawLine(static_cast<int16_t>(lx + half), static_cast<int16_t>(cy - half), lx, cy, 0);
+      c.drawLine(lx, cy, static_cast<int16_t>(lx + half), static_cast<int16_t>(cy + half), 0);
+      c.drawLine(static_cast<int16_t>(rx - half), static_cast<int16_t>(cy - half), rx, cy, 0);
+      c.drawLine(rx, cy, static_cast<int16_t>(rx - half), static_cast<int16_t>(cy + half), 0);
+    }
+  }
 
   const int16_t icon = content.show_icon ? stateIconSize(th) : 0;
   const int16_t text_x = static_cast<int16_t>(left_x + (content.show_icon ? icon + 8 : 0));

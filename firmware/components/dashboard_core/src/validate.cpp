@@ -441,12 +441,11 @@ class Validator {
       check(panel.grid.w > 0 && panel.grid.h > 0, child(path, "grid"), "panel size must be nonzero");
       check(static_cast<uint64_t>(panel.grid.x) + panel.grid.w <= page.grid_columns,
             child(path, "grid"), "panel exceeds page grid columns");
-      if (panel.visible && panel.grid.h > 0) {
-        // Shared device layout rule: see kGridRowsPerScreen in model.h.
+      // Shared device layout rule: see kGridRowsPerScreen in model.h.
+      if (panel.grid.h > 0)
         check(gridFitsScreen(panel.grid), child(path, "grid"),
-              panel.grid.h > kGridRowsPerScreen
-                  ? "panel is taller than one screen (8 grid rows)"
-                  : "panel crosses a screen boundary (screens are 8 grid rows)");
+              "panel exceeds the screen (y + h must be <= 8 grid rows)");
+      if (panel.visible && panel.grid.h > 0) {
         for (size_t j = 0; j < i; ++j) {
           const PanelSpec& other = *panels_[j].panel;
           if (panels_[j].page != &page || !other.visible) continue;

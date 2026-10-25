@@ -916,6 +916,8 @@ esp_err_t renderPreview(httpd_req_t* req, const DashboardDocument& current) {
     return sendError(req, 400, "invalid_request", "request must be an object");
   }
   RenderPreviewRequest request;
+  bool has_screen = false;
+  size_t screen = 0;  // 0-based index among visible pages (alternative to page_id)
   const JsonValue* bundle = nullptr;
   std::vector<ValidationError> request_errors;
   for (const auto& member : root.objectItems()) {
@@ -936,8 +938,8 @@ esp_err_t renderPreview(httpd_req_t* req, const DashboardDocument& current) {
       if (value.type() != JsonValue::Type::Int || value.intValue() < 0 || value.intValue() > 1023) {
         request_errors.push_back({"screen", "must be an integer >= 0"});
       } else {
-        request.has_screen = true;
-        request.screen = static_cast<uint32_t>(value.intValue());
+        has_screen = true;
+        screen = static_cast<size_t>(value.intValue());
       }
     } else if (member.first == "refresh") {
       if (value.type() != JsonValue::Type::String ||
@@ -951,6 +953,8 @@ esp_err_t renderPreview(httpd_req_t* req, const DashboardDocument& current) {
     }
   }
   if (bundle == nullptr) request_errors.push_back({"bundle", "required"});
+  if (has_screen && !request.page_id.empty())
+    request_errors.push_back({"screen", "give either page_id or screen, not both"});
   if (!request_errors.empty()) {
     return sendError(req, 400, "invalid_request", "invalid render preview request", &request_errors);
   }
@@ -962,30 +966,28 @@ esp_err_t renderPreview(httpd_req_t* req, const DashboardDocument& current) {
     return sendError(req, 400, "validation_failed", "dashboard validation failed", &parsed.errors);
   }
   const dashboard::Dashboard& candidate = parsed.document.dashboard;
+  // Each visible page is one device screen.
   const dashboard::Page* page = nullptr;
+  size_t visible = 0;
   for (const dashboard::Page& item : candidate.pages) {
     if (!item.visible) continue;
-    if (request.page_id.empty() ? (page == nullptr || item.id == candidate.default_page_id)
-                                : item.id == request.page_id) {
-      page = &item;
-    }
+    const bool match = has_screen ? visible == screen
+                       : request.page_id.empty()
+                           ? (page == nullptr || item.id == candidate.default_page_id)
+                           : item.id == request.page_id;
+    if (match) page = &item;
+    ++visible;
   }
   if (page == nullptr) {
     const std::vector<ValidationError> errors = {
-        {"page_id", request.page_id.empty() ? "dashboard has no visible page"
-                                            : "no visible page with this id"}};
+        has_screen ? ValidationError{"screen", "dashboard has " + std::to_string(visible) +
+                                                   " visible screen(s)"}
+                   : ValidationError{"page_id", request.page_id.empty()
+                                                    ? "dashboard has no visible page"
+                                                    : "no visible page with this id"}};
     return sendError(req, 400, "validation_failed", "render preview page not found", &errors);
   }
   request.page_id = page->id;
-  uint32_t screens = 1;
-  for (const dashboard::PanelSpec& panel : page->panels) {
-    if (panel.visible) screens = std::max(screens, dashboard::gridScreenIndex(panel.grid) + 1);
-  }
-  if (request.has_screen && request.screen >= screens) {
-    const std::vector<ValidationError> errors = {
-        {"screen", "page has " + std::to_string(screens) + " screen(s)"}};
-    return sendError(req, 400, "validation_failed", "render preview screen out of range", &errors);
-  }
 
   auto job = std::make_shared<RenderPreviewJob>();
   job->bmp = static_cast<uint8_t*>(heap_caps_malloc(kPreviewFileBytes, MALLOC_CAP_SPIRAM));

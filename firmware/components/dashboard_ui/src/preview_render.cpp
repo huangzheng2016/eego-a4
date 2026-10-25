@@ -14,7 +14,9 @@ PreviewRenderResult renderPreviewPage(PortraitCanvas& canvas, const Dashboard& d
     if (options.page_id.empty() ? (page == nullptr || item.id == dashboard.default_page_id)
                                 : item.id == options.page_id) {
       page = &item;
+      out.screen = out.screen_count;
     }
+    ++out.screen_count;
   }
   if (page == nullptr) {
     out.bad_request = true;
@@ -22,13 +24,6 @@ PreviewRenderResult renderPreviewPage(PortraitCanvas& canvas, const Dashboard& d
     return out;
   }
   out.page_id = page->id;
-  out.screen = options.screen;
-  out.screen_count = buildPageLayout(*page, 0, options.layout_config).page_count;
-  if (options.screen >= out.screen_count) {
-    out.bad_request = true;
-    out.error = "screen out of range";
-    return out;
-  }
   VariableValues defaults;
   if (options.variables == nullptr) {
     std::string error;
@@ -40,7 +35,6 @@ PreviewRenderResult renderPreviewPage(PortraitCanvas& canvas, const Dashboard& d
   renderer.setImageProvider(options.images);
   RenderOptions render;
   render.page_id = page->id;
-  render.page_index = options.screen;
   render.variables = options.variables != nullptr ? *options.variables : defaults;
   render.force_full = true;
   render.layout_config = options.layout_config;

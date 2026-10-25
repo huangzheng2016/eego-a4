@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// dashboard_ui layout: proportional mapping, 8 rows per screen, no overlaps,
-// and strict rejection of invalid screen layouts.
+// dashboard_ui layout: proportional mapping, one page = one 8-row screen, no
+// overlaps, and strict rejection of invalid screen layouts.
 #include <array>
 #include <map>
 
@@ -36,28 +36,22 @@ bool inside(const Rect& r, const Rect& bounds) {
          r.bottom() <= bounds.bottom();
 }
 
-// Asserts the core layout invariants for one page; returns number of problems.
+// Asserts the core layout invariants for one page (= one screen).
 void checkPageInvariants(const std::string& name, const Page& page) {
-  const PageLayout first = buildPageLayout(page, 0);
-  CHECK_MSG(first.valid, name);
-  std::map<size_t, size_t> seen;  // panel index -> screen
-  for (size_t screen = 0; screen < first.page_count; ++screen) {
-    const PageLayout layout = buildPageLayout(page, screen);
-    CHECK_EQ(layout.page_count, first.page_count);
-    for (size_t i = 0; i < layout.panels.size(); ++i) {
-      const PanelLayout& a = layout.panels[i];
-      CHECK_MSG(inside(a.bounds, kDashboardContent),
-                name << " " << a.panel->id << " out of content area");
-      CHECK_MSG(inside(a.content, a.bounds) || a.content.empty(), name << " " << a.panel->id);
-      CHECK_MSG(a.row + a.row_span <= kRowsPerPage, name << " " << a.panel->id << " exceeds screen");
-      CHECK_MSG(panelScreenIndex(*a.panel) == screen, name << " " << a.panel->id << " wrong screen");
-      CHECK_MSG(seen.count(a.panel_index) == 0, name << " " << a.panel->id << " on two screens");
-      seen[a.panel_index] = screen;
-      for (size_t j = 0; j < i; ++j) {
-        CHECK_MSG(!overlaps(a.bounds, layout.panels[j].bounds),
-                  name << " screen " << screen << ": " << a.panel->id << " overlaps "
-                       << layout.panels[j].panel->id);
-      }
+  const PageLayout layout = buildPageLayout(page);
+  CHECK_MSG(layout.valid, name);
+  std::map<size_t, size_t> seen;
+  for (size_t i = 0; i < layout.panels.size(); ++i) {
+    const PanelLayout& a = layout.panels[i];
+    CHECK_MSG(inside(a.bounds, kDashboardContent),
+              name << " " << a.panel->id << " out of content area");
+    CHECK_MSG(inside(a.content, a.bounds) || a.content.empty(), name << " " << a.panel->id);
+    CHECK_MSG(a.row + a.row_span <= kRowsPerPage, name << " " << a.panel->id << " exceeds screen");
+    CHECK_MSG(seen.count(a.panel_index) == 0, name << " " << a.panel->id << " laid out twice");
+    seen[a.panel_index] = i;
+    for (size_t j = 0; j < i; ++j) {
+      CHECK_MSG(!overlaps(a.bounds, layout.panels[j].bounds),
+                name << ": " << a.panel->id << " overlaps " << layout.panels[j].panel->id);
     }
   }
   for (size_t i = 0; i < page.panels.size(); ++i) {
@@ -83,10 +77,9 @@ TEST(layout, all_shipped_dashboards_have_no_overlap) {
 
 TEST(layout, full_width_full_height_panel_fills_content) {
   const Page page = pageOf({panel("p", 0, 0, 24, 8)});
-  const PageLayout l = buildPageLayout(page, 0);
+  const PageLayout l = buildPageLayout(page);
   REQUIRE(l.panels.size() == 1);
   CHECK(l.panels[0].bounds == kDashboardContent);
-  CHECK_EQ(l.page_count, size_t{1});
 }
 
 TEST(layout, adjacent_panels_separated_by_exactly_one_gap) {
@@ -95,7 +88,7 @@ TEST(layout, adjacent_panels_separated_by_exactly_one_gap) {
     static const char* ids[] = {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l",
                                 "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x"};
     for (uint32_t c = 0; c < columns; ++c) panels.push_back(panel(ids[c], c, 0, 1, 1));
-    const PageLayout l = buildPageLayout(pageOf(panels, columns), 0);
+    const PageLayout l = buildPageLayout(pageOf(panels, columns));
     REQUIRE(l.panels.size() == columns);
     CHECK_EQ(l.panels.front().bounds.x, kDashboardContent.x);
     CHECK_EQ(l.panels.back().bounds.right(), kDashboardContent.right());
@@ -107,43 +100,38 @@ TEST(layout, adjacent_panels_separated_by_exactly_one_gap) {
   std::vector<PanelSpec> rows;
   static const char* rid[] = {"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"};
   for (uint32_t r = 0; r < kRowsPerPage; ++r) rows.push_back(panel(rid[r], 0, r, 24, 1));
-  const PageLayout l = buildPageLayout(pageOf(rows), 0);
+  const PageLayout l = buildPageLayout(pageOf(rows));
   REQUIRE(l.panels.size() == kRowsPerPage);
   CHECK_EQ(l.panels.back().bounds.bottom(), kDashboardContent.bottom());
   for (size_t i = 1; i < l.panels.size(); ++i)
     CHECK_EQ(l.panels[i - 1].bounds.bottom() + 8, static_cast<int32_t>(l.panels[i].bounds.y));
 }
 
-TEST(layout, eight_rows_per_screen_and_screen_index) {
+TEST(layout, one_page_is_one_eight_row_screen) {
   CHECK_EQ(kRowsPerPage, 8u);
-  CHECK_EQ(panelScreenIndex(panel("a", 0, 0, 1, 8)), size_t{0});
-  CHECK_EQ(panelScreenIndex(panel("a", 0, 7, 1, 1)), size_t{0});
-  CHECK_EQ(panelScreenIndex(panel("a", 0, 8, 1, 1)), size_t{1});
-  CHECK_EQ(panelScreenIndex(panel("a", 0, 17, 1, 2)), size_t{2});
-  // Invalid crossing panels are pushed to the next screen, never split.
-  CHECK_EQ(panelScreenIndex(panel("a", 0, 6, 1, 4)), size_t{1});
+  CHECK(gridFitsScreen({0, 0, 1, 8}));
+  CHECK(gridFitsScreen({0, 7, 1, 1}));
+  CHECK(!gridFitsScreen({0, 7, 1, 2}));
+  CHECK(!gridFitsScreen({0, 8, 1, 1}));
+  CHECK(!gridFitsScreen({0, 0, 1, 9}));
 
-  const Page page = pageOf({panel("a", 0, 0, 24, 8), panel("b", 0, 8, 12, 4),
-                            panel("c", 12, 16, 12, 8), panel("hidden", 0, 40, 4, 4, false)});
-  const PageLayout s0 = buildPageLayout(page, 0);
-  CHECK_EQ(s0.page_count, size_t{3});  // hidden panel does not add screens
-  REQUIRE(s0.panels.size() == 1);
-  const PageLayout s1 = buildPageLayout(page, 1);
-  REQUIRE(s1.panels.size() == 1);
-  CHECK_EQ(s1.panels[0].panel->id, std::string("b"));
-  CHECK_EQ(s1.panels[0].row, 0u);
-  CHECK_EQ(s1.panels[0].bounds.y, kDashboardContent.y);
-  const PageLayout s2 = buildPageLayout(page, 2);
-  REQUIRE(s2.panels.size() == 1);
-  CHECK_EQ(s2.panels[0].bounds.bottom(), kDashboardContent.bottom());
-  CHECK(buildPageLayout(page, 3).panels.empty());
+  // Panels beyond the screen (invalid input) and hidden panels are skipped.
+  const Page page = pageOf({panel("a", 0, 0, 24, 4), panel("b", 0, 4, 12, 4),
+                            panel("below", 0, 8, 12, 4), panel("cross", 12, 6, 12, 4),
+                            panel("hidden", 12, 4, 4, 4, false)});
+  const PageLayout l = buildPageLayout(page);
+  REQUIRE(l.panels.size() == 2);
+  CHECK_EQ(l.panels[0].panel->id, std::string("a"));
+  CHECK_EQ(l.panels[1].panel->id, std::string("b"));
+  CHECK_EQ(l.panels[1].row, 4u);
+  CHECK_EQ(l.panels[1].bounds.bottom(), kDashboardContent.bottom());
 }
 
 TEST(layout, hit_test_and_find_bounds) {
   Page page = pageOf({panel("txt", 0, 0, 24, 4), panel("btn", 0, 4, 24, 4)});
   page.panels[1].kind = PanelKind::Button;
   page.panels[1].actions.resize(2);
-  const PageLayout l = buildPageLayout(page, 0);
+  const PageLayout l = buildPageLayout(page);
   Rect bounds;
   REQUIRE(findPanelBounds(l, "btn", bounds));
   CHECK(!findPanelBounds(l, "nope", bounds));
@@ -188,10 +176,11 @@ JsonValue gridDashboard(const std::vector<std::array<int, 4>>& grids) {
 }  // namespace
 
 TEST(layout, strict_validation_rejects_bad_screen_layouts) {
-  CHECK(dashboardFromJson(gridDashboard({{0, 0, 24, 6}, {0, 8, 24, 8}})).ok());
+  CHECK(dashboardFromJson(gridDashboard({{0, 0, 24, 6}, {0, 6, 24, 2}})).ok());
   CHECK(!dashboardFromJson(gridDashboard({{0, 0, 24, 6}, {0, 4, 12, 4}})).ok());  // overlap
-  CHECK(!dashboardFromJson(gridDashboard({{12, 6, 12, 4}})).ok());  // crosses a screen
-  CHECK(!dashboardFromJson(gridDashboard({{0, 8, 24, 12}})).ok());  // taller than a screen
+  CHECK(!dashboardFromJson(gridDashboard({{12, 6, 12, 4}})).ok());  // below the screen
+  CHECK(!dashboardFromJson(gridDashboard({{0, 8, 24, 8}})).ok());   // former 2nd screen
+  CHECK(!dashboardFromJson(gridDashboard({{0, 0, 24, 9}})).ok());   // taller than a screen
 }
 
 TEST(layout, strict_validation_ignores_hidden_panels) {

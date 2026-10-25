@@ -63,6 +63,24 @@ web 管理端「网络 / WiFi」页可增删网络、改密码、拖动排序并
 内输入管理密码即可；首次配网门户期间（尚无管理密码）与门户其余端点一样免认证。输出
 只含 SSID/信号/原因码，绝不含密码。设备「状态」页网络分节与串口 `wifi`（`wifi scan`、
 `wifi retry`）显示同样的信息。
+
+### WiFi 信号优化
+
+信号分档：≥ -60 dBm 很好、-60～-70 良好、-70～-80 一般、< -80 很弱。状态页、
+`/api/v1/status`、`/wifi-diag` 与 web「WiFi」页都会显示分档、近 10 分钟最低/平均信号、
+beacon 丢失与漫游次数。低于 -80 dBm 时常见丢包、延迟高、DHCP 很慢，建议：
+
+- **摆放**：把设备的天线一侧（ESP32-S3 模组所在边）朝向路由器；远离金属外壳、金属
+  书架、显示器背板和微波炉；不要平放在金属桌面上。
+- **路由器**：2.4 GHz 固定信道 1、6 或 11（关闭"自动信道"，避免路由器跳信道后重新扫描）；
+  频宽设为 20 MHz（不要 20/40 自动或 40 MHz）；不要启用"仅 802.11ax（WiFi 6）"模式，
+  保持 b/g/n/ax 混合；2.4G 与 5G 同名时设备只用 2.4G。
+- **mesh / 多 AP**：在设备附近放一个 mesh 节点或同名 AP。固件开启 802.11k/v，并在信号
+  持续低于 -80 dBm 超过 60 秒、且同名的另一台 AP 强至少 8 dB 时自动切换（最多每 5 分钟一次）。
+
+固件侧已做：始终 HT20；常供电或保持唤醒时不开 modem 省电（只在电池交互窗口开）；
+beacon 丢失容忍 15 秒，单次 beacon 超时先按原 AP 快速重连；已关联但 DHCP 慢时最多等到
+关联后 30 秒；墨水屏刷新期间推迟扫描/连接；启动和连上后都会打印实际发射功率（日志里的 `max tx power`）。
 需要临时关闭深睡时，可定义 `EEGO_LOCAL_POWER_MODE_MAINS`，确认 Mains 生效后移除；
 NVS 会保留该电源模式，之后仍可在设置中改回 Auto 或 Battery。新设备默认显示时区为
 UTC+8，可在设置中逐小时调整；已有设备可用 `EEGO_LOCAL_TIMEZONE_OFFSET_MIN` 写入一次。
@@ -110,7 +128,7 @@ python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
 
 | 屏幕 | 进入方式 | 内容 |
 |---|---|---|
-| 主页 · Dashboard | 开机、前置键短按 | 已应用的 dashboard（多页/多子屏），底部状态行（正文字号）显示设备状态、「更新于 HH:MM」、屏号、离线源数与最新告警横幅（见下文「设备状态一眼可见」） |
+| 主页 · Dashboard | 开机、前置键短按 | 已应用的 dashboard（1–8 屏，每个 page 一屏），底部状态行（正文字号）显示设备状态、「更新于 HH:MM」、屏号 `n/N` 与两端 ‹ › 翻屏键、离线源数与最新告警横幅（见下文「设备状态一眼可见」） |
 | 主页 · 开始使用 | 未配置 dashboard 时 | 管理地址（或配网热点与 `http://192.168.4.1/`）、WiFi 状态、三步配置说明 |
 | 告警详情 | 点按告警面板中的一行或底部横幅；告警面板上按 Power | 严重度、状态、来源、时间与字段；↑/↓ 浏览同一面板的告警；确认 / 静音 / 删除 / 趋势 |
 | 设备状态 | 前置键双击；引导页软键 | 「电源 / 休眠」（正文字号：模式、供电来源与判定原因、保持唤醒剩余、下次唤醒/刷新、唤醒原因、休眠次数）、WiFi、信号、地址、时间来源、电池、存储（alerts.db 大小）、硬件、固件版本、运行时长、各数据源最近更新与错误、外部告警计数；软键 刷新 / 保持唤醒 / 返回 |
@@ -121,14 +139,14 @@ python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
 
 | 输入 | 动作 |
 |---|---|
-| ↑ / ↓ 短按 | 上一屏 / 下一屏（dashboard 子屏优先、跨页循环）；设置、告警详情中为上/下一项 |
+| ↑ / ↓ 短按 | 上一屏 / 下一屏（dashboard 循环翻屏）；设置、告警详情中为上/下一项 |
 | ↑ / ↓ 长按 | dashboard：显示并移动面板焦点框；设置：上/下一子页 |
 | Power 短按 | 选择/确认：告警面板 → 告警详情；按钮面板 → 执行动作；本机页面 → 当前软键/行。未选面板时先打开本屏告警，否则显示焦点框 |
-| Power 长按 | 返回：子页面回主页；dashboard 先退跳转栈，再回默认页第一屏 |
+| Power 长按 | 返回：子页面回主页；dashboard 先退跳转栈，再回默认页（默认 = 第 1 屏） |
 | 前置键 短按 / 长按 / 双击 | 主页 / 设置 / 设备状态 |
 | ↑ + ↓ 同按 | 保持唤醒（默认绑定 builtin `keep_awake`；再按：剩余不足一半时延长，否则取消） |
 | 左滑或上滑 / 右滑或下滑 | 下一屏（项）/ 上一屏（项）；子页面首屏右滑 = 返回 |
-| 点按 | 告警行 → 详情；按钮 → 动作；其余面板 → 选中；底部状态行左/右半 → 上/下一屏 |
+| 点按 | 告警行 → 详情；按钮 → 动作；其余面板 → 选中；底部状态行左/右三分之一（各 165 px）→ 上/下一屏，中间 → 告警横幅详情 |
 
 告警详情中「确认」对外部告警写入设备告警库（等同 `POST /alerts/{id}/ack`），对
 规则告警只在本机视图中压制本次触发；「静音」「删除」只对外部告警可用，静音按指纹
@@ -140,11 +158,14 @@ python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
 
 | 图标 | 状态 | 含义 |
 |---|---|---|
-| ● | 运行中 | 常供电、最近有交互：屏幕即时更新 |
+| ● | 运行中 | 外接电源、最近有交互：屏幕即时更新 |
 | ☀ | 保持唤醒 · 剩余 NN 分 | 配置模式：不进空闲节奏、不自动深睡（> 10 分钟时按 5 分钟取整，最后 10 分钟逐分钟） |
 | 时钟 | 空闲 · 下次 HH:MM | 空闲刷新节奏：非交互更新合并到该墙钟边界（进入空闲时即时刷一次） |
-| ◯ | 已唤醒 · 无操作 N 秒后休眠 | 电池供电、按键唤醒后的交互期 |
+| ◯ | 已唤醒 · 无操作 N 秒后休眠 | 用电池、按键唤醒后的交互期 |
 | 月牙 | 休眠中 · 下次 HH:MM · 按键唤醒 / 夜间暂停 · HH:MM 恢复 | 深睡前的最后一帧（数据帧保留），「下次」= 保证刷新的最迟时刻 |
+
+顶部状态栏右侧只画电池图标 + 电量 %（不写供电文字）：外接电源时电池左侧加一个小插头，
+电池内的闪电只在正在充电时出现。
 
 底部状态行右侧常驻「更新于 HH:MM」（该帧实际刷屏时刻；深睡帧另附电量），屏幕是否
 陈旧一目了然。空间不足时依次省略：页码 → 电量 → 状态标签的后半段。底部状态行高度
@@ -174,6 +195,19 @@ GET  /api/v1/device/keep-awake
 `sleeps_since_boot`、`last_screen_update`。`GET /status` 与 `GET /device/keep-awake`
 是被动轮询，不计入「有人在用」；其余已认证请求照旧推迟电池交互期深睡。
 
+### 切换当前屏
+
+```text
+POST /api/v1/device/screen  {"index": 2}     # 第 3 屏（0 起）
+POST /api/v1/device/screen  {"step": 1}      # 下一屏（-1 上一屏，循环）
+→ {"index":2,"count":5}
+GET  /api/v1/device/screen
+→ {"available":true,"index":2,"count":5,"page_id":"net","shown":true,"rotate_min":0}
+```
+
+Bearer；切屏视为一次交互（立即显示，设备在设置等页面时回到 dashboard）。越界 `400`，
+未加载 dashboard `409`。`GET /api/v1/status` 增加同结构的 `screen`。
+
 ## 数据面板
 
 - 数据源支持标准 JSON、声明式 JSONPath、Prometheus、文本和 PNG/JPEG。
@@ -181,10 +215,13 @@ GET  /api/v1/device/keep-awake
   `id/rule_id/timestamp_ms/severity/state/title/message/linked_panel_id`。
 - 页面使用 grid 布局；可配置变量、时间窗口、阈值、告警规则、linked panel 和
   source/panel 独立调度。表达式和按钮 action 都是白名单，不是脚本。
-- 布局规则（设备、固件校验、主机校验共用）：`grid_columns` 按比例映射到屏幕
-  宽度（任意列数和边界都可）；每一屏固定 8 个 grid 行，按比例映射到屏幕高度；
-  可见 panel 不得重叠，且必须完整落在一屏内（`h ≤ 8` 且 `y % 8 + h ≤ 8`），
-  第 n 屏对应 `y` 在 `[8n, 8n+8)`。页面没有 `row_height` 字段（未知字段一律拒绝）。
+- 布局规则（设备、固件校验、主机校验共用）：dashboard 有 1–8 个 page，**每个 page
+  就是一屏**（可见 page 按顺序为第 1…N 屏）；`grid_columns` 按比例映射到屏幕宽度
+  （任意列数和边界都可）；每屏固定 8 个 grid 行，按比例映射到屏幕高度；panel 必须
+  满足 `y + h ≤ 8`，可见 panel 不得重叠。页面没有 `row_height` 字段（未知字段一律拒绝）。
+- 自动轮播：设置 `screen_rotate_min`（0 = 关，默认；1/2/5/10/30）。无操作满一个间隔后
+  按本地墙钟整倍数切到下一屏；空闲时随空闲刷新节奏显示（上一屏未显示前不前进）；
+  电池模式每次定时唤醒至多前进一屏（位置记在 RTC 内存）。
 - 只接受当前格式：dashboard 必须是 `"schema":"eego.dashboard/2","schema_version":2`，
   bundle 必须是 `eego.dashboard-bundle/1`。不做任何旧格式迁移或布局修复；SD 上
   不合规的 `dashboard.json`/`config.json` 会被改名为 `.corrupt`，设备以未配置/默认值启动。
@@ -224,12 +261,12 @@ GET  /api/v1/device/keep-awake
 每会话 10 次/分钟，同一时刻只渲染一个）：
 
 - 请求：`{"bundle": <bundle>, "page_id"?: "<page>", "screen"?: <int ≥0>, "refresh"?: "full"|"fast"}`。
-  `bundle` 与 `/dashboard/validate` 走同一校验；`page_id` 缺省 = `default_page_id`
-  （否则第一个可见页）；`screen` 缺省 0；`refresh` 缺省 `full`。整个请求体 ≤192 KiB。
+  `bundle` 与 `/dashboard/validate` 走同一校验；`page_id` 与 `screen`（第几个可见页，0 起）
+  二选一，都缺省 = `default_page_id`（否则第一个可见页）；`refresh` 缺省 `full`。整个请求体 ≤192 KiB。
 - 成功：`200 image/bmp`，552×768、自上而下、4-bpp、4 色灰阶调色板
   （索引 0/1/2/3 = `#000`/`#555`/`#AAA`/`#FFF`，即 Full 刷新显示的四级灰阶；
   `refresh:"fast"` 时按快刷阈值只输出黑/白）。响应头 `X-Preview-Page`、
-  `X-Preview-Screen`、`X-Preview-Screens`、`X-Preview-Data`
+  `X-Preview-Screen`（该页是第几屏，0 起）、`X-Preview-Screens`（可见页数）、`X-Preview-Data`
   （`bundle`/`live`/`mixed`/`placeholder`/`none`）。
 - 数值来源：bundle 自带的 `samples`/`events`；bundle 没有样本的数据源用设备上同 id
   数据源的实时数据；仍完全没有样本时，每个指标面板用与 Web 编辑器相同的确定性演示序列。
@@ -281,14 +318,20 @@ DELETE /api/v1/sources/credentials   {"key":"weather"}
 - 首次管理密码必须在 AP 门户设置。之后的本地 BLE 配网使用限时窗口、随机 PoP
   和 Security 1；被动 BLE observer 默认关闭。Bluetooth Classic、持续手机 GATT
   和通用蓝牙上网不在范围内。
-- 供电判定（`main/battery_policy` `MainsDetector`，主机单测 `power_source`）：Auto
-  下 无电池读数 / 充电中 / USB 主机已连接（USB-Serial-JTAG SOF）→ 常供电并锁存；
-  GPIO11 只是**充电状态**而非 VBUS，电池充满后充电停止，所以锁存后只要电压 ≥ 4050 mV
-  且未持续下降就保持常供电（`full_hold`）；自峰值起 2 分钟后仍低 ≥ 60 mV（`voltage_drop`）
-  或跌破 4050 mV（`below_hold`）才判定拔电。插着充电器冷启动且电压 ≥ 4050 mV 时预先
-  锁存。判定结果与原因显示在设备状态页、`GET /api/v1/status` 的 `power.source/
-  source_reason` 与串口日志 `power mode -> battery (reason: …)`。**插着 USB 却被判成
-  电池（会按电池节奏深睡、WiFi 断开）时，把 设置 → 供电模式 改为「持续供电」即可强制常供电。**
+- 供电判定（`main/battery_policy` `MainsDetector`，主机单测 `power_source`）：板上没有
+  VBUS 检测脚，只有两条证据——GPIO11 **充电状态**（只在正在充电时有效，充满或拔掉都无效）
+  与 USB-Serial-JTAG 的 **USB 主机**连接（接电脑才有，纯充电头没有）。「自动判断」下：
+  充电中或连着电脑 → 外接电源；**从电脑上拔下且未在充电 → 当次采样即判为电池**。
+  只有最后一条证据是「充电中」（充电头）时才锁存：停充时电压 ≥ 4150 mV 则保持外接电源
+  （`full_hold`，此后电压每 10 s 采一次），直到不充电且出现以下任一：中值滤波电压
+  < 4120 mV（`below_hold`）、3 分钟内持续下降 ≥ 25 mV（`voltage_drop`，停充后前 2 分钟
+  的回落不计）、超过 20 分钟没有再看到充电（充电头满电时会周期性补电，补电重新置位）。
+  开机不凭电压锁存，只有开机时看到充电才可能锁存。**残余滞后：满电设备从充电头上拔下，
+  要等电压在负载下下降（通常 2–3 分钟，负载很轻时最长 20 分钟）才切到电池；反过来，
+  插着充电头但长时间不补电也可能被判成电池。需要立即确定时，把 设置 → 供电模式 改为
+  「始终电池」或「始终外接电源」。** 判定结果显示在设备状态页「供电」行（外接电源（USB 已
+  连接 / 充电中 / 满电）或 电池，强制时附「手动设定」）、`GET /api/v1/status` 的 `power.source/
+  source_reason` 与串口日志 `power mode -> battery (reason: …)`。
   电池模式只在唤醒窗口联网；深睡时 HTTP 和 BLE 不可达，HTTP 推送会延迟到唤醒后。
   行为见下节「电池模式」。
 

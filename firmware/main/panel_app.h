@@ -24,7 +24,8 @@
 //     信箱投递，短平快，绝不做渲染/IO。
 //
 // 电源双策略（M13/M18；电池模式详见 README「电池模式」与 battery_policy.h）：
-//   * 常供电：WiFi modem-sleep（setPowerSave(true)）常驻，http_push 即时可达；
+//   * 常供电：WiFi PS_NONE（弱信号下 modem-sleep 放大时延/丢包），http_push 即时可达；
+//     modem-sleep 只用于电池交互窗口（保持唤醒期间也关闭）；
 //   * 电池·定时唤醒（Fetching）：最小初始化 → WiFi 快连 → 一批拉取全部到期源
 //     （硬预算）→ 离屏渲染 + 帧哈希 → 不变则不碰屏，否则 Fast（预载上一帧）/Full
 //     → 深睡到下一个本地墙钟对齐边界；
@@ -144,7 +145,11 @@ class PanelApp {
   // ---- 导航 ----
   Page home() const { return homePage(dashboard_.available()); }
   void gotoPage(Page p);          // 切页（下一帧强制 Full）
-  void goHome();                  // 前置键短按：主页（dashboard 默认页第一屏）
+  void goHome();                  // 前置键短按：主页（dashboard 默认页 = 第一屏）
+  // 多屏：远程切屏请求（POST /device/screen）、当前屏状态发布、空闲自动轮播。
+  void serviceScreens(int64_t nowMs);
+  // 深睡帧前：自动轮播开启时按墙钟周期前进至多一屏（RTC 内存记住当前屏）。
+  void rotateForSleepFrame(uint64_t slotUnix);
   void back();                    // 电源键长按/返回软键
   // Focus = 面板焦点（dashboard）/ 设置子页 / 软键焦点；
   // Page  = 上/下一屏（dashboard）/ 列表上/下一项（设置行、告警）/ 状态子页。
@@ -195,7 +200,7 @@ class PanelApp {
   DeviceStateInfo computeDeviceState(int64_t nowMs, uint64_t refUnix);
   void syncDeviceState(int64_t nowMs, bool beforeRender);
   void publishPowerState(int64_t nowMs);
-  const char* powerReasonText() const;
+  PowerDetail powerDetail() const;
   battery::MainsDetector mainsDetector_;
   bool usbHost_ = false;
   uint32_t keepAwakeRevision_ = 0;
@@ -257,6 +262,8 @@ class PanelApp {
   // ---- 电源模式 / 电池阶段机 ----
   bool computeMains();
   void onModeChange(bool mains);
+  // WiFi 省电：只在电池交互窗口用 MIN_MODEM；常供电/保持唤醒/定时唤醒 PS_NONE。
+  void applyWifiPowerSave();
   bool dashboardLive() const { return mains_ || battPhase_ == BattPhase::Interactive; }
   void enterInteractive(int64_t nowMs);
   void batteryService(int64_t nowMs);
@@ -381,6 +388,10 @@ class PanelApp {
 
   // 空闲感知刷新节奏
   RefreshPolicy refreshPolicy_;
+  // 自动轮播：上次轮播的周期序号（0 = 未设）、轮播后的画面是否已显示。
+  uint64_t rotateEpoch_ = 0;
+  bool rotateShown_ = true;
+  int64_t lastScreenPublishMs_ = -100000;
   int64_t lastCriticalCheckMs_ = -100000;
   bool idleLogged_ = false;
 

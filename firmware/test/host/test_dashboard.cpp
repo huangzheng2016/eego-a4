@@ -151,12 +151,16 @@ TEST(dashboard, rejects_overlapping_panels) {
   CHECK(hasErrorContaining(result, "overlaps"));
 }
 
-TEST(dashboard, rejects_panel_crossing_screen_boundary) {
+TEST(dashboard, rejects_panel_below_the_screen) {
   JsonValue d = validDashboardJson();
-  setGrid(d, 1, 12, 6, 12, 4);  // rows 6..9 cross the 8-row screen edge
-  const ParseResult result = dashboardFromJson(d);
+  setGrid(d, 1, 12, 6, 12, 4);  // rows 6..9: a page is one 8-row screen
+  ParseResult result = dashboardFromJson(d);
   CHECK(!result.ok());
-  CHECK(hasErrorContaining(result, "screen boundary"));
+  CHECK(hasErrorContaining(result, "exceeds the screen"));
+  setGrid(d, 1, 0, 8, 24, 8);  // former "second screen" rows are rejected too
+  result = dashboardFromJson(d);
+  CHECK(!result.ok());
+  CHECK(hasErrorContaining(result, "exceeds the screen"));
 }
 
 TEST(dashboard, rejects_panel_taller_than_screen) {
@@ -164,14 +168,26 @@ TEST(dashboard, rejects_panel_taller_than_screen) {
   setGrid(d, 1, 12, 0, 12, 9);
   const ParseResult result = dashboardFromJson(d);
   CHECK(!result.ok());
-  CHECK(hasErrorContaining(result, "taller than one screen"));
+  CHECK(hasErrorContaining(result, "exceeds the screen"));
 }
 
-TEST(dashboard, accepts_panel_on_second_screen) {
+TEST(dashboard, at_most_eight_screens) {
+  CHECK_EQ(Limits{}.max_pages, size_t{8});
   JsonValue d = validDashboardJson();
-  setGrid(d, 1, 0, 8, 24, 8);
-  const ParseResult result = dashboardFromJson(d);
-  CHECK_MSG(result.ok(), describe(result.errors));
+  JsonValue::Array& pages = d.find("pages")->arrayItems();
+  const JsonValue base = pages[0];
+  while (pages.size() < 8) {
+    JsonValue copy = base;
+    *copy.find("id") = JsonValue::makeString("s" + std::to_string(pages.size()));
+    *copy.find("panels") = JsonValue::makeArray({});
+    pages.push_back(copy);
+  }
+  CHECK_MSG(dashboardFromJson(d).ok(), describe(dashboardFromJson(d).errors));
+  JsonValue copy = base;
+  *copy.find("id") = JsonValue::makeString("s9");
+  *copy.find("panels") = JsonValue::makeArray({});
+  pages.push_back(copy);
+  CHECK(!dashboardFromJson(d).ok());
 }
 
 TEST(dashboard, rejects_panel_wider_than_grid) {

@@ -381,6 +381,7 @@ JsonValue toJson(const Settings& s) {
       {"idle_refresh_min", JsonValue::makeInt(s.idle_refresh_min)},
       {"idle_critical_immediate", JsonValue::makeBool(s.idle_critical_immediate)},
       {"keep_awake_min", JsonValue::makeInt(s.keep_awake_min)},
+      {"screen_rotate_min", JsonValue::makeInt(s.screen_rotate_min)},
       {"diagnostics_enabled", JsonValue::makeBool(s.diagnostics_enabled)},
       {"ble_observer_enabled", JsonValue::makeBool(s.ble_observer_enabled)},
       {"ble_observer_window_s", JsonValue::makeInt(s.ble_observer_window_s)},
@@ -454,6 +455,9 @@ void validate(const Settings& s, FieldErrors& errors) {
   }
   if (!validKeepAwakeMin(s.keep_awake_min)) {
     addError(errors, "keep_awake_min", "must be one of 10|30|60|120");
+  }
+  if (!validScreenRotateMin(s.screen_rotate_min)) {
+    addError(errors, "screen_rotate_min", "must be one of 0|1|2|5|10|30");
   }
   if (s.ble_observer_window_s < 2 || s.ble_observer_window_s > 60) {
     addError(errors, "ble_observer_window_s", "must be in [2, 60]");
@@ -574,7 +578,7 @@ bool mergePatch(const Settings& current, const JsonValue& patch, Settings& out,
                key == "epd_full_refresh_s" || key == "ble_observer_window_s" ||
                key == "ble_observer_interval_s" || key == "ble_observer_dedup_ms" ||
                key == "idle_after_min" || key == "idle_refresh_min" ||
-               key == "keep_awake_min") {
+               key == "keep_awake_min" || key == "screen_rotate_min") {
       if (!isInt(value)) {
         addError(errors, key, "must be an integer");
         continue;
@@ -584,7 +588,8 @@ bool mergePatch(const Settings& current, const JsonValue& patch, Settings& out,
            key == "battery_max_stale_min" || key == "battery_interactive_timeout_s" ||
            key == "epd_full_refresh_s" || key == "ble_observer_window_s" ||
            key == "ble_observer_interval_s" || key == "ble_observer_dedup_ms" ||
-           key == "idle_after_min" || key == "idle_refresh_min" || key == "keep_awake_min") &&
+           key == "idle_after_min" || key == "idle_refresh_min" || key == "keep_awake_min" ||
+           key == "screen_rotate_min") &&
           number >= 0 && number <= UINT32_MAX) {
         if (key == "data_refresh_s") next.data_refresh_s = static_cast<uint32_t>(number);
         else if (key == "battery_refresh_min") next.battery_refresh_min = static_cast<uint32_t>(number);
@@ -596,6 +601,7 @@ bool mergePatch(const Settings& current, const JsonValue& patch, Settings& out,
         else if (key == "idle_after_min") next.idle_after_min = static_cast<uint32_t>(number);
         else if (key == "idle_refresh_min") next.idle_refresh_min = static_cast<uint32_t>(number);
         else if (key == "keep_awake_min") next.keep_awake_min = static_cast<uint32_t>(number);
+        else if (key == "screen_rotate_min") next.screen_rotate_min = static_cast<uint32_t>(number);
         else next.ble_observer_dedup_ms = static_cast<uint32_t>(number);
       } else if ((key == "sleep_start_min" || key == "sleep_end_min") &&
                  number >= -1 && number <= INT32_MAX) {
@@ -655,6 +661,7 @@ uint32_t changedFields(const Settings& a, const Settings& b) {
   if (a.sleep_start_min != b.sleep_start_min || a.sleep_end_min != b.sleep_end_min) {
     changed |= kChangedSleep;
   }
+  if (a.screen_rotate_min != b.screen_rotate_min) changed |= kChangedScreenRotate;
   if (a.timezone_offset_min != b.timezone_offset_min) changed |= kChangedTimezone;
   if (a.diagnostics_enabled != b.diagnostics_enabled) changed |= kChangedDiagnostics;
   if (a.ble_observer_enabled != b.ble_observer_enabled ||
@@ -665,6 +672,13 @@ uint32_t changedFields(const Settings& a, const Settings& b) {
     changed |= kChangedBle;
   }
   return changed;
+}
+
+bool validScreenRotateMin(uint32_t minutes) {
+  for (uint32_t choice : kScreenRotateChoices) {
+    if (choice == minutes) return true;
+  }
+  return false;
 }
 
 bool validKeepAwakeMin(uint32_t minutes) {
@@ -752,6 +766,7 @@ const char* schemaJson() {
     "idle_refresh_min": {"type":"int","enum":[2,5,10,15,30,60],"default":5,"note":"idle redraws happen once per interval at local wall-clock boundaries (e.g. :00/:05/:10)","group":"display_refresh"},
     "idle_critical_immediate": {"type":"bool","default":true,"note":"a newly active critical alert redraws immediately even when idle","group":"display_refresh"},
     "keep_awake_min": {"type":"int","enum":[10,30,60,120],"default":30,"note":"keep-awake (config mode) duration: no idle batching, no interactive/battery/night deep sleep; RAM only, ends automatically","group":"power"},
+    "screen_rotate_min": {"type":"int","enum":[0,1,2,5,10,30],"default":0,"note":"dashboard carousel: after this many minutes without interaction, advance to the next screen at local wall-clock multiples (idle redraw cadence applies; battery mode advances at most once per wake); 0 = off","group":"display_refresh"},
     "diagnostics_enabled": {"type":"bool","default":true,"group":"diagnostics"},
     "ble_observer_enabled": {"type":"bool","default":false,"capability":"ble_observer","group":"ble"},
     "ble_observer_window_s": {"type":"int","range":[2,60],"default":10,"group":"ble"},

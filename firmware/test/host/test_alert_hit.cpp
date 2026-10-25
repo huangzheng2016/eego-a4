@@ -177,7 +177,7 @@ TEST(alert_hit, display_order_is_active_by_severity_then_newest) {
 TEST(alert_hit, non_alert_panel_has_no_rows) {
   Dashboard dash = alertDashboard(4, 3);
   dash.pages[0].panels[0].kind = PanelKind::Text;
-  const ui::PageLayout layout = ui::buildPageLayout(dash.pages[0], 0);
+  const ui::PageLayout layout = ui::buildPageLayout(dash.pages[0]);
   REQUIRE(layout.panels.size() == 1);
   const ui::PanelLayout& item = layout.panels.front();
   CHECK(ui::alertEventAt(dash, item, static_cast<int16_t>(item.bounds.x + 20),

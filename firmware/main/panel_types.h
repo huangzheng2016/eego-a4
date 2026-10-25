@@ -48,6 +48,7 @@ enum class SettingId : uint8_t {
   EpdNow,
   IdleAfter,    // 空闲判定：无交互多少分钟后进入空闲刷新节奏（0 = 关闭）
   IdleRefresh,  // 空闲刷新间隔：空闲时按本地墙钟整 N 分钟边界合并刷新
+  ScreenRotate, // 多屏自动轮播间隔（关/1/2/5/10/30 分钟）
   // 电池组：供电模式 → 电池唤醒间隔 → 最长不刷屏 → 交互超时 → 夜间暂停 → 下次唤醒/唤醒方式
   PowerMode,
   BatteryRefresh,
