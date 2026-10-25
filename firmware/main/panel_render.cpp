@@ -187,6 +187,20 @@ uint8_t severityTextGray(uint8_t severity) {
   return severity == 0 ? 0 : 15;  // 浅灰底配黑字，其余白字
 }
 
+void drawPowerStatusIcon(PortraitCanvas& c, int16_t x, int16_t y, bool mains, bool charging) {
+  if (mains) {
+    c.drawRect(x, static_cast<int16_t>(y + 4), 10, 12, 0);
+    c.drawLine(x + 2, y, x + 2, y + 4, 0);
+    c.drawLine(x + 8, y, x + 8, y + 4, 0);
+    c.drawLine(x + 5, y + 12, x + 5, y + 18, 0);
+    if (charging) c.fillRect(x + 2, y + 6, 6, 6, 0);
+  } else {
+    c.drawRect(x, static_cast<int16_t>(y + 4), 14, 16, 0);
+    c.fillRect(x + 14, y + 9, 2, 6, 0);
+    if (charging) c.fillRect(x + 2, y + 6, 10, 12, 0);
+  }
+}
+
 // ── 状态栏 ──────────────────────────────────────────────────────────────────
 
 void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
@@ -201,7 +215,7 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
   // 左：时间（RTC 有效时 MM-DD HH:MM，否则 --:--）
   textGray(c, x + 8, static_cast<int16_t>(y + 6), m.timeText, 2, 0, true);
 
-  // 中：电源模式 + WiFi 状态整组居中（避让左侧时间和右侧电池）
+  // 中：WiFi 状态居中；电源模式以小图标显示在电量旁，避免遮挡时间
   const char* wifi = tr(Str::WifiDisconnected);
   switch (m.wifiState) {
     case 1: wifi = tr(Str::WifiConnecting); break;
@@ -210,23 +224,17 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
     case 4: wifi = tr(Str::WifiOffline); break;
     default: break;
   }
-  const char* mode = m.mains ? tr(Str::ModeMains) : tr(Str::ModeBattery);
-  const int16_t modeW = static_cast<int16_t>(textW(mode, 2) + 16);
-  const int16_t groupW = static_cast<int16_t>(modeW + 8 + textW(wifi, 2));
-  const int16_t minCx = x + 120;
-  const int16_t maxCx = static_cast<int16_t>(x + w - 100 - groupW);
-  int16_t cx = static_cast<int16_t>(x + (w - groupW) / 2);
+  const int16_t wifiW = textW(wifi, 2);
+  const int16_t minCx = x + 130;
+  const int16_t maxCx = static_cast<int16_t>(x + w - 130 - wifiW);
+  int16_t cx = static_cast<int16_t>(x + (w - wifiW) / 2);
   if (maxCx < minCx) {
     cx = minCx;
   } else {
     if (cx < minCx) cx = minCx;
     if (cx > maxCx) cx = maxCx;
   }
-  c.fillRoundRectGray(cx, static_cast<int16_t>(y + 6), modeW, 36, 6, m.mains ? 5 : 9);
-  textGray(c, static_cast<int16_t>(cx + 8), static_cast<int16_t>(y + 6), mode, 2,
-           m.mains ? 15 : 0, true);
-  cx = static_cast<int16_t>(cx + modeW + 8);
-  const int16_t wifiMaxW = static_cast<int16_t>(x + w - 100 - cx);
+  const int16_t wifiMaxW = static_cast<int16_t>(x + w - 124 - cx);
   if (wifiMaxW > 40) {
     cx = static_cast<int16_t>(cx + drawTextFit(c, cx, static_cast<int16_t>(y + 6), wifiMaxW,
                                                wifi, 2, true, 6) +
@@ -243,7 +251,9 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
     textGray(c, cx, static_cast<int16_t>(y + 6), mute, 1, 6);
   }
 
-  // 右：电池（百分比 + 充电标记；右缘对齐内容区 -8）
+  // 右：供电图标 + 电池百分比
+  drawPowerStatusIcon(c, static_cast<int16_t>(x + w - 112), static_cast<int16_t>(y + 8),
+                      m.mains, m.charging);
   char bat[24];
   snprintf(bat, sizeof(bat), "%u%%%s", static_cast<unsigned>(m.batPercent),
            m.charging ? "+" : "");
