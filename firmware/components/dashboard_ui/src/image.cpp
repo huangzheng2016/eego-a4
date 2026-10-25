@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "dashboard_ui/text.h"
+#include "panel_style.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "sd_card.h"
@@ -101,17 +102,8 @@ std::string cacheKey(const ImageDependency& image) {
 
 void drawFailure(PortraitCanvas& canvas, const PanelSpec& panel, const Rect& bounds) {
   if (bounds.empty()) return;
-  canvas.drawRect(bounds.x, bounds.y, bounds.w, bounds.h, 0);
-  if (bounds.w > 16 && bounds.h > 16) {
-    canvas.drawLine(bounds.x + 4, bounds.y + 4, bounds.x + bounds.w - 5,
-                    bounds.y + bounds.h - 5, 0);
-    canvas.drawLine(bounds.x + bounds.w - 5, bounds.y + 4, bounds.x + 4,
-                    bounds.y + bounds.h - 5, 0);
-  }
   const std::string message = panel.image.alt_text.empty() ? "Image unavailable" : panel.image.alt_text;
-  FontManager& font = FontManager::instance();
-  const int16_t y = bounds.y + std::max(0, (bounds.h - font.uiFontHeight()) / 2);
-  drawTextFit(canvas, font, bounds.x + 4, y, bounds.w - 8, message, 1, false, 6);
+  style::emptyState(canvas, FontManager::instance(), bounds, message);
 }
 
 }  // namespace

@@ -2,7 +2,7 @@
 // fallback_font.h — 内置 5x7 ASCII 回退字体
 //
 // SD 卡字体（.eefont / .bin）缺席时保证面板仍可显示文字：
-// 覆盖大写字母 / 数字 / 常用标点，小写映射为大写，其余字符画 .notdef 占位框。
+// 覆盖大写字母 / 数字 / 常用标点及 ° · – — … ▲ ▼，小写映射为大写，其余字符画 .notdef 占位框。
 // 字形为通用 5x7 点阵（本工程自制，无第三方品牌资源）。
 // 渲染约定与 CpFontRenderer 一致：gray==0 走纯黑 drawPixel（BW 帧），
 // gray>0 走 drawPixelGray（四级灰阶帧）。

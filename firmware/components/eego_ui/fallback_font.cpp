@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // fallback_font.cpp — 内置 5x7 ASCII 回退字体实现
 //
-// 字形表：0x20..0x5F（空格/标点/数字/大写字母），每字形 5 字节列编码，
+// 字形表：0x20..0x5F（空格/标点/数字/大写字母）+ 少量符号（° · – — − … ▲ ▼），每字形 5 字节列编码，
 // 每字节一列，bit0=顶行 … bit6=底行（7 行有效）。小写映射到大写，
 // 其余码点画 .notdef 占位框（空心矩形）。
 
@@ -83,7 +83,26 @@ constexpr uint8_t GLYPHS[64][5] = {
 };
 
 // 取字符字形：ASCII 直接映射（小写→大写），其余返回占位框
+// 常用非 ASCII 符号（仪表盘单位/占位）：° · – — − … ▲ ▼
+struct ExtraGlyph {
+    uint32_t codepoint;
+    uint8_t columns[5];
+};
+constexpr ExtraGlyph EXTRA_GLYPHS[] = {
+    {0x00B0, {0x00, 0x06, 0x09, 0x09, 0x06}},  // °
+    {0x00B7, {0x00, 0x00, 0x08, 0x00, 0x00}},  // ·
+    {0x2013, {0x08, 0x08, 0x08, 0x08, 0x08}},  // –
+    {0x2014, {0x08, 0x08, 0x08, 0x08, 0x08}},  // —
+    {0x2212, {0x08, 0x08, 0x08, 0x08, 0x08}},  // −
+    {0x2026, {0x40, 0x00, 0x40, 0x00, 0x40}},  // …
+    {0x25B2, {0x40, 0x70, 0x7C, 0x70, 0x40}},  // ▲
+    {0x25BC, {0x01, 0x07, 0x1F, 0x07, 0x01}},  // ▼
+};
+
 const uint8_t* glyphFor(uint32_t codepoint) {
+    for (const ExtraGlyph& extra : EXTRA_GLYPHS) {
+        if (extra.codepoint == codepoint) return extra.columns;
+    }
     if (codepoint >= 'a' && codepoint <= 'z') {
         codepoint -= ('a' - 'A');
     }

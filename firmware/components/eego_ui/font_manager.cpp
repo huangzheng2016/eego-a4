@@ -160,6 +160,17 @@ int16_t FontManager::uiFontHeight() const {
     return FALLBACK_GLYPH_H;
 }
 
+int16_t FontManager::uiFontAscender() const {
+    if (uiFmt_ == FontFormat::CpFontV4 && uiCp_) {
+        const int16_t ascender = uiCp_->info().ascender;
+        if (ascender > 0) return ascender;
+        return (int16_t)(uiCp_->fontHeight() * 4 / 5);
+    }
+    // EDCBook 以 cell 顶部为原点，无显式 ascender：按行高 4/5 近似。
+    if (uiFmt_ == FontFormat::EdcbookBin && uiEdc_) return (int16_t)(uiEdc_->fontHeight() * 4 / 5);
+    return FALLBACK_GLYPH_H;  // 5x7 回退字体无下行部，基线即 cell 底部
+}
+
 int16_t FontManager::bodyFontHeight() const {
     if (bodyFmt_ == FontFormat::CpFontV4 && bodyCp_) return bodyCp_->fontHeight();
     if (bodyFmt_ == FontFormat::EdcbookBin && bodyEdc_) return (int16_t)bodyEdc_->fontHeight();

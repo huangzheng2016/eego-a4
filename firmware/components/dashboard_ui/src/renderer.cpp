@@ -5,9 +5,11 @@
 #include <cstring>
 #include <new>
 
+#include "dashboard_ui/panel_hit.h"
 #include "dashboard_ui/text.h"
 #include "dashboard_ui/update.h"
 #include "panel_draw.h"
+#include "panel_style.h"
 
 namespace eego::dashboard::ui {
 namespace {
@@ -215,24 +217,42 @@ void drawPanel(PortraitCanvas& canvas, const Dashboard& dashboard, const PanelLa
                const VariableValues& variables, ImagePipeline& images, const Rect& clip) {
   const PanelSpec& panel = *layout.panel;
   FontManager& font = FontManager::instance();
-  canvas.fillRect(layout.bounds.x, layout.bounds.y, layout.bounds.w, layout.bounds.h, 1);
-  canvas.drawRect(layout.bounds.x, layout.bounds.y, layout.bounds.w, layout.bounds.h, 0);
+  const Rect& frame = layout.bounds;
+  canvas.fillRect(frame.x, frame.y, frame.w, frame.h, 1);
   if (panel.kind == PanelKind::Button) {
     drawButtonPanel(canvas, font, layout, variables);
     return;
   }
+  canvas.drawRoundRect(frame.x, frame.y, frame.w, frame.h, style::kRadius, 0);
 
-  Rect body = layout.content;
-  if (!panel.title.empty() && !body.empty()) {
+  // Title row (caption bold, top-left) + optional accessory on the right.
+  // panelChrome decides whether there is a title row (shared with hit-tests).
+  const PanelChrome chrome = panelChrome(font, panel, frame);
+  const Rect body = chrome.body;
+  if (chrome.title) {
+    const int16_t caption = style::lineHeight(font);
+    const Rect& row = chrome.title_row;
     std::string title;
     std::string error;
     if (!interpolateVariables(panel.title, variables, title, error)) title = "Invalid title";
-    const int16_t title_height = font.uiFontHeight() + 5;
-    drawTextFit(canvas, font, body.x, body.y, body.w, title, 1, true, 0);
-    canvas.drawLine(body.x, body.y + title_height - 2, body.x + body.w - 1,
-                    body.y + title_height - 2, 0);
-    body.y += title_height;
-    body.h -= title_height;
+    const HeaderAccessory accessory = panelHeaderAccessory(dashboard, panel);
+    const int16_t title_y = static_cast<int16_t>(row.y + (row.h - caption) / 2);
+    int16_t used = 0;
+    if (!accessory.text.empty()) {
+      const int16_t max_w = static_cast<int16_t>(row.w / 2);
+      if (accessory.badge) {
+        used = style::badge(canvas, font, row.right(), row.y, max_w, accessory.text,
+                            accessory.severity);
+      } else if (measureText(font, accessory.text, style::kCaption) + 1 <= max_w) {
+        used = static_cast<int16_t>(style::text(canvas, font, row.x, title_y, row.w,
+                                                accessory.text, style::kCaption, true,
+                                                style::Align::Right) +
+                                    1);
+      }
+    }
+    style::text(canvas, font, row.x, title_y,
+                static_cast<int16_t>(row.w - (used > 0 ? used + 8 : 0)), title, style::kCaption,
+                true);
   }
   if (body.empty()) return;
 

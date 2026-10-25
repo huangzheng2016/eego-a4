@@ -9,13 +9,20 @@
 | Component | Version | License | Project |
 |---|---:|---|---|
 | LodePNG | 20260119 | zlib | <https://github.com/lvandeve/lodepng> |
+| Noto Sans CJK SC Bold（数字显示字体位图子集） | 2.004（系统 fonts-noto-cjk） | SIL OFL 1.1 | <https://github.com/notofonts/noto-cjk> |
 
 LodePNG 位于 `components/third_party/lodepng/`，许可文本保留于
 `lodepng.cpp` / `lodepng.h` 头部（Copyright (c) 2005-2026 Lode Vandevenne），
 不得移除。本副本的裁剪与 ESP-IDF 分配器适配改动已在源码与组件
 CMakeLists 中标注（zlib 第 2 条要求的 altered-source 标记）。
 
-Noto Sans CJK 字体二进制不随仓库分发；本地转换和嵌入遵循 SIL OFL 1.1，
+`components/eego_ui/display_font_data.cpp` 是由 `tools/gen_digit_font.py` 从
+Noto Sans CJK SC Bold（Copyright 2014-2021 Adobe，SIL Open Font License 1.1，
+Reserved Font Name "Source"）栅格化的少量字符位图（数字、符号、拉丁字母，四个字号），
+随固件分发；OFL 允许嵌入软件分发，位图不作为独立字体出售。重新生成：
+`python3 firmware/tools/gen_digit_font.py`（需要 libfreetype 与该字体文件）。
+
+完整的 Noto Sans CJK 字体二进制不随仓库分发；本地转换和嵌入遵循 SIL OFL 1.1，
 来源为 <https://github.com/notofonts/noto-cjk>，许可由使用者自行核对。
 
 ## 构建期依赖（不随树打包）

@@ -11,6 +11,8 @@ idf_component_register(
         "eego_ui.cpp"
         "portrait_canvas.cpp"
         "fallback_font.cpp"
+        "display_font.cpp"
+        "display_font_data.cpp"
         "edcbook_font.cpp"
         "cpfont_renderer.cpp"
         "font_manager.cpp"

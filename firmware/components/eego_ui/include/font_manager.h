@@ -46,6 +46,8 @@ public:
 
     // 字体信息
     int16_t uiFontHeight() const;
+    // UI 字体基线距文本顶部的像素数（scale=1）。用于不同字号文字的基线对齐。
+    int16_t uiFontAscender() const;
     int16_t bodyFontHeight() const;
     int16_t uiTextWidth(const char* utf8) const;
     int16_t bodyTextWidth(const char* utf8) const;

@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <vector>
 
+#include "panel_style.h"
+
 namespace eego::dashboard::ui {
 namespace {
 
@@ -140,7 +142,9 @@ std::vector<std::string> wrapValid(FontManager& font, std::string_view text, int
         lines.emplace_back(text.substr(cursor, line_end - cursor));
         cursor = next;
       }
-      complete = last_paragraph && cursor >= end;
+      while (cursor < end && text[cursor] == ' ') ++cursor;
+      if (cursor < end) break;  // paragraph cut off by max_lines: truncated
+      complete = last_paragraph;
     }
     if (last_paragraph) {
       if (position == end) complete = true;
@@ -291,6 +295,17 @@ size_t drawTextWrapped(PortraitCanvas& canvas, FontManager& font, const Rect& bo
   return drawn;
 }
 
+namespace {
+
+bool isAlertLine(std::string_view line) {
+  for (const char* tag : {"WARN", "ERROR", "ERR ", "CRIT", "FATAL", "FAIL"}) {
+    if (line.find(tag) != std::string_view::npos) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
 void drawTextPanel(PortraitCanvas& canvas, FontManager& font, const PanelSpec& panel,
                    const Rect& bounds, const VariableValues& variables) {
   if (bounds.empty()) return;
@@ -300,49 +315,75 @@ void drawTextPanel(PortraitCanvas& canvas, FontManager& font, const PanelSpec& p
     interpolated = "Invalid text";
   }
   const std::string content = sanitizeText(interpolated, true);
+  if (content.find_first_not_of(" \n") == std::string::npos) {
+    style::emptyState(canvas, font, bounds, "No text");
+    return;
+  }
   const std::string& variant = panel.style.variant;
   const bool multiline = variant == "multiline" || variant == "description" ||
                          variant == "log_tail" || variant == "markdown" ||
                          (variant == "default" && panel.text.multiline);
   const bool multi_rows = multiline || variant == "key_value";
-  // 单行文字：面板高度放得下一行正文（含 4px 行距）时用正文字号，否则说明字号；
-  // 多行/键值文字统一说明字号。
-  const bool body_fits = bounds.h >= font.uiFontHeight() * kScaleBody + 4;
-  const int16_t scale =
-      !multiline && variant != "key_value" && body_fits ? kScaleBody : kScaleCaption;
-  const int16_t line_height = font.uiFontHeight() * scale + 4;
-  if (line_height <= 0) return;
+  const int16_t caption = font.uiFontHeight();
+  if (caption <= 0) return;
   size_t max_lines = panel.text.max_lines;
   if (multi_rows && !panel.text.multiline && max_lines == 1) max_lines = 8;
-  size_t lines = std::min<size_t>(max_lines, bounds.h / line_height);
-  if (!multi_rows) lines = std::min<size_t>(lines, 1);
-  if (lines == 0) return;
+  max_lines = std::max<size_t>(max_lines, 1);
 
   if (variant == "key_value") {
-    const std::vector<std::string_view> rows = boundedLines(content, lines, false);
-    const int16_t label_width = bounds.w * 2 / 5;
-    for (size_t i = 0; i < rows.size(); ++i) {
+    std::vector<std::string_view> rows;
+    for (std::string_view row : boundedLines(content, 64, false)) {
+      if (row.find_first_not_of(' ') != std::string_view::npos) rows.push_back(row);
+    }
+    if (rows.size() > max_lines) rows.resize(max_lines);
+    // Body size when every row fits comfortably, else caption.
+    const int16_t body_row = static_cast<int16_t>(caption * kScaleBody + 12);
+    const int16_t scale = bounds.w >= 280 && rows.size() * body_row <= static_cast<size_t>(bounds.h)
+                              ? kScaleBody : kScaleCaption;
+    const int16_t row_h = scale == kScaleBody ? body_row : static_cast<int16_t>(caption + 10);
+    const size_t count = std::min<size_t>(rows.size(), bounds.h / row_h);
+    int32_t key_w = 0;
+    std::vector<std::pair<std::string_view, std::string_view>> pairs;
+    for (size_t i = 0; i < count; ++i) {
       const size_t separator = rows[i].find_first_of(":=");
-      const std::string_view key = separator == std::string_view::npos ? std::string_view{} : rows[i].substr(0, separator);
-      const std::string_view value = separator == std::string_view::npos ? rows[i] : rows[i].substr(separator + 1);
-      const int16_t y = bounds.y + i * line_height;
-      drawTextFit(canvas, font, bounds.x, y, label_width - 4, key, scale, false, 6);
-      drawTextFit(canvas, font, bounds.x + label_width, y, bounds.w - label_width, value,
-                  scale, false, 0);
+      std::string_view key = separator == std::string_view::npos ? std::string_view{} : rows[i].substr(0, separator);
+      std::string_view value = separator == std::string_view::npos ? rows[i] : rows[i].substr(separator + 1);
+      while (!value.empty() && value.front() == ' ') value.remove_prefix(1);
+      while (!key.empty() && key.back() == ' ') key.remove_suffix(1);
+      key_w = std::max(key_w, measureText(font, key, scale));
+      pairs.emplace_back(key, value);
+    }
+    const int16_t label_w = static_cast<int16_t>(std::min<int32_t>(key_w + 16, bounds.w * 2 / 5));
+    for (size_t i = 0; i < pairs.size(); ++i) {
+      const int16_t y = static_cast<int16_t>(bounds.y + i * row_h);
+      const int16_t ty = static_cast<int16_t>(y + (row_h - caption * scale) / 2 - 1);
+      style::text(canvas, font, bounds.x, ty, static_cast<int16_t>(label_w - 8), pairs[i].first, scale);
+      style::text(canvas, font, static_cast<int16_t>(bounds.x + label_w), ty,
+                  static_cast<int16_t>(bounds.w - label_w), pairs[i].second, scale, true);
+      if (i + 1 < pairs.size())
+        style::dottedHLine(canvas, bounds.x, static_cast<int16_t>(bounds.right() - 1),
+                           static_cast<int16_t>(y + row_h - 1), 2);
     }
     return;
   }
 
   if (variant == "log_tail") {
+    const int16_t row_h = static_cast<int16_t>(caption + 5);
+    const size_t lines = std::min<size_t>(max_lines, bounds.h / row_h);
     const std::vector<std::string_view> rows = boundedLines(content, lines, true);
     for (size_t i = 0; i < rows.size(); ++i) {
-      drawTextFit(canvas, font, bounds.x, bounds.y + i * line_height, bounds.w, rows[i],
-                  scale, false, 0);
+      const int16_t y = static_cast<int16_t>(bounds.y + i * row_h);
+      const bool alert = isAlertLine(rows[i]);
+      if (alert) canvas.fillRect(bounds.x, static_cast<int16_t>(y + 1), 3, caption, 0);
+      style::text(canvas, font, static_cast<int16_t>(bounds.x + 8), y,
+                  static_cast<int16_t>(bounds.w - 8), rows[i], kScaleCaption, alert);
     }
     return;
   }
 
   if (variant == "markdown") {
+    const int16_t line_height = static_cast<int16_t>(caption + 5);
+    const size_t lines = std::min<size_t>(max_lines, bounds.h / line_height);
     const std::vector<std::string_view> rows = boundedLines(content, 64, false);
     size_t drawn = 0;
     for (const std::string_view source : rows) {
@@ -350,17 +391,16 @@ void drawTextPanel(PortraitCanvas& canvas, FontManager& font, const PanelSpec& p
       std::string_view row = source;
       const bool rule = row.size() >= 3 && row.find_first_not_of("- ") == std::string_view::npos &&
                         row.find('-') != std::string_view::npos;
-      const int16_t y = bounds.y + drawn * line_height;
+      const int16_t y = static_cast<int16_t>(bounds.y + drawn * line_height);
       if (rule) {
-        canvas.drawLine(bounds.x, y + line_height / 2, bounds.x + bounds.w - 1,
-                        y + line_height / 2, 0);
+        style::dottedHLine(canvas, bounds.x, static_cast<int16_t>(bounds.right() - 1),
+                           static_cast<int16_t>(y + line_height / 2), 2);
+      } else if (row.substr(0, 2) == "- " || row.substr(0, 2) == "* ") {
+        canvas.fillRect(static_cast<int16_t>(bounds.x + 2), static_cast<int16_t>(y + caption / 2 - 2), 4, 4, 0);
+        drawMarkdownInline(canvas, font, static_cast<int16_t>(bounds.x + 12), y,
+                           static_cast<int16_t>(bounds.w - 12), row.substr(2), kScaleCaption);
       } else {
-        if (row.substr(0, 2) == "- " || row.substr(0, 2) == "* ") {
-          drawRaw(canvas, font, bounds.x, y, "-", scale, false, 0);
-          drawMarkdownInline(canvas, font, bounds.x + 12, y, bounds.w - 12, row.substr(2), scale);
-        } else {
-          drawMarkdownInline(canvas, font, bounds.x, y, bounds.w, row, scale);
-        }
+        drawMarkdownInline(canvas, font, bounds.x, y, bounds.w, row, kScaleCaption);
       }
       ++drawn;
     }
@@ -368,9 +408,29 @@ void drawTextPanel(PortraitCanvas& canvas, FontManager& font, const PanelSpec& p
   }
 
   if (multiline) {
-    drawTextWrapped(canvas, font, bounds, content, scale, line_height, lines, 0);
-  } else {
-    drawTextFit(canvas, font, bounds.x, bounds.y, bounds.w, content, scale, false, 0);
+    // Body size when the whole text fits at it, else caption.
+    const int16_t body_line = static_cast<int16_t>(caption * kScaleBody + 6);
+    if (bounds.w >= 240) {
+      bool truncated = false;
+      const size_t room = std::min<size_t>(max_lines, bounds.h / body_line);
+      wrapValid(font, content, bounds.w, kScaleBody, room, truncated);
+      if (room > 0 && !truncated) {
+        drawTextWrapped(canvas, font, bounds, content, kScaleBody, body_line, room, 0);
+        return;
+      }
+    }
+    const int16_t line_height = static_cast<int16_t>(caption + 5);
+    drawTextWrapped(canvas, font, bounds, content, kScaleCaption, line_height,
+                    std::min<size_t>(max_lines, bounds.h / line_height), 0);
+    return;
+  }
+
+  // Single line: largest of headline/body/caption that fits.
+  for (const int16_t scale : {static_cast<int16_t>(3), kScaleBody, kScaleCaption}) {
+    if (caption * scale > bounds.h) continue;
+    if (scale > kScaleCaption && measureText(font, content, scale) > bounds.w) continue;
+    style::text(canvas, font, bounds.x, bounds.y, bounds.w, content, scale, scale > kScaleCaption);
+    return;
   }
 }
 
