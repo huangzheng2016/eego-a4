@@ -48,6 +48,8 @@ class ProvisionPortal {
 
   // AP 是否活跃（门户或兜底）
   bool apActive() const { return portal_running_ || fallback_running_; }
+  // 当前连在热点上的客户端数（AP 未开为 0）。
+  int apClientCount() const;
 
   // 门户 HTTP 活动上报（httpd handler 调用，重置 10 分钟空闲窗口）
   void notePortalActivity();

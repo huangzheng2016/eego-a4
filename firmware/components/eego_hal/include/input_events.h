@@ -56,6 +56,11 @@ struct TouchEvent {
   uint16_t x = 0;
   uint16_t y = 0;
   int64_t timestamp_us = 0;
+  // 触控原始坐标（GSLX680 12 位字，标定/诊断用；前置键与手势 FSM 单测中为 0）。
+  // Press/Move：本帧原始值；Release/Tap/Hold/Swipe*/Cancel：本次接触全部采样的均值。
+  uint16_t raw_x = 0;
+  uint16_t raw_y = 0;
+  uint16_t raw_samples = 0;  // 参与均值的采样帧数（0 = 无原始数据）
 };
 
 }  // namespace eego

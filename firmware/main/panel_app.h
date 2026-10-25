@@ -45,6 +45,7 @@
 
 #include "alert_core/snapshot.h"
 #include "battery_mode.h"
+#include "device_status.h"
 #include "alert_core/type_registry.h"
 #include "board/board_boot.h"
 #include "dashboard_runtime.h"
@@ -60,6 +61,7 @@
 #include "admin/render_preview.h"
 #include "input_confirm.h"
 #include "input_navigation.h"
+#include "touch_cal_screen.h"
 
 // 仅声明引用所需（定义见 alert_core/store.h，panel_app.cpp 经 net_stack 获得）
 namespace alert_core {
@@ -125,6 +127,8 @@ class PanelApp {
   void diagLang(const char* arg);
   void diagPage(const char* arg);
   void diagDashboard(const char* arg);
+  // touch [trace]|cal|marks on|off|show|reset：触摸诊断/校准（panel_diag.cpp）。
+  void diagTouch(const char* arg);
 
   // 组合根在 admin 模式判定后调用：进入/退出配网页。
   void enterProvision();
@@ -182,8 +186,41 @@ class PanelApp {
   void onTouchSwipe(eego::TouchEventType type, int64_t now_us);
   void onTouchHold(int16_t x, int16_t y);
 
+  // ---- 保持唤醒 / 设备状态 / 供电判定（keep_awake.h、device_status.h）----
+  void serviceKeepAwake(int64_t nowMs);
+  // 设备端切换（设置行/状态页软键/keep_awake 内建动作）：开启 → 延长/取消。
+  void toggleKeepAwake();
+  int64_t keepAwakeUntil(int64_t nowMs) const;  // 生效中的截止时刻（0 = 未开启）
+  // refUnix：空闲「下次」边界的参照时刻（渲染前 = 现在；平时 = 上次刷屏时刻）。
+  DeviceStateInfo computeDeviceState(int64_t nowMs, uint64_t refUnix);
+  void syncDeviceState(int64_t nowMs, bool beforeRender);
+  void publishPowerState(int64_t nowMs);
+  const char* powerReasonText() const;
+  battery::MainsDetector mainsDetector_;
+  bool usbHost_ = false;
+  uint32_t keepAwakeRevision_ = 0;
+  bool keepAwakeWasActive_ = false;
+  DeviceStateInfo deviceState_;
+  int64_t lastDeviceStateMs_ = -100000;
+  int64_t lastPowerPublishMs_ = -100000;
+  uint64_t lastDisplayedUnix_ = 0;
+  bool idleAnnounced_ = false;  // 进入空闲后已即时刷过一次（显示「空闲 · 下次 …」）
+
   // ---- 双击门控：仅当前页存在 up.double/down.double 有效绑定时开启 ----
   void syncDoublePress(bool force);
+
+  // ---- 触摸校准 / 触点诊断 ----
+  void startTouchCalibration();
+  bool serviceTouchCalibration(int64_t nowMs);  // true = 本轮由校准屏接管
+  void traceTouch(const eego::TouchEvent& ev);
+  void noteTouchMark(int16_t x, int16_t y);
+  void drawTouchMark(eego::PortraitCanvas& c) const;
+  TouchCalScreen touchCal_;
+  int64_t touchTraceUntilMs_ = 0;  // diag `touch`：打印原始/映射坐标截止时刻
+  bool touchMarks_ = false;        // 「显示触点」（运行时，默认关）
+  bool touchMarkPending_ = false;  // 有新触点待显示（下一次刷新画出）
+  int16_t touchMarkX_ = -1;
+  int16_t touchMarkY_ = -1;
 
   // ---- 动作（NetStack / DeviceSettings / recovery）----
   void doAck();                   // 告警详情：确认当前告警
@@ -230,8 +267,9 @@ class PanelApp {
   [[noreturn]] void sleepNow();
   // 深睡帧：离屏渲染、帧哈希、跳过/Fast/Full、保存到 SD 与 RTC。
   void presentSleepFrame(const battery::WakePlan& plan, uint64_t nowUnix);
-  std::string batteryStatusText(uint8_t bucket, uint64_t stamp, uint32_t intervalMin) const;
-  std::string nightPauseText(uint64_t resumeUnix) const;
+  // 深睡帧状态行的「下次」：stamp 起按 max-stale 推出的最迟刷新时刻（只依赖上次
+  // 刷屏时刻 → 数据不变时帧不变）。
+  DeviceStateInfo sleepingState(uint64_t stamp, uint32_t intervalMin) const;
   void drawNotice(const char* title, const char* line1, const char* line2, const char* line3);
   uint64_t frameHash() const;
   bool batchSucceeded() const;
@@ -291,6 +329,7 @@ class PanelApp {
   // ---- 跨任务信箱 ----
   void drainAdminMailbox();
   void drainNetBits();
+  void serviceApFallback(int64_t now);
 
   Deps deps_;
   DashboardRuntime dashboard_;
@@ -406,6 +445,9 @@ class PanelApp {
   int64_t wakePressGuardUntilMs_ = 0;  // 按键唤醒：唤醒那一下不当作操作
   int64_t lastInputMs_ = 0;
   bool fallbackArmed_ = false;
+  bool apFallbackAuto_ = false;      // 当前 AP 兜底由离线自动打开（连上后自动关闭）
+  int64_t apConnectedSinceMs_ = -1;  // 自动兜底期间 STA 连上的时刻
+  int64_t apFallbackCheckMs_ = 0;
 };
 
 }  // namespace panel

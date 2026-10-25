@@ -29,6 +29,7 @@ const char kLoaderHtml[] = R"HTML(<!DOCTYPE html>
 <h1>管理界面加载失败 / Admin app failed to load</h1>
 <p>管理界面托管在 GitHub Pages（)HTML" EEGO_WEB_APP_BASE R"HTML(），无法从该地址加载。请确认访问本页的电脑或手机能够连接互联网，然后刷新页面。</p>
 <p>The admin frontend is hosted on GitHub Pages ()HTML" EEGO_WEB_APP_BASE R"HTML() and could not be loaded. Make sure the computer or phone you are using has internet access, then reload this page.</p>
+<p>无需互联网的 WiFi 诊断 / Offline WiFi diagnostics: <a href="/wifi-diag">/wifi-diag</a></p>
 </div>
 <script src="/loader.js"></script>
 </body>

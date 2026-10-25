@@ -104,6 +104,13 @@ void PanelApp::diagNet() {
   printf("net: running=%d wifi_state=%d ssid=%s rssi=%d ip=%s backoff=%ums\n",
          ns.running ? 1 : 0, ns.wifi.state, ns.wifi.ssid.c_str(), ns.wifi.rssi,
          ns.wifi.ip.c_str(), static_cast<unsigned>(ns.wifi.reconnect_backoff_ms));
+  printf("net: wifi last_disconnect_reason=%u reconnect_attempts=%u disconnects=%u "
+         "driver_restarts=%u offline_ms=%u\n",
+         static_cast<unsigned>(ns.wifi.last_disconnect_reason),
+         static_cast<unsigned>(ns.wifi.reconnect_attempts),
+         static_cast<unsigned>(ns.wifi.disconnects),
+         static_cast<unsigned>(ns.wifi.driver_restarts),
+         static_cast<unsigned>(ns.wifi.offline_ms));
   printf("net: pool_sessions=%u alerts_db attached=%d records=%u bytes=%u compactions=%u "
          "io_failures=%u\n",
          static_cast<unsigned>(ns.pool_sessions), ns.alert_db.attached ? 1 : 0,

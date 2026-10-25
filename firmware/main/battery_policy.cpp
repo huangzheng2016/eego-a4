@@ -387,4 +387,96 @@ bool mainsPowered(uint8_t power_mode, bool charging, uint16_t battery_mv) {
   return charging;
 }
 
+const char* powerReasonName(PowerReason reason) {
+  switch (reason) {
+    case PowerReason::ForcedMains: return "forced_mains";
+    case PowerReason::ForcedBattery: return "forced_battery";
+    case PowerReason::NoBattery: return "no_battery";
+    case PowerReason::Charging: return "charging";
+    case PowerReason::UsbHost: return "usb_host";
+    case PowerReason::FullHold: return "full_hold";
+    case PowerReason::VoltageDrop: return "voltage_drop";
+    case PowerReason::BelowHold: return "below_hold";
+    case PowerReason::Battery: return "battery";
+  }
+  return "battery";
+}
+
+void MainsDetector::latch(uint16_t mv, int64_t now_ms) {
+  latched_ = true;
+  peak_mv_ = mv;
+  peak_ms_ = now_ms;
+}
+
+void MainsDetector::seedColdBoot(uint16_t battery_mv, int64_t now_ms) {
+  if (battery_mv >= kMainsHoldMv) latch(battery_mv, now_ms);
+}
+
+bool MainsDetector::update(uint8_t power_mode, const PowerSample& s, int64_t now_ms) {
+  if (power_mode == 1) {
+    mains_ = true;
+    reason_ = PowerReason::ForcedMains;
+    return mains_;
+  }
+  if (power_mode == 2) {
+    mains_ = false;
+    reason_ = PowerReason::ForcedBattery;
+    latched_ = false;
+    return mains_;
+  }
+  if (s.battery_mv == 0) {
+    mains_ = true;
+    reason_ = PowerReason::NoBattery;
+    return mains_;
+  }
+  if (s.charging || s.usb_host) {
+    // 外部供电确凿：锁存并以当前电压为峰值基准（充电中电压被抬高，停充后回落
+    // 到满电静置电压不算拔电——峰值在不充电时才开始跟踪）。
+    latch(s.battery_mv, now_ms);
+    mains_ = true;
+    reason_ = s.charging ? PowerReason::Charging : PowerReason::UsbHost;
+    return mains_;
+  }
+  if (latched_) {
+    if (reason_ == PowerReason::Charging || reason_ == PowerReason::UsbHost) {
+      // 刚停止充电/USB 主机断开：从此刻重新建立峰值基准。
+      peak_mv_ = s.battery_mv;
+      peak_ms_ = now_ms;
+    }
+    if (s.battery_mv < kMainsHoldMv) {
+      latched_ = false;
+      mains_ = false;
+      reason_ = PowerReason::BelowHold;
+      return mains_;
+    }
+    if (s.battery_mv >= peak_mv_) {
+      peak_mv_ = s.battery_mv;
+      peak_ms_ = now_ms;
+    } else if (peak_mv_ - s.battery_mv >= kUnplugDropMv && now_ms - peak_ms_ >= kUnplugWindowMs) {
+      latched_ = false;
+      mains_ = false;
+      reason_ = PowerReason::VoltageDrop;
+      return mains_;
+    }
+    mains_ = true;
+    reason_ = PowerReason::FullHold;
+    return mains_;
+  }
+  mains_ = false;
+  if (reason_ != PowerReason::VoltageDrop && reason_ != PowerReason::BelowHold) {
+    reason_ = PowerReason::Battery;
+  }
+  return mains_;
+}
+
+bool keepAwakeBlocks(int64_t now_ms, int64_t keep_awake_until_ms) {
+  return keep_awake_until_ms != 0 && now_ms < keep_awake_until_ms;
+}
+
+bool interactiveSleepDue(int64_t now_ms, int64_t last_activity_ms, uint32_t timeout_s,
+                         int64_t keep_awake_until_ms) {
+  if (keepAwakeBlocks(now_ms, keep_awake_until_ms)) return false;
+  return now_ms - last_activity_ms >= static_cast<int64_t>(timeout_s) * 1000;
+}
+
 }  // namespace panel::battery

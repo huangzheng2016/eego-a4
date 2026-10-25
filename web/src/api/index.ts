@@ -4,6 +4,8 @@
 import { request, setToken, getToken } from './client';
 import type { Bundle, PresetDoc, SourcePlan } from '../model/types';
 import type { FieldError } from '../model/errors';
+import type { KeepAwakeState, PowerState } from '../model/power';
+import type { WifiNetworkEdit } from '../model/wifi';
 
 export { ApiError, getToken, setToken, onUnauthorized, onConnectivity } from './client';
 
@@ -31,14 +33,24 @@ export const changePassword = (old_password: string, new_password: string) =>
 // ---------------------------------------------------------------- status
 export interface DeviceStatus {
   device: { fw_version: string; fw_sha256: string; uptime_s: number; mode: string };
-  network: { ssid: string; ip: string; rssi: number; wifi_state: number; ap_active: boolean };
+  network: { ssid: string; ip: string; rssi: number; wifi_state: number; ap_active: boolean; last_disconnect_reason?: number; reconnect_attempts?: number; disconnects?: number };
   time: { valid: boolean; now: number; sntp_synced: boolean; last_sync_at: number };
   memory: { internal_free: number; psram_free: number };
   storage: { sd_ready: boolean; config_valid: boolean };
   alerts: { available: boolean; critical?: number; warning?: number; info?: number; active_total?: number };
   security: { sessions: number; ingest_key_masked: string; provisioned: boolean };
+  /** Keep-awake override (RAM only on the device). */
+  keep_awake?: KeepAwakeState;
+  /** Power source/sleep state published by the device UI task. */
+  power?: PowerState;
 }
+/** Passive poll: does not count as activity (a battery device may still go to sleep). */
 export const getStatus = () => request<DeviceStatus>('/status', { timeoutMs: 8000 });
+
+// ---------------------------------------------------------------- keep awake ("config mode")
+/** minutes = 0 cancels; 1..240 keeps the device awake (no idle batching, no auto deep sleep). */
+export const setKeepAwake = (minutes: number) =>
+  request<KeepAwakeState>('/device/keep-awake', { method: 'POST', body: { minutes }, timeoutMs: 8000 });
 
 // ---------------------------------------------------------------- system
 export interface LogEntry {
@@ -117,6 +129,38 @@ export const writeCredential = (key: string, value: string) =>
   request<{ key: string; ref: string; deleted: boolean }>('/sources/credentials', { method: 'PUT', body: { key, value } });
 export const deleteCredential = (key: string) =>
   request<{ key: string; ref: string; deleted: boolean }>('/sources/credentials', { method: 'DELETE', body: { key } });
+
+// ---------------------------------------------------------------- WiFi networks (passwords write-only)
+export interface WifiNetwork {
+  ssid: string;
+  has_password: boolean;
+  pass_ref: string; // nvs:wifi/<index>
+}
+export interface WifiCurrent {
+  state: string; // disconnected | connecting | connected | failed | offline
+  connected: boolean;
+  ssid: string;
+  rssi: number;
+  ip: string;
+  /** Index of the connected network in `networks`, -1 when none. */
+  index: number;
+  last_disconnect_reason?: number;
+  reconnect_attempts?: number;
+  disconnects?: number;
+  driver_restarts?: number;
+  offline_ms?: number;
+  reconnect_backoff_ms?: number;
+}
+export interface WifiList {
+  /** Order = connection priority. */
+  networks: WifiNetwork[];
+  max: number;
+  current: WifiCurrent;
+}
+export const getWifi = () => request<WifiList>('/config/wifi');
+/** Replaces the whole ordered list (add/edit/delete/reorder in one call). */
+export const putWifi = (networks: WifiNetworkEdit[]) =>
+  request<WifiList>('/config/wifi', { method: 'PUT', body: { networks }, timeoutMs: 15000 });
 
 // ---------------------------------------------------------------- dashboard
 export const getDashboard = () => request<Bundle>('/dashboard');

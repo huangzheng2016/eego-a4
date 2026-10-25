@@ -2,8 +2,8 @@
 // is served from the device's "/" loader page with no server-side routes.
 import { useEffect, useState } from 'react';
 
-export type Route = 'editor' | 'templates' | 'sources' | 'rules' | 'credentials' | 'settings' | 'alerts' | 'system' | 'preview' | 'welcome';
-export const ROUTES: Route[] = ['editor', 'templates', 'sources', 'rules', 'credentials', 'settings', 'alerts', 'system', 'preview', 'welcome'];
+export type Route = 'editor' | 'templates' | 'sources' | 'rules' | 'credentials' | 'wifi' | 'settings' | 'alerts' | 'system' | 'preview' | 'welcome';
+export const ROUTES: Route[] = ['editor', 'templates', 'sources', 'rules', 'credentials', 'wifi', 'settings', 'alerts', 'system', 'preview', 'welcome'];
 
 function parse(): { route: Route; arg: string; explicit: boolean } {
   const [, r = '', ...rest] = location.hash.replace(/^#/, '').split('/');

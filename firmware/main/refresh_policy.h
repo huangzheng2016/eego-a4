@@ -42,6 +42,10 @@ class RefreshPolicy {
 
   // 用户交互（切回 Active；清除已登记的边界等待）。
   void noteInteraction(int64_t mono_ms);
+  // 保持唤醒（配置模式）：hold_until_ms（单调时钟）之前恒为 Active；0 = 取消。
+  // 到期后按最后一次交互重新判定（过期即恢复原节奏，不额外宽限）。
+  void setHoldUntil(int64_t hold_until_ms) { hold_until_ms_ = hold_until_ms; }
+  int64_t holdUntil() const { return hold_until_ms_; }
   bool idle(int64_t mono_ms) const;
   int64_t lastInteractionMs() const { return last_interaction_ms_; }
 
@@ -65,6 +69,7 @@ class RefreshPolicy {
  private:
   RefreshPolicyConfig config_;
   int64_t last_interaction_ms_ = 0;
+  int64_t hold_until_ms_ = 0;
   uint64_t due_unix_ = 0;
   int64_t due_mono_ms_ = 0;
   uint64_t last_render_unix_ = 0;

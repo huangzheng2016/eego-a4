@@ -20,6 +20,7 @@
 
 #include "admin/admin.h"
 #include "admin/display_snapshot.h"
+#include "admin/keep_awake.h"
 
 #include <cctype>
 #include <cstdio>
@@ -40,6 +41,7 @@
 #include "dashboard_api.h"
 #include "dashboard_path.h"
 #include "loader_page.h"
+#include "wifi_diag.h"
 #include "device_settings/device_settings.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -52,6 +54,7 @@
 #include "lwip/sockets.h"
 #include "net_stack/http_push_bridge.h"
 #include "net_stack/net_task.h"
+#include "net_stack/wifi_list.h"
 #include "net_stack/wifi_manager.h"
 #include "admin/provision_portal.h"
 #include "sd_card.h"
@@ -328,8 +331,9 @@ bool ingestKeyPresented(httpd_req_t* req) {
 
 std::atomic<int64_t> g_last_authenticated_ms{0};
 
-// Bearer 端点统一认证。失败时已回 401/403。
-bool requireBearer(httpd_req_t* req, std::string& token_out) {
+// Bearer 端点统一认证。失败时已回 401/403。activity=false：被动轮询（GET /status），
+// 不计入「有人在用」（电池交互期不因 web 端开着就永不休眠；保持唤醒用显式 API）。
+bool requireBearer(httpd_req_t* req, std::string& token_out, bool activity = true) {
   if (ingestKeyPresented(req)) {
     sendError(req, 403, errc::kForbidden, "ingest key cannot access this resource");
     return false;
@@ -340,7 +344,9 @@ bool requireBearer(httpd_req_t* req, std::string& token_out) {
     return false;
   }
   token_out = std::move(token);
-  g_last_authenticated_ms.store(esp_timer_get_time() / 1000, std::memory_order_relaxed);
+  if (activity) {
+    g_last_authenticated_ms.store(esp_timer_get_time() / 1000, std::memory_order_relaxed);
+  }
   return true;
 }
 
@@ -726,6 +732,24 @@ esp_err_t h_alert_get(httpd_req_t* req, const std::string& id) {
 // ---------------------------------------------------------------------------
 // 状态 / 类型 / 日志
 // ---------------------------------------------------------------------------
+alert_core::JsonValue keepAwakeJson() {
+  using alert_core::JsonValue;
+  const int64_t now_ms = esp_timer_get_time() / 1000;
+  const uint32_t remaining = keep_awake::remainingS(now_ms, keepAwakeUntilMs());
+  const int64_t sys = static_cast<int64_t>(time(nullptr));
+  const int64_t until =
+      remaining > 0 && sys >= static_cast<int64_t>(net::kPlausibleUnixFloor)
+          ? sys + static_cast<int64_t>(remaining)
+          : 0;
+  return JsonValue::makeObject({
+      {"active", JsonValue::makeBool(remaining > 0)},
+      {"remaining_s", JsonValue::makeInt(remaining)},
+      {"until", JsonValue::makeInt(until)},
+      {"default_min",
+       JsonValue::makeInt(settings::DeviceSettings::instance().snapshot().values.keep_awake_min)},
+  });
+}
+
 esp_err_t h_status(httpd_req_t* req) {
   using alert_core::JsonValue;
   JsonValue::Object root;
@@ -763,6 +787,10 @@ esp_err_t h_status(httpd_req_t* req) {
     netobj.emplace_back("ip", JsonValue::makeString(ns.wifi.ip));
     netobj.emplace_back("rssi", JsonValue::makeInt(ns.wifi.rssi));
     netobj.emplace_back("wifi_state", JsonValue::makeInt(ns.wifi.state));
+    netobj.emplace_back("last_disconnect_reason",
+                        JsonValue::makeInt(ns.wifi.last_disconnect_reason));
+    netobj.emplace_back("reconnect_attempts", JsonValue::makeInt(ns.wifi.reconnect_attempts));
+    netobj.emplace_back("disconnects", JsonValue::makeInt(ns.wifi.disconnects));
   } else {
     netobj.emplace_back("ssid", JsonValue::makeString(net::WifiManager::instance().currentSsid()));
     netobj.emplace_back("ip", JsonValue::makeString(net::WifiManager::instance().currentIp()));
@@ -832,7 +860,58 @@ esp_err_t h_status(httpd_req_t* req) {
                          JsonValue::makeBool(AuthManager::instance().hasPassword())},
                     }));
 
+  // 保持唤醒 + 电源/休眠状态（app_task 定期发布的快照；设备是否会很快休眠一目了然）
+  root.emplace_back("keep_awake", keepAwakeJson());
+  const PowerSnapshot power = powerSnapshot();
+  if (power.valid) {
+    root.emplace_back(
+        "power",
+        JsonValue::makeObject({
+            {"source", JsonValue::makeString(power.source)},
+            {"source_reason", JsonValue::makeString(power.source_reason)},
+            {"power_mode", JsonValue::makeString(power.power_mode)},
+            {"mode", JsonValue::makeString(power.mode)},
+            {"battery_pct", JsonValue::makeInt(power.battery_pct)},
+            {"battery_mv", JsonValue::makeInt(power.battery_mv)},
+            {"charging", JsonValue::makeBool(power.charging)},
+            {"usb_host", JsonValue::makeBool(power.usb_host)},
+            {"next_wake", JsonValue::makeInt(static_cast<int64_t>(power.next_wake))},
+            {"next_refresh", JsonValue::makeInt(static_cast<int64_t>(power.next_refresh))},
+            {"sleep_in_s", JsonValue::makeInt(power.sleep_in_s)},
+            {"last_wake_reason", JsonValue::makeString(power.last_wake_reason)},
+            {"sleeps_since_boot", JsonValue::makeInt(power.sleeps_since_boot)},
+            {"last_screen_update", JsonValue::makeInt(static_cast<int64_t>(power.last_screen_update))},
+        }));
+  }
+
   return sendJson(req, 200, JsonValue::makeObject(std::move(root)).toString());
+}
+
+// ---------------------------------------------------------------------------
+// 保持唤醒（配置模式）：POST /device/keep-awake {"minutes":N}（0 = 取消，≤240）
+// ---------------------------------------------------------------------------
+esp_err_t h_keep_awake_get(httpd_req_t* req) {
+  return sendJson(req, 200, keepAwakeJson().toString());
+}
+
+esp_err_t h_keep_awake_post(httpd_req_t* req) {
+  using alert_core::JsonValue;
+  if (!contentTypeJsonOk(req)) {
+    return sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
+  }
+  std::string body;
+  if (readBodyBudget(req, kBodyBudgetConfirm, body) != 0) return ESP_OK;
+  JsonValue root;
+  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  const JsonValue* minutes = root.find("minutes");
+  if (minutes == nullptr || minutes->type() != JsonValue::Type::Int ||
+      !keep_awake::validRequestMinutes(minutes->intValue())) {
+    FieldErrors errs = fieldErr("minutes", "integer in [0, 240] required (0 = cancel)");
+    return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
+  }
+  setKeepAwakeMinutes(static_cast<uint32_t>(minutes->intValue()));
+  ADMIN_LOG_INFO("keep-awake %d min via api", static_cast<int>(minutes->intValue()));
+  return sendJson(req, 200, keepAwakeJson().toString());
 }
 
 esp_err_t h_types_list(httpd_req_t* req) {
@@ -1277,7 +1356,7 @@ esp_err_t h_wifi_add(httpd_req_t* req) {
   if (ssid.empty() || ssid.size() > 32) {
     errs.push_back({"ssid", "must be 1..32 bytes"});
   }
-  if (!password.empty() && (password.size() < 8 || password.size() > 63)) {
+  if (!net::validWifiPassword(password)) {
     errs.push_back({"password", "must be empty (open) or 8..63 bytes"});
   }
   if (!errs.empty()) {
@@ -1325,6 +1404,134 @@ esp_err_t h_wifi_remove(httpd_req_t* req) {
   setSecurityHeaders(req);
   httpd_resp_send(req, "", 0);
   return ESP_OK;
+}
+
+// GET/PUT /config/wifi：完整网络列表（顺序 = 连接优先级）+ 当前连接。
+// 绝不返回密码：只给 ssid / has_password / pass_ref。
+std::string wifiListJson() {
+  using alert_core::JsonValue;
+  std::vector<net::WifiAccount> accounts;
+  net::CredentialStore::loadWifiAccounts(accounts);
+  JsonValue::Array networks;
+  for (size_t i = 0; i < accounts.size(); i++) {
+    networks.push_back(JsonValue::makeObject({
+        {"ssid", JsonValue::makeString(accounts[i].ssid)},
+        {"has_password", JsonValue::makeBool(!accounts[i].password.empty())},
+        {"pass_ref", JsonValue::makeString("nvs:wifi/" + std::to_string(i))},
+    }));
+    net::CredentialStore::secureErase(accounts[i].password);
+  }
+  net::NetStatusSnapshot ns;
+  if (!net::NetStack::instance().queryStatus(ns)) {
+    auto& wifi = net::WifiManager::instance();
+    ns.wifi.ssid = wifi.currentSsid();
+    ns.wifi.ip = wifi.currentIp();
+    ns.wifi.rssi = wifi.rssi();
+    ns.wifi.state = static_cast<int>(wifi.state());
+    ns.wifi.last_disconnect_reason = wifi.lastDisconnectReason();
+    ns.wifi.driver_restarts = wifi.driverRestarts();
+  }
+  const std::string& ssid = ns.wifi.ssid;
+  const std::string& ip = ns.wifi.ip;
+  const int rssi = ns.wifi.rssi;
+  const int state = ns.wifi.state;
+  const bool connected = state == static_cast<int>(net::WifiState::Connected);
+  int index = -1;
+  for (size_t i = 0; connected && i < accounts.size(); i++) {
+    if (accounts[i].ssid == ssid) index = static_cast<int>(i);
+  }
+  JsonValue::Object current;
+  current.emplace_back("state",
+                       JsonValue::makeString(net::wifiStateName(static_cast<net::WifiState>(state))));
+  current.emplace_back("connected", JsonValue::makeBool(connected));
+  current.emplace_back("ssid", JsonValue::makeString(connected ? ssid : ""));
+  current.emplace_back("rssi", JsonValue::makeInt(connected ? rssi : 0));
+  current.emplace_back("ip", JsonValue::makeString(connected ? ip : ""));
+  current.emplace_back("index", JsonValue::makeInt(index));
+  current.emplace_back("last_disconnect_reason",
+                       JsonValue::makeInt(ns.wifi.last_disconnect_reason));
+  current.emplace_back("reconnect_attempts", JsonValue::makeInt(ns.wifi.reconnect_attempts));
+  current.emplace_back("disconnects", JsonValue::makeInt(ns.wifi.disconnects));
+  current.emplace_back("driver_restarts", JsonValue::makeInt(ns.wifi.driver_restarts));
+  current.emplace_back("offline_ms", JsonValue::makeInt(ns.wifi.offline_ms));
+  current.emplace_back("reconnect_backoff_ms", JsonValue::makeInt(ns.wifi.reconnect_backoff_ms));
+  return JsonValue::makeObject({
+                                   {"networks", JsonValue::makeArray(std::move(networks))},
+                                   {"max", JsonValue::makeInt(net::kMaxWifiNetworks)},
+                                   {"current", JsonValue::makeObject(std::move(current))},
+                               })
+      .toString();
+}
+
+esp_err_t h_wifi_list_get(httpd_req_t* req) { return sendJson(req, 200, wifiListJson()); }
+
+// PUT body：{"networks":[{"ssid":"a","password":"********"},{"ssid":"b","password":"..."},
+//   {"ssid":"c2","previous_ssid":"c"}]}。password 缺省或 "********" = 保留
+// （previous_ssid 缺省时按 ssid 查找）；"" = 开放网络。
+esp_err_t h_wifi_list_put(httpd_req_t* req) {
+  using alert_core::JsonValue;
+  if (!contentTypeJsonOk(req)) {
+    return sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
+  }
+  std::string body;
+  const int rb = readBodyBudget(req, kBodyBudgetSmall, body);
+  if (rb != 0) return ESP_OK;
+  JsonValue root;
+  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  net::CredentialStore::secureErase(body);
+  const JsonValue* list = root.type() == JsonValue::Type::Object ? root.find("networks") : nullptr;
+  if (list == nullptr || list->type() != JsonValue::Type::Array) {
+    return sendError(req, 400, errc::kInvalidRequest, "networks (array) required");
+  }
+  auto entries = std::make_shared<std::vector<net::WifiListEntry>>();
+  for (size_t i = 0; i < list->arrayItems().size(); i++) {
+    const JsonValue& item = list->arrayItems()[i];
+    const std::string prefix = "networks[" + std::to_string(i) + "]";
+    if (item.type() != JsonValue::Type::Object) {
+      const FieldErrors errs = fieldErr(prefix, "must be an object");
+      return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
+    }
+    net::WifiListEntry entry;
+    if (!jsonStringField(item, "ssid", entry.ssid)) {
+      const FieldErrors errs = fieldErr(prefix + ".ssid", "string required");
+      return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
+    }
+    const JsonValue* password = item.find("password");
+    if (password == nullptr) {
+      entry.keep_password = true;
+    } else if (password->type() != JsonValue::Type::String) {
+      const FieldErrors errs = fieldErr(prefix + ".password", "must be a string");
+      return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
+    } else if (password->stringValue() == net::kWifiPasswordKeep) {
+      entry.keep_password = true;
+    } else {
+      entry.password = password->stringValue();
+    }
+    jsonStringField(item, "previous_ssid", entry.previous_ssid);
+    entries->push_back(std::move(entry));
+  }
+  // 预校验（含"保留密码"引用存在性），app_task 执行时对最新 NVS 再校验一次。
+  {
+    std::vector<net::WifiAccount> current, merged;
+    net::CredentialStore::loadWifiAccounts(current);
+    net::WifiListError list_error;
+    const bool ok = net::applyWifiListEdit(current, *entries, merged, list_error);
+    for (auto& a : current) net::CredentialStore::secureErase(a.password);
+    for (auto& a : merged) net::CredentialStore::secureErase(a.password);
+    if (!ok) {
+      const FieldErrors errs = fieldErr(list_error.field, list_error.message);
+      return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
+    }
+  }
+  AdminCommand cmd;
+  cmd.type = AdminCommandType::ApplyWifi;
+  cmd.wifi_list = entries;
+  AdminResult res;
+  const bool ok = runCommand(req, cmd, res);
+  for (auto& e : *entries) net::CredentialStore::secureErase(e.password);
+  if (!ok) return ESP_OK;
+  ADMIN_LOG_INFO("wifi list replaced via api: networks=%u", static_cast<unsigned>(entries->size()));
+  return sendJson(req, 200, wifiListJson());
 }
 
 // ---------------------------------------------------------------------------
@@ -1604,8 +1811,16 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
   if (m == HTTP_GET) {
     if (!rateLimit(req, "get:" + clientIp(req), 60, 60)) return ESP_OK;  // GET 60/min/IP
     if (strcmp(path, "status") == 0) {
-      if (!bearer()) return ESP_OK;
+      if (!requireBearer(req, token, false)) return ESP_OK;  // 被动轮询：不计活动
       return h_status(req);
+    }
+    if (strcmp(path, "wifi/diag") == 0) {
+      if (!requireBearer(req, token, false)) return ESP_OK;  // 诊断页 5s 轮询：不计活动
+      return sendJson(req, 200, wifi_diag::diagJson());
+    }
+    if (strcmp(path, "device/keep-awake") == 0) {
+      if (!requireBearer(req, token, false)) return ESP_OK;
+      return h_keep_awake_get(req);
     }
     if (strcmp(path, "types") == 0) {
       if (!bearer()) return ESP_OK;
@@ -1626,6 +1841,10 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     if (strcmp(path, "config/schema") == 0) {
       if (!bearer()) return ESP_OK;
       return h_config_schema(req);
+    }
+    if (strcmp(path, "config/wifi") == 0) {
+      if (!bearer()) return ESP_OK;
+      return h_wifi_list_get(req);
     }
     if (strcmp(path, "settings") == 0) {
       if (!bearer()) return ESP_OK;
@@ -1664,6 +1883,19 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
   }
 
   if (m == HTTP_POST) {
+    if (strcmp(path, "wifi/retry") == 0 || strcmp(path, "wifi/scan") == 0) {
+      if (!bearer()) return ESP_OK;
+      const bool scan = path[5] == 's';
+      if (!rateLimit(req, std::string(scan ? "wifi-scan:" : "wifi-retry:") + token.substr(0, 8), 5,
+                     1)) {
+        return ESP_OK;
+      }
+      if (scan && !wifi_diag::scanNow()) {
+        return sendError(req, 409, errc::kConflict, "wifi busy connecting; showing last scan");
+      }
+      if (!scan) wifi_diag::retryNow();
+      return sendJson(req, 200, "{\"ok\":true}");
+    }
     if (strcmp(path, "auth/logout") == 0) {
       if (!bearer()) return ESP_OK;
       return h_logout(req);
@@ -1709,6 +1941,11 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
       if (!bearer()) return ESP_OK;
       return h_reboot(req);
     }
+    if (strcmp(path, "device/keep-awake") == 0) {
+      if (!bearer()) return ESP_OK;
+      if (!rateLimit(req, "keep-awake:" + token.substr(0, 8), 60, 30)) return ESP_OK;
+      return h_keep_awake_post(req);
+    }
     if (strcmp(path, "system/factory-reset") == 0) {
       if (!bearer()) return ESP_OK;
       return h_factory_reset(req);
@@ -1728,6 +1965,11 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     if (strcmp(path, "settings") == 0) {
       if (!bearer()) return ESP_OK;
       return h_settings_put(req);
+    }
+    if (strcmp(path, "config/wifi") == 0) {
+      if (!bearer()) return ESP_OK;
+      if (!rateLimit(req, "wifi-write:" + token.substr(0, 8), 60, 20)) return ESP_OK;
+      return h_wifi_list_put(req);
     }
     if (strcmp(path, "sources/credentials") == 0) {
       if (!bearer()) return ESP_OK;
@@ -1769,6 +2011,16 @@ esp_err_t wildcardHandler(httpd_req_t* req) {
   if (req->method == HTTP_GET) {
     if (strcmp(uri, "/") == 0 || strncmp(uri, "/?", 2) == 0) return h_root_page(req);
     if (strcmp(uri, "/loader.js") == 0) return h_loader_js(req);
+    // 离线 WiFi 诊断页（零数据静态资源；数据走 Bearer 的 /api/v1/wifi/diag）。
+    if (strcmp(uri, "/wifi-diag") == 0) {
+      return sendStatic(req, "text/html; charset=utf-8", wifi_diag::kHtml, "default-src 'self'");
+    }
+    if (strcmp(uri, "/wifi-diag.js") == 0) {
+      return sendStatic(req, "application/javascript; charset=utf-8", wifi_diag::kJs, nullptr);
+    }
+    if (strcmp(uri, "/wifi-diag.css") == 0) {
+      return sendStatic(req, "text/css; charset=utf-8", wifi_diag::kCss, nullptr);
+    }
   }
   if (strncmp(uri, "/api/v1/", 8) == 0) {
     std::string path(uri + 8);

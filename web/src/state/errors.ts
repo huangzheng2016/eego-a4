@@ -4,7 +4,8 @@ import type { TFn } from '../i18n';
 /** Human message for an API failure. */
 export function errorText(e: unknown, t: TFn): string {
   if (e instanceof ApiError) {
-    if (e.status === 0) return t(e.code === 'timeout' ? 'err.timeout' : 'err.network');
+    // Unreachable: most often a battery device in deep sleep (HTTP is down while asleep).
+    if (e.status === 0) return `${t(e.code === 'timeout' ? 'err.timeout' : 'err.network')} — ${t('err.asleep')}`;
     if (e.status === 409) return t('err.conflict');
     if (e.status === 429) return t('err.rate') + (e.retryAfter ? ` (${e.retryAfter}s)` : '');
     if (e.status === 413) return t('err.too_large');

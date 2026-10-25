@@ -10,6 +10,7 @@
 #include <ctime>
 
 #include "admin/admin.h"
+#include "admin/keep_awake.h"
 #include "admin/provision_portal.h"
 #include "dashboard_ui/preview_render.h"
 #include "alert_core/types.h"
@@ -94,6 +95,7 @@ int64_t PanelApp::nowMs() const { return esp_timer_get_time() / 1000; }
 
 void PanelApp::begin(const Deps& deps) {
   deps_ = deps;
+  touchCal_.begin(deps.canvas, deps.touch);
   settings_ = eego::settings::DeviceSettings::instance().snapshot().values;
   wakeSource_ = battery::wakeSource();
   fastWake_ = deps.fastWake;
@@ -109,7 +111,15 @@ void PanelApp::begin(const Deps& deps) {
   lastInputMs_ = lastBatMs_;
   lastFullRenderMs_ = lastBatMs_;
 
+  usbHost_ = eego::PowerManager::instance().usbHostConnected();
+  // 冷启动（插充电器开机、电池已满 → 充电指示不亮）预先锁存常供电；深睡唤醒不锁存。
+  if (!battery::deepSleepWake(wakeSource_)) {
+    mainsDetector_.seedColdBoot(batCache_.millivolts, lastBatMs_);
+  }
   mains_ = computeMains();
+  ESP_LOGI(TAG, "power source: %s (reason: %s, %umV, charging=%d, usb=%d)",
+           mains_ ? "mains" : "battery", battery::powerReasonName(mainsDetector_.reason()),
+           batCache_.millivolts, (charging_ || batCache_.charging) ? 1 : 0, usbHost_ ? 1 : 0);
   NetStack::instance().wifi().setPowerSave(mains_);
   phaseStartMs_ = lastBatMs_;
   wakeStartUnix_ = TimeSource::valid() ? TimeSource::now() : 0;
@@ -273,17 +283,46 @@ void PanelApp::drainNetBits() {
   if (bits == 0) return;
   netStatusCacheMs_ = 0;  // WiFi 跃迁 → 立即刷新地址/信号缓存
   if (page_ != Page::Dashboard) markDirty();
-  // WiFi 全账号失败 → AP 兜底（auto_ap_fallback 判定在 app_task，M13 F2）
-  if ((bits & kNetBitWifi) != 0 && wifiState_.load() == 4 /*OfflineMode*/ &&
-      !fallbackArmed_) {
-    fallbackArmed_ = true;
-    if (admin::ConfigStore::instance().admin().auto_ap_fallback &&
-        !admin::ProvisionPortal::instance().apActive()) {
-      ESP_LOGW(TAG, "wifi offline: opening AP fallback");
-      admin::ProvisionPortal::instance().openApFallback();
+}
+
+// WiFi 持续失败 → 自动 AP 兜底（auto_ap_fallback，M13 F2）。单射频：热点会与 STA
+// 争信道，所以不在第一轮失败就开（WifiManager::apFallbackDue：连续 3 轮失败 / 已存
+// 网络 2 分钟不可见 / 无已存网络）；热点开着时 STA 继续重试，连上后自动关闭
+// （有客户端连着热点时宽限 2 分钟）。手动打开的恢复热点不自动关闭。
+void PanelApp::serviceApFallback(int64_t now) {
+  if (fastWake_ || now - apFallbackCheckMs_ < 2000) return;
+  apFallbackCheckMs_ = now;
+  admin::ProvisionPortal& portal = admin::ProvisionPortal::instance();
+  eego::net::WifiManager& wifi = eego::net::WifiManager::instance();
+  const bool connected = wifi.isConnected();
+  if (portal.isApFallbackActive()) {
+    if (!apFallbackAuto_ || !connected) {
+      apConnectedSinceMs_ = -1;
+      return;
     }
+    if (apConnectedSinceMs_ < 0) apConnectedSinceMs_ = now;
+    const int64_t grace = portal.apClientCount() > 0 ? 120000 : 10000;
+    if (now - apConnectedSinceMs_ >= grace) {
+      ESP_LOGI(TAG, "wifi connected: closing automatic AP fallback");
+      portal.closeApFallback("wifi connected");
+      apFallbackAuto_ = false;
+      apConnectedSinceMs_ = -1;
+    }
+    return;
   }
-  if (wifiState_.load() == 2 /*Connected*/) fallbackArmed_ = false;
+  apFallbackAuto_ = false;
+  apConnectedSinceMs_ = -1;
+  if (connected) {
+    fallbackArmed_ = false;  // 下一次离线可再次自动开热点
+    return;
+  }
+  if (fallbackArmed_ || portal.apActive() || !admin::adminApiRunning()) return;
+  if (!admin::ConfigStore::instance().admin().auto_ap_fallback) return;
+  if (!wifi.apFallbackDue(now)) return;
+  fallbackArmed_ = true;
+  ESP_LOGW(TAG, "wifi offline after %u failed passes: opening AP fallback",
+           static_cast<unsigned>(wifi.diagnostics().failed_passes));
+  if (portal.openApFallback() == ESP_OK) apFallbackAuto_ = true;
 }
 
 void PanelApp::drainAdminMailbox() {
@@ -332,6 +371,8 @@ void PanelApp::service() {
 
   drainAdminMailbox();
   drainNetBits();
+  serviceApFallback(now);
+  serviceKeepAwake(now);
 
   // 外部告警快照（无锁 acquire）：只有告警详情/状态页直接展示 store 内容；
   // dashboard 告警面板由 DashboardRuntime::service 自行跟踪快照代际。
@@ -345,8 +386,11 @@ void PanelApp::service() {
   }
 
   refreshBattery(now);
-  if (now - lastChargeMs_ > 30000) {
+  if (now - lastChargeMs_ > 5000) {
+    // 充电脚与 USB 主机连接都只是寄存器/GPIO 读取：5s 一次，供电判定（含拔电
+    // 滞回）见 battery::MainsDetector。
     charging_ = eego::PowerManager::instance().isCharging();
+    usbHost_ = eego::PowerManager::instance().usbHostConnected();
     lastChargeMs_ = now;
   }
 
@@ -429,6 +473,7 @@ void PanelApp::service() {
     // 常供电的夜间暂停：窗口内深睡到窗口结束（配网/BLE 配网期间推迟）。电池模式
     // 由唤醒计划处理（交互期超时后的深睡计划会落到窗口结束，定时唤醒同理）。
     if (battPhase_ == BattPhase::Mains && !sleepPending_ &&
+        !battery::keepAwakeBlocks(now, keepAwakeUntil(now)) &&
         !admin::ProvisionPortal::instance().apActive() &&
         !eego::ble::BleManager::instance().sleepBlocked()) {
       uint64_t wake_at = 0;
@@ -442,6 +487,7 @@ void PanelApp::service() {
   serviceSleep(now);
   // 定时唤醒快速路径不做交互式渲染：深睡帧由 presentSleepFrame 统一决定。
   if (battPhase_ == BattPhase::Fetching) return;
+  if (serviceTouchCalibration(now)) return;
 
   if (settings_.epd_full_refresh_s > 0 &&
       now - lastFullRenderMs_ >= static_cast<int64_t>(settings_.epd_full_refresh_s) * 1000) {
@@ -453,8 +499,27 @@ void PanelApp::service() {
     }
   }
 
+  if (now - lastDeviceStateMs_ >= 1000) syncDeviceState(now, false);
+  if (now - lastPowerPublishMs_ >= 2000) publishPowerState(now);
+
   if (page_ == Page::Dashboard) {
+    if (touchMarkPending_ && now - lastRenderMs_ >= kRenderThrottleMs) {
+      // 「显示触点」：整页离屏重画（抹掉上一个标记）→ 叠加标记 → B/W 快刷。
+      touchMarkPending_ = false;
+      dashboard_.invalidateAll();
+      dashboard_.renderOffscreen();
+      drawTouchMark(*deps_.canvas);
+      deps_.canvas->display(eego::RefreshMode::Fast);
+      deps_.canvas->waitRefreshComplete();
+      displayedThisBoot_ = true;
+      noteInputResume();
+      dirty_ = false;
+      forceFull_ = false;
+      lastRenderMs_ = now;
+      return;
+    }
     if (dashboard_.needsRender() && displayAllowed(now)) {
+      syncDeviceState(now, true);  // 「空闲 · 下次」以本次刷屏时刻为参照
       dashboard_.render();
       displayedThisBoot_ = true;
       noteDisplayed();
@@ -476,6 +541,7 @@ void PanelApp::service() {
   }
 
   if (dirty_ && now - lastRenderMs_ >= kRenderThrottleMs && displayAllowed(now)) {
+    syncDeviceState(now, true);
     render(now);
     displayedThisBoot_ = true;
     noteDisplayed();
@@ -507,11 +573,20 @@ bool PanelApp::displayAllowed(int64_t now) {
   if (page_ == Page::Provision || eego::ble::BleManager::instance().provisioningActive()) {
     return true;
   }
-  if (!refreshPolicy_.idle(now)) return refreshPolicy_.allow(now, 0, false);
+  if (!refreshPolicy_.idle(now)) {
+    idleAnnounced_ = false;
+    return refreshPolicy_.allow(now, 0, false);
+  }
   if (!idleLogged_) {
     idleLogged_ = true;
     ESP_LOGI(TAG, "display: active -> idle (refresh every %u min on the boundary)",
              static_cast<unsigned>(settings_.idle_refresh_min));
+  }
+  if (!idleAnnounced_) {
+    // 刚进入空闲：即时刷一次，让状态行显示「空闲 · 下次 HH:MM」（否则屏幕会继续
+    // 显示「运行中」直到下一个边界）。
+    idleAnnounced_ = true;
+    return true;
   }
   bool critical = false;
   if (settings_.idle_critical_immediate && now - lastCriticalCheckMs_ >= 1000) {
@@ -524,6 +599,7 @@ bool PanelApp::displayAllowed(int64_t now) {
 
 void PanelApp::noteDisplayed() {
   const uint64_t unix_now = TimeSource::valid() ? TimeSource::now() : 0;
+  lastDisplayedUnix_ = unix_now;
   if (settings_.idle_critical_immediate) {
     refreshPolicy_.noteRendered(unix_now, dashboard_.activeCriticalIdentities());
   } else {
@@ -596,6 +672,10 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
   }
   lastInputMs_ = now_us / 1000;
   noteInteraction(lastInputMs_);
+  if (touchCal_.active()) {  // 触摸校准全屏模态：实体键 保存/重做/取消
+    touchCal_.handleButton(ev, lastInputMs_);
+    return;
+  }
   const ConfirmSource source = buttonSource(ev.id);
   if (ev.action == eego::ButtonAction::Press) suppressButtonLong_[index] = false;
   if (ev.action == eego::ButtonAction::LongPress && suppressButtonLong_[index]) {
@@ -684,6 +764,7 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
 
 void PanelApp::handleTouch(const eego::TouchEvent& ev) {
   const int64_t now_us = esp_timer_get_time();
+  traceTouch(ev);
   const bool front = ev.type == eego::TouchEventType::FrontPress ||
                      ev.type == eego::TouchEventType::FrontRelease ||
                      ev.type == eego::TouchEventType::FrontShort ||
@@ -701,8 +782,16 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
   if (stale) return;
   lastInputMs_ = now_us / 1000;
   noteInteraction(lastInputMs_);
+  if (touchCal_.active()) {  // 触摸校准全屏模态：按原始坐标采样，不走页面命中
+    touchCal_.handleTouch(ev, lastInputMs_);
+    return;
+  }
   const int16_t x = static_cast<int16_t>(ev.x);
   const int16_t y = static_cast<int16_t>(ev.y);
+  if (touchMarks_ &&
+      (ev.type == eego::TouchEventType::Tap || ev.type == eego::TouchEventType::Hold)) {
+    noteTouchMark(x, y);
+  }
   if (ev.type == eego::TouchEventType::Press || ev.type == eego::TouchEventType::FrontPress) {
     suppressTouchHold_ = false;
   }
@@ -894,6 +983,8 @@ void PanelApp::executeBuiltin(const std::string& name, int64_t now_us) {
     gotoPage(Page::Help);
   } else if (name == "status") {
     gotoPage(Page::Status);
+  } else if (name == "keep_awake") {
+    toggleKeepAwake();
   } else if (name == "refresh") {
     if (inputBusy()) {
       showBanner(tr(Str::Busy), 2000);
@@ -1190,8 +1281,10 @@ void PanelApp::activateSoftKey(size_t idx) {
       break;
     }
     case Page::Status:
+      // [刷新] [保持唤醒] [返回]
       if (idx == 0) doPollNow();
-      else if (idx == 1) back();
+      else if (idx == 1) toggleKeepAwake();
+      else if (idx == 2) back();
       break;
     case Page::Settings:
       // [← 上一页] [返回] [下一页 →]
@@ -1698,6 +1791,9 @@ void PanelApp::activateSettingRow(SettingId id) {
     return;
   }
   switch (id) {
+    case SettingId::KeepAwake:
+      toggleKeepAwake();
+      break;
     case SettingId::Network: {
       const eego::net::NetStatusSnapshot& status = netStatus();
       if (!status.wifi.ip.empty()) showBannerFmt(5000, "http://%s/", status.wifi.ip.c_str());
@@ -1761,6 +1857,13 @@ void PanelApp::activateSettingRow(SettingId id) {
       gotoPage(Page::Help);
       break;
     case SettingId::InputReset: resetInputBindings(); break;
+    case SettingId::TouchCal: startTouchCalibration(); break;
+    case SettingId::TouchMarks:
+      touchMarks_ = !touchMarks_;
+      touchMarkX_ = touchMarkY_ = -1;
+      touchMarkPending_ = false;
+      markDirty();
+      break;
     case SettingId::BleUnbind:
       if (!eego::ble::BleManager::instance().status().compiled) {
         showBanner(tr(Str::Unavailable), 3000);
@@ -2092,15 +2195,22 @@ void PanelApp::showBannerFmt(uint32_t ms, const char* fmt, ...) {
 // ── 电源模式 ────────────────────────────────────────────────────────────────
 
 bool PanelApp::computeMains() {
-  return battery::mainsPowered(static_cast<uint8_t>(settings_.power_mode),
-                               charging_ || batCache_.charging, batCache_.millivolts);
+  // GPIO11 是充电状态而非 VBUS：满电后充电停止不等于拔电。判定见 MainsDetector
+  // （充电/USB 主机/锁存 + 电压滞回）。
+  battery::PowerSample sample;
+  sample.charging = charging_ || batCache_.charging;
+  sample.usb_host = usbHost_;
+  sample.battery_mv = batCache_.millivolts;
+  return mainsDetector_.update(static_cast<uint8_t>(settings_.power_mode), sample, nowMs());
 }
 
 void PanelApp::onModeChange(bool mains) {
   mains_ = mains;
   configureRefreshPolicy();          // 电池模式不做空闲合并
   noteInteraction(nowMs());          // 插拔电源视为一次交互
-  ESP_LOGI(TAG, "power mode -> %s", mains ? "mains" : "battery");
+  ESP_LOGI(TAG, "power mode -> %s (reason: %s, %umV, charging=%d, usb=%d)",
+           mains ? "mains" : "battery", battery::powerReasonName(mainsDetector_.reason()),
+           batCache_.millivolts, (charging_ || batCache_.charging) ? 1 : 0, usbHost_ ? 1 : 0);
   NetStack::instance().wifi().setPowerSave(mains);  // 常供电 modem-sleep
   eego::ble::BleManager::instance().onPowerMode(mains);
   eego::ble::BleManager::instance().setBatteryScanWindow(false);
@@ -2122,7 +2232,7 @@ void PanelApp::enterInteractive(int64_t now) {
   phaseStartMs_ = now;
   batchStarted_ = false;
   noteInteraction(now);
-  dashboard_.setBatteryStatus("");
+  dashboard_.setSleepFrame(false);
   // BLE 被动扫描：电池模式每个交互窗口最多扫一轮（与旧 Serving 窗口一致）。
   eego::ble::BleManager::instance().setBatteryScanWindow(true);
 }
@@ -2196,9 +2306,11 @@ void PanelApp::batteryService(int64_t now) {
         batchStarted_ = true;
       }
       // 管理后台的已认证请求同样算「有人在用」（浏览 web 端时不深睡）。
+      // 保持唤醒期间不睡；到期后按最后一次活动重新判定（过期即恢复原节奏）。
       const int64_t last = std::max(refreshPolicy_.lastInteractionMs(),
                                     admin::lastAuthenticatedRequestMs());
-      if (now - last >= static_cast<int64_t>(settings_.battery_interactive_timeout_s) * 1000) {
+      if (battery::interactiveSleepDue(now, last, settings_.battery_interactive_timeout_s,
+                                       keepAwakeUntil(now))) {
         requestSleep(now, "interactive timeout");
       }
       return;
@@ -2226,6 +2338,13 @@ void PanelApp::serviceSleep(int64_t now) {
     sleepPending_ = false;
     sleepIdleWait_.active = false;
     dashboard_.setMains(dashboardLive());  // 恢复取数
+    return;
+  }
+  if (battPhase_ != BattPhase::Fetching && battery::keepAwakeBlocks(now, keepAwakeUntil(now))) {
+    ESP_LOGI(TAG, "keep-awake active: sleep cancelled");
+    sleepPending_ = false;
+    sleepIdleWait_.active = false;
+    dashboard_.setMains(dashboardLive());
     return;
   }
   if (admin::ProvisionPortal::instance().apActive() ||
@@ -2313,34 +2432,15 @@ uint64_t PanelApp::frameHash() const {
   return h;
 }
 
-std::string PanelApp::batteryStatusText(uint8_t bucket, uint64_t stamp,
-                                        uint32_t interval_min) const {
-  char buf[96];
-  if (stamp < battery::kMinValidUnix) {
-    snprintf(buf, sizeof(buf), tr(Str::BatStatusNoClockFmt), static_cast<unsigned>(bucket));
-    return buf;
+DeviceStateInfo PanelApp::sleepingState(uint64_t stamp, uint32_t interval_min) const {
+  DeviceStateInfo info;
+  info.state = DeviceState::Sleeping;
+  if (stamp >= battery::kMinValidUnix) {
+    battery::NightWindow night{settings_.sleep_start_min, settings_.sleep_end_min};
+    info.next_unix = battery::refreshDeadline(stamp, settings_.battery_max_stale_min,
+                                              settings_.timezone_offset_min, interval_min, night);
   }
-  battery::NightWindow night{settings_.sleep_start_min, settings_.sleep_end_min};
-  const uint64_t deadline =
-      battery::refreshDeadline(stamp, settings_.battery_max_stale_min,
-                               settings_.timezone_offset_min, interval_min, night);
-  int uh = 0;
-  int um = 0;
-  int dh = 0;
-  int dm = 0;
-  battery::localHourMinute(stamp, settings_.timezone_offset_min, uh, um);
-  battery::localHourMinute(deadline, settings_.timezone_offset_min, dh, dm);
-  snprintf(buf, sizeof(buf), tr(Str::BatStatusFmt), static_cast<unsigned>(bucket), uh, um, dh, dm);
-  return buf;
-}
-
-std::string PanelApp::nightPauseText(uint64_t resume_unix) const {
-  char buf[64];
-  int h = 0;
-  int m = 0;
-  battery::localHourMinute(resume_unix, settings_.timezone_offset_min, h, m);
-  snprintf(buf, sizeof(buf), tr(Str::NightPauseFmt), h, m);
-  return buf;
+  return info;
 }
 
 void PanelApp::drawNotice(const char* title, const char* line1, const char* line2,
@@ -2403,25 +2503,34 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
       deps_.canvas->clear();
       dashboard_.invalidateAll();
     }
+    // 深睡帧 = 最后一次刷屏：状态行显示「休眠中/夜间暂停 · 按键唤醒」，右侧「更新于」
+    // 固定为名义时刻，屏幕一眼可见设备在睡、数据截至何时。
     if (night) {
-      dashboard_.setBatteryStatus(nightPauseText(plan.wake_unix));
+      DeviceStateInfo info;
+      info.state = DeviceState::NightPause;
+      info.next_unix = plan.wake_unix;
+      dashboard_.setDeviceState(info, settings_.timezone_offset_min);
+      dashboard_.setSleepFrame(true, slot, mains_ ? -1 : static_cast<int>(bucket));
       dashboard_.renderOffscreen();
       hash = frameHash();
       skip = panel_known && hash == rec.hash;
     } else if (mains_) {
-      dashboard_.setBatteryStatus("");
+      dashboard_.setSleepFrame(false);
       dashboard_.renderOffscreen();
       hash = frameHash();
     } else {
       // 先按上次的「更新于」渲染：数据不变 ⇒ 帧完全相同 ⇒ 不刷屏（时钟不会逼出刷新）。
       if (panel_known) {
-        dashboard_.setBatteryStatus(batteryStatusText(bucket, rec.refresh_unix, interval));
+        dashboard_.setDeviceState(sleepingState(rec.refresh_unix, interval),
+                                  settings_.timezone_offset_min);
+        dashboard_.setSleepFrame(true, rec.refresh_unix, bucket);
         dashboard_.renderOffscreen();
         hash = frameHash();
         skip = hash == rec.hash && !battery::frameStale(rec, now_unix, settings_.battery_max_stale_min);
       }
       if (!skip) {
-        dashboard_.setBatteryStatus(batteryStatusText(bucket, slot, interval));
+        dashboard_.setDeviceState(sleepingState(slot, interval), settings_.timezone_offset_min);
+        dashboard_.setSleepFrame(true, slot, bucket);
         dashboard_.renderOffscreen();
         hash = frameHash();
       }
@@ -2485,6 +2594,129 @@ void PanelApp::enterProvision() {
 void PanelApp::leaveProvision() {
   provisionSucceeded_ = false;
   gotoPage(home());
+}
+
+// ── 保持唤醒 / 设备状态 / 电源快照 ──────────────────────────────────────────
+
+int64_t PanelApp::keepAwakeUntil(int64_t now) const {
+  const int64_t until = admin::keepAwakeUntilMs();
+  return admin::keep_awake::active(now, until) ? until : 0;
+}
+
+void PanelApp::serviceKeepAwake(int64_t now) {
+  const int64_t until = keepAwakeUntil(now);
+  const bool active = until != 0;
+  const uint32_t revision = admin::keepAwakeRevision();
+  if (revision != keepAwakeRevision_) {
+    keepAwakeRevision_ = revision;
+    // 开启/延长（含 web 端）视为一次交互：空闲节奏立即回到 Active，状态行即时更新。
+    if (active) noteInteraction(now);
+    if (page_ == Page::Settings || page_ == Page::Status) markDirty();
+  }
+  if (active != keepAwakeWasActive_) {
+    keepAwakeWasActive_ = active;
+    ESP_LOGI(TAG, "keep-awake %s", active ? "on" : "off (expired/cancelled)");
+    if (!active && admin::keepAwakeUntilMs() != 0) admin::setKeepAwakeMinutes(0);
+    if (page_ == Page::Settings || page_ == Page::Status) markDirty();
+  }
+  refreshPolicy_.setHoldUntil(until);
+}
+
+void PanelApp::toggleKeepAwake() {
+  const int64_t now = nowMs();
+  const uint32_t left = admin::keep_awake::remainingS(now, keepAwakeUntil(now));
+  const uint32_t duration = settings_.keep_awake_min;
+  const uint32_t minutes = admin::keep_awake::toggleMinutes(left, duration);
+  admin::setKeepAwakeMinutes(minutes);
+  serviceKeepAwake(now);
+  noteInteraction(now);
+  if (minutes == 0) {
+    showBanner(tr(Str::KeepAwakeCancelled), 3000);
+  } else {
+    showBannerFmt(3000, tr(left == 0 ? Str::KeepAwakeStartedFmt : Str::KeepAwakeExtendedFmt),
+                  static_cast<unsigned>(minutes));
+  }
+  syncDeviceState(now, true);
+  markDirty();
+}
+
+DeviceStateInfo PanelApp::computeDeviceState(int64_t now, uint64_t ref_unix) {
+  DeviceStateInfo info;
+  info.idle_refresh_min = settings_.idle_refresh_min;
+  const int64_t until = keepAwakeUntil(now);
+  if (until != 0) {
+    info.state = DeviceState::KeepAwake;
+    info.keep_awake_min =
+        admin::keep_awake::displayMinutes(admin::keep_awake::remainingS(now, until));
+    return info;
+  }
+  if (!mains_ && battPhase_ == BattPhase::Interactive) {
+    info.state = DeviceState::Awake;
+    info.awake_timeout_s = settings_.battery_interactive_timeout_s;
+    return info;
+  }
+  if (mains_ && refreshPolicy_.idle(now)) {
+    info.state = DeviceState::Idle;
+    if (ref_unix >= RefreshPolicy::kMinValidUnix) {
+      info.next_unix = nextRefreshBoundary(ref_unix, settings_.timezone_offset_min,
+                                           settings_.idle_refresh_min);
+    }
+    return info;
+  }
+  return info;
+}
+
+void PanelApp::syncDeviceState(int64_t now, bool before_render) {
+  lastDeviceStateMs_ = now;
+  const uint64_t unix_now = TimeSource::valid() ? TimeSource::now() : 0;
+  const uint64_t ref = before_render || lastDisplayedUnix_ == 0 ? unix_now : lastDisplayedUnix_;
+  const DeviceStateInfo next = computeDeviceState(now, ref);
+  if (next == deviceState_) return;
+  deviceState_ = next;
+  dashboard_.setDeviceState(deviceState_, settings_.timezone_offset_min);
+  if (page_ != Page::Dashboard && !before_render) markDirty();
+}
+
+const char* PanelApp::powerReasonText() const {
+  switch (mainsDetector_.reason()) {
+    case battery::PowerReason::ForcedMains:
+    case battery::PowerReason::ForcedBattery: return tr(Str::ReasonForced);
+    case battery::PowerReason::NoBattery: return tr(Str::ReasonNoBattery);
+    case battery::PowerReason::Charging: return tr(Str::ReasonCharging);
+    case battery::PowerReason::UsbHost: return tr(Str::ReasonUsbHost);
+    case battery::PowerReason::FullHold: return tr(Str::ReasonFullHold);
+    case battery::PowerReason::VoltageDrop: return tr(Str::ReasonVoltageDrop);
+    case battery::PowerReason::BelowHold: return tr(Str::ReasonBelowHold);
+    case battery::PowerReason::Battery: return tr(Str::ReasonBattery);
+  }
+  return "";
+}
+
+void PanelApp::publishPowerState(int64_t now) {
+  lastPowerPublishMs_ = now;
+  admin::PowerSnapshot p;
+  p.mains = mains_;
+  p.source = mains_ ? "mains" : "battery";
+  p.source_reason = battery::powerReasonName(mainsDetector_.reason());
+  p.power_mode = eego::settings::powerModeName(settings_.power_mode);
+  p.mode = deviceStateApiName(deviceState_.state);
+  p.battery_mv = batCache_.millivolts;
+  p.battery_pct = batCache_.millivolts > 0 ? batCache_.percent : -1;
+  p.charging = charging_ || batCache_.charging;
+  p.usb_host = usbHost_;
+  p.next_wake = plannedWakeAt();
+  p.next_refresh = deviceState_.state == DeviceState::Idle ? deviceState_.next_unix : 0;
+  if (!mains_ && battPhase_ == BattPhase::Interactive && keepAwakeUntil(now) == 0) {
+    const int64_t last =
+        std::max(refreshPolicy_.lastInteractionMs(), admin::lastAuthenticatedRequestMs());
+    const int64_t left =
+        static_cast<int64_t>(settings_.battery_interactive_timeout_s) * 1000 - (now - last);
+    p.sleep_in_s = std::max<int64_t>(0, (left + 999) / 1000);
+  }
+  p.last_wake_reason = battery::wakeSourceName(wakeSource_);
+  p.sleeps_since_boot = battery::rtcState().wakes;
+  p.last_screen_update = lastDisplayedUnix_;
+  admin::publishPowerSnapshot(p);
 }
 
 // ── 数据辅助 ────────────────────────────────────────────────────────────────
@@ -2573,7 +2805,7 @@ size_t PanelApp::softKeyCount() const {
       if (item == nullptr) return 1;
       return item->linked_panel_id.empty() ? 4 : 5;
     }
-    case Page::Status: return 2;
+    case Page::Status: return 3;
     case Page::Settings: return 3;
     case Page::Help: return 1;
     default: return 0;
@@ -2606,7 +2838,8 @@ void PanelApp::softKeys(SoftKeyModel* out, size_t cap) const {
     }
     case Page::Status:
       out[0] = {tr(Str::Refresh), dashboard_.available()};
-      out[1] = {tr(Str::Back), true};
+      out[1] = {tr(Str::KeepAwakeKey), true};
+      out[2] = {tr(Str::Back), true};
       break;
     case Page::Settings:
       out[0] = {tr(Str::PrevPage), !pageEdge(-1)};
@@ -2776,6 +3009,7 @@ void PanelApp::render(int64_t now) {
   softKeys(keys, 5);
   const size_t focusIdx = page_ == Page::Settings ? static_cast<size_t>(-1) : focus_;
   drawSoftKeys(c, keys, n, focusIdx);
+  drawTouchMark(c);
 
   c.display(forceFull_ ? eego::RefreshMode::Full : eego::RefreshMode::Fast);
   c.waitRefreshComplete();
@@ -2795,9 +3029,13 @@ void PanelApp::buildStatusBar(StatusBarModel& m) {
     renderedClockKey_ = static_cast<int64_t>(now / 60);
     struct tm tm_buf;
     localTm(settings_, now, tm_buf);
-    snprintf(m.timeText, sizeof(m.timeText), "%02d-%02d %02d:%02d", tm_buf.tm_mon + 1,
-             tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min);
+    snprintf(m.timeText, sizeof(m.timeText), "%02d:%02d", tm_buf.tm_hour, tm_buf.tm_min);
   }
+  m.state = deviceState_.state;
+  const std::vector<std::string> labels =
+      deviceStateLabels(deviceState_, settings_.timezone_offset_min);
+  snprintf(m.stateText, sizeof(m.stateText), "%s", labels.front().c_str());
+  if (labels.size() > 1) snprintf(m.stateShort, sizeof(m.stateShort), "%s", labels[1].c_str());
   m.batPercent = batCache_.percent;
   m.batMv = batCache_.millivolts;
   m.charging = charging_ || batCache_.charging;
@@ -2963,25 +3201,109 @@ void PanelApp::buildStatus(KvModel& m) {
     if (value.empty()) value = "-";
     rows.emplace_back(label, std::move(value));
   };
-  auto section = [&rows](Str label) { rows.emplace_back(tr(label), ""); };
   char buf[128];
+  std::vector<bool> big;
+  // 分节标题一律正文粗体（正文字号）。
+  auto section = [&](Str label) {
+    rows.emplace_back(tr(label), "");
+    big.resize(rows.size(), false);
+    big.back() = true;
+  };
+  auto addBigText = [&](const std::string& label, std::string value) {
+    add(label, std::move(value));
+    big.resize(rows.size(), false);
+    big.back() = true;
+  };
+  auto addBig = [&](Str label, std::string value) { addBigText(tr(label), std::move(value)); };
 
-  // 网络
+  // 电源 / 休眠（正文字号，第一页最上方：设备是醒着、空闲还是即将休眠一目了然）
+  section(Str::SecPower);
+  {
+    const int64_t now = nowMs();
+    addBig(Str::LblMode, deviceStateLabel(deviceState_, settings_.timezone_offset_min));
+    const char* source = mains_ ? tr(Str::ModeMains) : tr(Str::ModeBattery);
+    std::string power = source;
+    if (batCache_.millivolts > 0) {
+      snprintf(buf, sizeof(buf), " %u%%", static_cast<unsigned>(batCache_.percent));
+      power += buf;
+    }
+    power += std::string(" · ") + powerReasonText();
+    addBig(Str::LblPower, power);
+    const int64_t until = keepAwakeUntil(now);
+    if (until != 0) {
+      const uint32_t left = admin::keep_awake::remainingS(now, until);
+      char when[24] = "--:--";
+      if (TimeSource::valid()) {
+        struct tm tm_buf;
+        localTm(settings_, TimeSource::now() + left, tm_buf);
+        snprintf(when, sizeof(when), "%02d:%02d", tm_buf.tm_hour, tm_buf.tm_min);
+      }
+      snprintf(buf, sizeof(buf), tr(Str::KeepAwakeRemainFmt),
+               static_cast<unsigned>((left + 59) / 60), when);
+      addBig(Str::LblKeepAwake, buf);
+    } else {
+      addBig(Str::LblKeepAwake, tr(Str::Off));
+    }
+    const uint64_t wake = plannedWakeAt();
+    if (!mains_ && battPhase_ == BattPhase::Interactive) {
+      if (until != 0) {
+        addBig(Str::LblNextWake, tr(Str::SleepNever));
+      } else {
+        snprintf(buf, sizeof(buf), tr(Str::SleepInFmt),
+                 static_cast<unsigned>(settings_.battery_interactive_timeout_s));
+        addBig(Str::LblNextWake, buf);
+      }
+    } else if (wake != 0) {
+      formatTs(wake, buf, sizeof(buf));
+      addBig(Str::LblNextWake, buf);
+    }
+    if (deviceState_.state == DeviceState::Idle && deviceState_.next_unix != 0) {
+      formatTs(deviceState_.next_unix, buf, sizeof(buf));
+      addBig(Str::LblNextRefresh, buf);
+    }
+    addBig(Str::LblWakeReason, tr(wakeSourceText(wakeSource_)));
+    snprintf(buf, sizeof(buf), tr(Str::SleepsFmt),
+             static_cast<unsigned>(battery::rtcState().wakes));
+    addBig(Str::LblSleeps, buf);
+  }
+
+  // 网络（正文字号；未连接时逐个已存网络给出最近一次失败原因）
   section(Str::SecNetwork);
   std::string wifi = wifiStateText(ns.wifi.state);
   if (!ns.wifi.ssid.empty()) wifi += " · " + ns.wifi.ssid;
-  add(tr(Str::LblWifi), wifi);
+  addBig(Str::LblWifi, wifi);
   if (ns.wifi.state == 2) {
     snprintf(buf, sizeof(buf), "%d dBm", ns.wifi.rssi);
-    add(tr(Str::LblSignal), buf);
+    addBig(Str::LblSignal, buf);
   }
   if (!ns.wifi.ip.empty()) {
-    add(tr(Str::LblAddress), "http://" + ns.wifi.ip + "/");
+    addBig(Str::LblAddress, "http://" + ns.wifi.ip + "/");
+  }
+  if (ns.wifi.state != 2) {
+    const bool en = currentLang() == Lang::En;
+    const eego::net::WifiDiagSnapshot diag = eego::net::WifiManager::instance().diagnostics();
+    for (const eego::net::WifiNetworkDiag& n : diag.networks) {
+      std::string value;
+      if (n.result == eego::net::WifiAttemptResult::None) {
+        value = tr(Str::WifiNotTried);
+      } else if (n.result == eego::net::WifiAttemptResult::Connecting) {
+        value = tr(Str::WifiConnecting);
+      } else if (n.failures > 0) {
+        value = eego::net::wifiReasonShort(n.last_reason, en);
+        snprintf(buf, sizeof(buf), " (%u)", static_cast<unsigned>(n.last_reason));
+        value += buf;
+      } else {
+        value = wifiStateText(static_cast<int>(eego::net::WifiState::Connected));
+      }
+      if (!n.seen && diag.scan_ms >= 0) value += std::string(" · ") + tr(Str::WifiNotSeen);
+      std::string label = n.ssid;
+      sanitizeClamped(label, 10);
+      addBigText(label, value);
+    }
   }
   if (admin::ProvisionPortal::instance().apActive()) {
-    snprintf(buf, sizeof(buf), "%s · %s", admin::ProvisionPortal::kApSsid,
-             admin::ProvisionPortal::kApUrl);
-    add(tr(Str::ApFallback), buf);
+    addBig(Str::ApFallback, admin::ProvisionPortal::kApSsid);  // 地址见下一行诊断页
+    addBig(Str::WifiDiag, "192.168.4.1/wifi-diag");
   }
   if (ns.time.valid) {
     if (ns.time.sntp_synced) {
@@ -2994,7 +3316,7 @@ void PanelApp::buildStatus(KvModel& m) {
   } else {
     snprintf(buf, sizeof(buf), "%s", tr(Str::TimeUnavailable));
   }
-  add(tr(Str::TimeLabel), buf);
+  addBig(Str::TimeLabel, buf);
 
   // 设备
   section(Str::SecDevice);
@@ -3010,8 +3332,10 @@ void PanelApp::buildStatus(KvModel& m) {
   const char* pmode = tr(Str::ModeAuto);
   if (settings_.power_mode == PowerMode::Mains) pmode = tr(Str::ModeMains);
   if (settings_.power_mode == PowerMode::Battery) pmode = tr(Str::ModeBattery);
-  snprintf(buf, sizeof(buf), "%s → %s", pmode, mains_ ? tr(Str::ModeMains) : tr(Str::ModeBattery));
-  add(tr(Str::LblPower), buf);
+  snprintf(buf, sizeof(buf), "%s → %s · %s", pmode,
+           mains_ ? tr(Str::ModeMains) : tr(Str::ModeBattery),
+           battery::powerReasonName(mainsDetector_.reason()));
+  add(tr(Str::SetPowerMode), buf);
   if (eego::SdCard::instance().ready()) {
     std::string storage = tr(Str::SdReady);
     if (ns.alert_db.attached) {
@@ -3090,13 +3414,30 @@ void PanelApp::buildStatus(KvModel& m) {
            static_cast<unsigned>(acked), static_cast<unsigned>(muted));
   add("  ", buf);
 
-  statusRows_ = rows.size();
+  // 分页按权重：小字行 1、正文字号行/分节标题 2，每页 ≤ kStatusRowsPerPage；分节
+  // 标题不落在页尾（与其首行同页）。
+  big.resize(rows.size(), false);
+  std::vector<size_t> starts{0};
+  size_t weight = 0;
+  for (size_t i = 0; i < rows.size(); ++i) {
+    const size_t w = big[i] ? 2 : 1;
+    const bool heading = rows[i].second.empty();
+    const size_t need = heading && i + 1 < rows.size() ? w + (big[i + 1] ? 2 : 1) : w;
+    if (weight > 0 && weight + need > geom::kStatusRowsPerPage) {
+      starts.push_back(i);
+      weight = 0;
+    }
+    weight += w;
+  }
+  statusRows_ = starts.size() * geom::kStatusRowsPerPage;  // statusPageCount() = 页数
   const size_t pages = statusPageCount();
   if (statusPage_ >= pages) statusPage_ = pages - 1;
-  const size_t per = geom::kStatusRowsPerPage;
-  const size_t begin = statusPage_ * per;
-  const size_t end = std::min(begin + per, rows.size());
-  for (size_t i = begin; i < end; ++i) m.rows.push_back(std::move(rows[i]));
+  const size_t begin = starts[statusPage_];
+  const size_t end = statusPage_ + 1 < starts.size() ? starts[statusPage_ + 1] : rows.size();
+  for (size_t i = begin; i < end; ++i) {
+    m.rows.push_back(std::move(rows[i]));
+    m.big.push_back(big[i]);
+  }
   if (pages > 1) {
     snprintf(m.pageText, sizeof(m.pageText), "%u/%u", static_cast<unsigned>(statusPage_ + 1),
              static_cast<unsigned>(pages));
@@ -3115,6 +3456,7 @@ void PanelApp::buildHelp(KvModel& m) {
   add(Str::HelpSwipe, Str::HelpPage);
   add(Str::HelpTapAlert, Str::HelpOpenDetail);
   add(Str::HelpDanger, Str::HelpFreshPress);
+  add(Str::HelpUpDownChord, Str::HelpKeepAwake);
   add(Str::HelpCustomBindings, Str::HelpWebBindings);
 }
 
@@ -3135,8 +3477,27 @@ void PanelApp::buildS4(S4Model& m) {
     S4RowModel row;
     std::string value;
     Str label = Str::None;
+    std::string customLabel;
     bool isAction = false;
     switch (ids[i]) {
+      case SettingId::KeepAwake: {
+        snprintf(buf, sizeof(buf), tr(Str::SetKeepAwakeFmt),
+                 static_cast<unsigned>(settings_.keep_awake_min));
+        customLabel = buf;
+        isAction = true;
+        const int64_t now = nowMs();
+        const uint32_t left = admin::keep_awake::remainingS(now, keepAwakeUntil(now));
+        if (left == 0) {
+          value = tr(Str::Off);
+        } else {
+          snprintf(buf, sizeof(buf), tr(Str::StateKeepAwakeFmt),
+                   static_cast<unsigned>(admin::keep_awake::displayMinutes(left)));
+          value = buf;
+          const size_t dot = value.find(" · ");
+          if (dot != std::string::npos) value = value.substr(dot + strlen(" · "));
+        }
+        break;
+      }
       case SettingId::Network: {
         const eego::net::NetStatusSnapshot& status = netStatus();
         label = Str::SetNetwork;
@@ -3329,6 +3690,17 @@ void PanelApp::buildS4(S4Model& m) {
         label = Str::SetInputReset;
         isAction = true;
         break;
+      case SettingId::TouchCal:
+        label = Str::SetTouchCal;
+        value = deps_.touch == nullptr ? tr(Str::Unavailable)
+                : deps_.touch->calibrationCustom() ? tr(Str::TouchCalibrated)
+                                                   : tr(Str::TouchFactory);
+        isAction = true;
+        break;
+      case SettingId::TouchMarks:
+        label = Str::SetTouchMarks;
+        value = touchMarks_ ? tr(Str::On) : tr(Str::Off);
+        break;
       case SettingId::BleObserver:
         label = Str::SetBleObserver;
         if (!ble_runtime.compiled) {
@@ -3349,7 +3721,7 @@ void PanelApp::buildS4(S4Model& m) {
       case SettingId::Count:
         break;
     }
-    row.label = tr(label);
+    row.label = customLabel.empty() ? tr(label) : customLabel;
     row.value = std::move(value);
     row.isAction = isAction;
     m.rows.push_back(std::move(row));

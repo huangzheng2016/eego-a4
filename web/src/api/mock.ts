@@ -35,6 +35,7 @@ const SETTINGS_SCHEMA = {
     idle_after_min: { type: 'int', range: [0, 1440], default: 10, group: 'display_refresh' },
     idle_refresh_min: { type: 'int', enum: [2, 5, 10, 15, 30, 60], default: 5, group: 'display_refresh' },
     idle_critical_immediate: { type: 'bool', default: true, group: 'display_refresh' },
+    keep_awake_min: { type: 'int', enum: [10, 30, 60, 120], default: 30, group: 'power' },
     diagnostics_enabled: { type: 'bool', default: true, group: 'diagnostics' },
     ble_observer_enabled: { type: 'bool', default: false, capability: 'ble_observer', group: 'ble' },
     ble_observer_window_s: { type: 'int', range: [2, 60], default: 10, group: 'ble' },
@@ -49,6 +50,7 @@ interface MockState {
   revision: number;
   settings: Record<string, unknown>;
   credentials: string[];
+  wifi: { ssid: string; password: string }[];
   alerts: Record<string, unknown>[];
   logs: { ts: number; unsynced: boolean; level: string; seq: number; msg: string }[];
 }
@@ -67,6 +69,11 @@ function initialState(): MockState {
     revision: 3,
     settings,
     credentials: ['demo_token'],
+    wifi: [
+      { ssid: 'MockWiFi', password: 'mock-password' },
+      { ssid: 'Office-5G', password: 'office-password' },
+      { ssid: 'Cafe Guest', password: '' },
+    ],
     alerts: [
       { id: 'a1', type: 'disk.full', severity: 'critical', state: 'active', title: '磁盘空间不足', message: '/var 98%', occurrences: 3, last_seen: now - 60 },
       { id: 'a2', type: 'backup.late', severity: 'warning', state: 'acked', title: '备份延迟', message: '', occurrences: 1, last_seen: now - 3600 },
@@ -77,6 +84,29 @@ function initialState(): MockState {
 }
 
 const state = initialState();
+const WIFI_MAX = 8;
+function wifiList() {
+  const index = state.wifi.findIndex((n) => n.ssid === 'MockWiFi');
+  const connected = index >= 0;
+  return {
+    networks: state.wifi.map((n, i) => ({ ssid: n.ssid, has_password: n.password !== '', pass_ref: `nvs:wifi/${i}` })),
+    max: WIFI_MAX,
+    current: {
+      state: connected ? 'connected' : 'offline',
+      connected,
+      ssid: connected ? 'MockWiFi' : '',
+      rssi: connected ? -58 : 0,
+      ip: connected ? '192.168.1.50' : '',
+      index,
+      last_disconnect_reason: 8,
+      reconnect_attempts: connected ? 1 : 4,
+      disconnects: 1,
+      driver_restarts: 0,
+      offline_ms: connected ? 0 : 95000,
+      reconnect_backoff_ms: connected ? 10000 : 60000,
+    },
+  };
+}
 const capabilities = () => ({
   frontlight: state.settings.frontlight_hardware === 'present',
   battery: true,
@@ -153,6 +183,12 @@ function normalise(plan: SourcePlan, body: unknown) {
 }
 
 // ------------------------------------------------------------ routing
+let keepAwakeUntil = 0;
+function mockKeepAwake() {
+  const remaining_s = Math.max(0, Math.ceil((keepAwakeUntil - Date.now()) / 1000));
+  return { active: remaining_s > 0, remaining_s, until: remaining_s > 0 ? Math.floor(keepAwakeUntil / 1000) : 0, default_min: 30 };
+}
+
 function json(status: number, body: unknown): Response {
   return new Response(body === null ? null : JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
@@ -225,7 +261,22 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
         storage: { sd_ready: true, config_valid: true },
         alerts: { available: true, critical: 1, warning: 1, info: 0, active_total: 2 },
         security: { sessions: 1, ingest_key_masked: 'ab12****', provisioned: true },
+        keep_awake: mockKeepAwake(),
+        power: {
+          source: 'mains', source_reason: 'usb_host', power_mode: 'auto', mode: mockKeepAwake().active ? 'keep_awake' : 'active',
+          battery_pct: 92, battery_mv: 4120, charging: false, usb_host: true, next_wake: 0, next_refresh: 0, sleep_in_s: -1,
+          last_wake_reason: 'power-on', sleeps_since_boot: 0, last_screen_update: Math.floor(Date.now() / 1000) - 40,
+        },
       });
+    case 'GET device/keep-awake':
+      return json(200, mockKeepAwake());
+    case 'POST device/keep-awake': {
+      const minutes = b.minutes;
+      if (typeof minutes !== 'number' || !Number.isInteger(minutes) || minutes < 0 || minutes > 240)
+        return err(400, 'validation_failed', 'validation failed', { minutes: 'integer in [0, 240] required (0 = cancel)' });
+      keepAwakeUntil = minutes === 0 ? 0 : Date.now() + minutes * 60_000;
+      return json(200, mockKeepAwake());
+    }
     case 'GET system/logs':
       return json(200, { entries: state.logs.slice().reverse() });
     case 'POST system/reboot':
@@ -260,6 +311,33 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
     }
     case 'POST settings/ble/unbind':
       return json(200, { status: 'cleared' });
+    case 'GET config/wifi':
+      return json(200, wifiList());
+    case 'PUT config/wifi': {
+      const nets = Array.isArray(b.networks) ? (b.networks as { ssid?: unknown; password?: unknown; previous_ssid?: unknown }[]) : null;
+      if (!nets) return err(400, 'invalid_request', 'networks (array) required');
+      if (nets.length > WIFI_MAX) return err(400, 'validation_failed', 'validation failed', { networks: `too many networks (max ${WIFI_MAX})` });
+      const next: { ssid: string; password: string }[] = [];
+      for (const [i, n] of nets.entries()) {
+        const ssid = typeof n.ssid === 'string' ? n.ssid : '';
+        const f = `networks[${i}]`;
+        if (!ssid || new TextEncoder().encode(ssid).length > 32) return err(400, 'validation_failed', 'validation failed', { [`${f}.ssid`]: 'must be 1..32 bytes' });
+        if (next.some((x) => x.ssid === ssid)) return err(400, 'validation_failed', 'validation failed', { [`${f}.ssid`]: 'duplicate network' });
+        let password: string;
+        if (n.password === undefined || n.password === '********') {
+          const from = typeof n.previous_ssid === 'string' && n.previous_ssid ? n.previous_ssid : ssid;
+          const saved = state.wifi.find((x) => x.ssid === from);
+          if (!saved) return err(400, 'validation_failed', 'validation failed', { [`${f}.password`]: 'required for a new network' });
+          password = saved.password;
+        } else {
+          password = String(n.password);
+          if (password && (password.length < 8 || password.length > 63)) return err(400, 'validation_failed', 'validation failed', { [`${f}.password`]: 'must be empty (open) or 8..63 bytes' });
+        }
+        next.push({ ssid, password });
+      }
+      state.wifi = next;
+      return json(200, wifiList());
+    }
     case 'GET sources/credentials':
       return json(200, { namespace: 'source', credentials: state.credentials.map((key) => ({ key, ref: `nvs:source/${key}` })) });
     case 'PUT sources/credentials':

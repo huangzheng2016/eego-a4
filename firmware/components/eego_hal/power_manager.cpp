@@ -10,6 +10,11 @@
 #include <driver/i2c.h>
 #include <esp_adc/adc_cali_scheme.h>
 #include <cstring>
+#include "sdkconfig.h"
+#if __has_include("driver/usb_serial_jtag.h")
+#include "driver/usb_serial_jtag.h"
+#define EEGO_HAS_USB_SERIAL_JTAG 1
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -191,6 +196,14 @@ bool PowerManager::isCharging() {
     // active-high: 充电时 HIGH
     // active-low:  充电时 LOW
     return chargeActiveHigh_ ? (level == 1) : (level == 0);
+}
+
+bool PowerManager::usbHostConnected() {
+#if defined(EEGO_HAS_USB_SERIAL_JTAG) && CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED
+    return usb_serial_jtag_is_connected();
+#else
+    return false;
+#endif
 }
 
 }  // namespace eego

@@ -33,6 +33,7 @@
 #include "dashboard_events.h"
 #include "dashboard_power.h"
 #include "dashboard_publication.h"
+#include "device_status.h"
 #include "eego_hal.h"
 #include "eego_ui.h"
 #include "esp_log.h"
@@ -40,6 +41,7 @@
 #include "net_stack/net_stack.h"
 #include "nvs.h"
 #include "time_source.h"
+#include "ui_text.h"
 
 namespace panel {
 namespace {
@@ -54,7 +56,6 @@ constexpr size_t kMaxPrefsBytes = 8192;
 constexpr size_t kMaxSamples = 8192;
 constexpr size_t kMaxEvents = 1024;
 constexpr int64_t kRenderThrottleMs = 250;
-constexpr int64_t kStatusPeriodMs = 30000;       // 时钟来源（SNTP/RTC）查询周期
 constexpr int64_t kStatusCheckMs = 1000;         // 状态行文本变化检查周期（仅文本变化才重绘）
 constexpr int64_t kStoreCheckMs = 2000;          // DashboardStore 已提交修订号检查周期
 constexpr int64_t kCarouselPeriodMs = 15000;
@@ -309,8 +310,6 @@ struct DashboardRuntime::Impl {
   int64_t next_tick_ms = 0;
   int64_t last_render_ms = -10000;
   int64_t last_status_ms = -100000;
-  int64_t last_clock_query_ms = -100000;
-  const char* clock_label = "NOCLK";
   std::string drawn_status_text;
   // web 端 ApplyDashboard / 删除 → DashboardStore 修订号变化 → reload()/卸载
   int64_t last_store_check_ms = -100000;
@@ -325,8 +324,13 @@ struct DashboardRuntime::Impl {
   dp::TickResult last_tick;
   ui::RenderResult last_render;
   std::string message;
-  // 电池深睡帧的状态行（电量/更新于/最迟，或夜间暂停）；空 = 常规状态行。
-  std::string battery_status;
+  // 设备状态（PanelApp 推送）：状态行左侧图标 + 标签。
+  DeviceStateInfo device_state;
+  int tz_offset_min = 0;
+  // 深睡帧：「更新于」固定为名义边界（帧哈希不随时钟变化）并附电量；false = 实时。
+  bool sleep_frame = false;
+  uint64_t sleep_stamp_unix = 0;
+  int sleep_battery_pct = -1;
   int64_t message_deadline_ms = 0;
   size_t render_count = 0;
   size_t skipped_render_count = 0;
@@ -2066,12 +2070,8 @@ struct DashboardRuntime::Impl {
     }
     if (now - last_status_ms >= kStatusCheckMs) {
       last_status_ms = now;
-      if (now - last_clock_query_ms >= kStatusPeriodMs) {
-        last_clock_query_ms = now;
-        refreshClockLabel();
-      }
       std::string ignored;
-      if (composeStatus(ignored) != drawn_status_text) {
+      if (statusSignature(composeStatus(ignored)) != drawn_status_text) {
         status_dirty = true;
         dirty = true;
       }
@@ -2094,9 +2094,22 @@ struct DashboardRuntime::Impl {
     battery_cycle_cancelled = true;
   }
 
-  void setBatteryStatus(const std::string& text) {
-    if (text == battery_status) return;
-    battery_status = text;
+  void setDeviceState(const DeviceStateInfo& info, int tz) {
+    if (info == device_state && tz == tz_offset_min) return;
+    device_state = info;
+    tz_offset_min = tz;
+    status_dirty = true;
+    dirty = true;
+  }
+
+  void setSleepFrame(bool enabled, uint64_t stamp_unix, int battery_pct) {
+    if (enabled == sleep_frame && stamp_unix == sleep_stamp_unix &&
+        battery_pct == sleep_battery_pct) {
+      return;
+    }
+    sleep_frame = enabled;
+    sleep_stamp_unix = stamp_unix;
+    sleep_battery_pct = battery_pct;
     status_dirty = true;
     dirty = true;
   }
@@ -2192,76 +2205,98 @@ struct DashboardRuntime::Impl {
   std::string banner_event_id;
   std::string banner_signature;
 
-  // 底部状态行：位于普通 UI 安全区（28..740）内的最后 kStatusLineH 像素。
-  // 布局区（rebuildLayout 的 LayoutConfig.content）与触控阈值须同步让出这段高度。
-  static constexpr int16_t kStatusLineH = 22;
-  static constexpr int16_t kStatusLineY = 28 + 712 - kStatusLineH;  // 718
+  // 底部状态行：位于普通 UI 安全区（28..740）内的最后 kStatusLineH 像素，正文字号
+  // （UI 字体 2x）+ 同尺寸状态图标。布局区（rebuildLayout 的 LayoutConfig.content）、
+  // 触控阈值、web 端 grid.ts CONTENT/STATUS_LINE_Y 与 render 工具须同步让出这段高度。
+  // 内容高 672 = 8 行 × 85px 行距 − 8px 间距（行边界为整数）。
+  static constexpr int16_t kStatusLineH = 40;
+  static constexpr int16_t kStatusLineY = 28 + 712 - kStatusLineH;  // 700
+  static_assert(kStatusLineY == 700, "web/src/model/grid.ts STATUS_LINE_Y mirrors this");
+  static_assert(kStatusLineY + kStatusLineH == 28 + 712, "status line ends at the UI safe area");
+  static_assert((kStatusLineY - 28 + 8) % 8 == 0, "layout rows land on whole pixels");
 
-  // 时钟来源标签（SNTP/RTC/NOCLK）：queryStatus 会经 net_task 命令队列，
-  // 仅在 service() 中按 kStatusPeriodMs 刷新缓存，绘制时不再阻塞查询。
-  void refreshClockLabel() {
-    if (!TimeSource::valid()) {
-      clock_label = "NOCLK";
-      return;
-    }
-    eego::net::NetStatusSnapshot net_status;
-    if (deps.net != nullptr && deps.net->queryStatus(net_status, 50)) {
-      clock_label = net_status.time.sntp_synced ? "SNTP" : "RTC";
-    } else if (std::string_view(clock_label) == "NOCLK") {
-      clock_label = "RTC";
-    }
-  }
-
-  std::string composeStatus(std::string& banner_id) {
+  // 状态行内容：左 = 状态图标 + 标签（或临时消息/告警横幅），右 = 「更新于 HH:MM」
+  // + 页码（深睡帧为电量 + 固定的「更新于」）。stamp_unix = 本帧的刷屏时刻。
+  StatusLineContent composeStatus(std::string& banner_id, uint64_t stamp_unix = 0) {
     banner_id.clear();
-    if (!message.empty()) return message;
-    if (const dash::Event* event = bannerEvent()) {
-      banner_id = dashboardEventIdentity(*event);
-      return std::string(dash::severityName(event->severity)) + " " + event->title + "  >";
-    }
-    if (!battery_status.empty()) return battery_status;
+    StatusLineContent out;
+    out.icon = device_state.state;
     const std::vector<const dash::Page*> pages = visiblePages();
     size_t number = 0;
     for (size_t i = 0; i < pages.size(); ++i) {
       if (pages[i]->id == page_id) number = i + 1;
     }
-    size_t cached = 0;
-    size_t offline = 0;
-    if (pipeline != nullptr) {
-      for (const dash::Source& source : config.sources) {
-        dp::SourceStatus status;
-        if (!pipeline->sourceStatus(source.id, status)) continue;
-        if (pipeline->sourceResult(source.id) != nullptr) ++cached;
-        if (status.offline || status.stale) ++offline;
-      }
-    }
-    const char* clock = TimeSource::valid() ? clock_label : "NOCLK";
-    if (TimeSource::valid() && std::string_view(clock) == "NOCLK") clock = "RTC";
-    char status[160];
-    char screen[24];
+    char screen[24] = "";
     if (layout.page_count > 1) {
       std::snprintf(screen, sizeof(screen), "%u/%u.%u", static_cast<unsigned>(number),
                     static_cast<unsigned>(pages.size()), static_cast<unsigned>(page_index + 1));
-    } else {
+    } else if (pages.size() > 1) {
       std::snprintf(screen, sizeof(screen), "%u/%u", static_cast<unsigned>(number),
                     static_cast<unsigned>(pages.size()));
     }
-    std::snprintf(status, sizeof(status), "%s  %s  DATA %u/%u  OFF %u", screen, clock,
-                  static_cast<unsigned>(cached - std::min(cached, offline)),
-                  static_cast<unsigned>(config.sources.size()), static_cast<unsigned>(offline));
-    return status;
+    if (sleep_frame) {
+      const std::string updated = updatedLabel(sleep_stamp_unix, tz_offset_min);
+      out.right = updated;
+      if (sleep_battery_pct >= 0) {
+        out.right = std::to_string(sleep_battery_pct) + "% · " + updated;
+        out.right_alt.push_back(updated);
+      }
+    } else {
+      const std::string updated = updatedLabel(stamp_unix, tz_offset_min);
+      out.right = updated;
+      if (screen[0] != '\0') {
+        out.right = updated + " · " + screen;
+        out.right_alt.push_back(updated);
+      }
+    }
+    if (!message.empty()) {
+      out.left = message;
+      return out;
+    }
+    if (const dash::Event* event = bannerEvent()) {
+      banner_id = dashboardEventIdentity(*event);
+      out.show_icon = false;
+      out.left_bold = true;
+      out.left = std::string(dash::severityName(event->severity)) + " " + event->title + "  >";
+      return out;
+    }
+    std::vector<std::string> labels = deviceStateLabels(device_state, tz_offset_min);
+    out.left = labels.front();
+    out.left_alt.assign(labels.begin() + 1, labels.end());
+    size_t offline = 0;
+    if (pipeline != nullptr && !sleep_frame) {
+      for (const dash::Source& source : config.sources) {
+        dp::SourceStatus status;
+        if (!pipeline->sourceStatus(source.id, status)) continue;
+        if (status.offline || status.stale) ++offline;
+      }
+    }
+    if (offline > 0) {
+      char text[48];
+      std::snprintf(text, sizeof(text), tr(Str::OfflineCountFmt), static_cast<unsigned>(offline));
+      out.left_alt.insert(out.left_alt.begin(), out.left);
+      out.left += std::string(" · ") + text;
+    }
+    return out;
+  }
+
+  // 变化检测签名：不含实时「更新于」时刻（只有内容变化才重绘，时钟本身不逼出刷新）。
+  std::string statusSignature(const StatusLineContent& content) const {
+    std::string signature = std::to_string(static_cast<int>(content.icon));
+    signature += content.show_icon ? "|i|" : "|-|";
+    signature += content.left;
+    signature += '|';
+    if (sleep_frame) signature += content.right;
+    const size_t dot = content.right.find(" · ");
+    if (!sleep_frame && dot != std::string::npos) signature += content.right.substr(dot);
+    return signature;
   }
 
   void drawStatus() {
-    deps.canvas->fillRect(28, kStatusLineY, 496, kStatusLineH, 1);
-    deps.canvas->drawLine(28, kStatusLineY, 28 + 496 - 1, kStatusLineY, 0);
-    const std::string text = composeStatus(banner_event_id);
-    drawn_status_text = text;
-    const int16_t text_h = eego::FontManager::instance().uiFontHeight();
-    const int16_t text_y = static_cast<int16_t>(
-        kStatusLineY + 1 + std::max(0, (kStatusLineH - 1 - text_h) / 2));
-    ui::drawTextFit(*deps.canvas, eego::FontManager::instance(), 28 + 12, text_y, 496 - 24, text,
-                    1, false, 0);
+    const uint64_t stamp = TimeSource::valid() ? TimeSource::now() : 0;
+    const StatusLineContent content = composeStatus(banner_event_id, stamp);
+    drawn_status_text = statusSignature(content);
+    drawStatusLine(*deps.canvas, 28, kStatusLineY, 496, kStatusLineH, content);
   }
 
   bool renderPreview(eego::PortraitCanvas& canvas, const dash::Dashboard& candidate,
@@ -2284,19 +2319,16 @@ struct DashboardRuntime::Impl {
     info.screen = result.screen;
     info.screen_count = result.screen_count;
     if (!result.ok) return false;
-    // Status line like the live dashboard (divider + page/screen), marked as preview.
-    canvas.drawLine(28, kStatusLineY, 28 + 496 - 1, kStatusLineY, 0);
+    // Status line like the live dashboard (same height/font), marked as preview.
     std::string title = info.page_id;
     for (const dash::Page& item : preview.pages) {
       if (item.id == info.page_id && !item.title.empty()) title = item.title;
     }
-    const std::string text = "Preview  " + title + "  " + std::to_string(info.screen + 1) + "/" +
-                             std::to_string(info.screen_count);
-    const int16_t text_h = eego::FontManager::instance().uiFontHeight();
-    const int16_t text_y = static_cast<int16_t>(
-        kStatusLineY + 1 + std::max(0, (kStatusLineH - 1 - text_h) / 2));
-    ui::drawTextFit(canvas, eego::FontManager::instance(), 28 + 12, text_y, 496 - 24, text, 1,
-                    false, 0);
+    StatusLineContent line;
+    line.show_icon = false;
+    line.left = std::string(tr(Str::PreviewTag)) + " · " + title;
+    line.right = std::to_string(info.screen + 1) + "/" + std::to_string(info.screen_count);
+    drawStatusLine(canvas, 28, kStatusLineY, 496, kStatusLineH, line);
     return true;
   }
 
@@ -2627,8 +2659,11 @@ void DashboardRuntime::pollBattery(int64_t budget_ms) {
 void DashboardRuntime::cancelBatteryCycle() {
   if (impl_ != nullptr) impl_->cancelBatteryCycle();
 }
-void DashboardRuntime::setBatteryStatus(const std::string& text) {
-  if (impl_ != nullptr) impl_->setBatteryStatus(text);
+void DashboardRuntime::setDeviceState(const DeviceStateInfo& info, int tz_offset_min) {
+  if (impl_ != nullptr) impl_->setDeviceState(info, tz_offset_min);
+}
+void DashboardRuntime::setSleepFrame(bool enabled, uint64_t stamp_unix, int battery_pct) {
+  if (impl_ != nullptr) impl_->setSleepFrame(enabled, stamp_unix, battery_pct);
 }
 void DashboardRuntime::renderOffscreen() {
   if (impl_ != nullptr) impl_->render(false);

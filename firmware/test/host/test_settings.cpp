@@ -245,6 +245,24 @@ TEST(settings, idle_refresh_fields) {
     CHECK_MSG(schema.find(key) != std::string::npos, key);
 }
 
+TEST(settings, keep_awake_minutes) {
+  const Settings base;
+  CHECK_EQ(base.keep_awake_min, 30u);
+  Settings out;
+  FieldErrors errors;
+  for (uint32_t minutes : {10u, 30u, 60u, 120u}) {
+    const std::string patch = "{\"keep_awake_min\":" + std::to_string(minutes) + "}";
+    CHECK_MSG(patchOk(base, patch, out, errors), patch << " -> " << describe(errors));
+    CHECK_EQ(out.keep_awake_min, minutes);
+  }
+  CHECK(!patchOk(base, R"({"keep_awake_min":45})", out, errors));
+  CHECK(!patchOk(base, R"({"keep_awake_min":0})", out, errors));
+  CHECK_MSG(patchOk(base, R"({"keep_awake_min":60})", out, errors), describe(errors));
+  CHECK_EQ(changedFields(base, out), static_cast<uint32_t>(kChangedIdleRefresh));
+  CHECK(std::string(schemaJson()).find("keep_awake_min") != std::string::npos);
+  CHECK(toJson(out).toString().find("\"keep_awake_min\":60") != std::string::npos);
+}
+
 TEST(settings, battery_fields) {
   const Settings base;
   CHECK_EQ(base.battery_refresh_min, 15u);

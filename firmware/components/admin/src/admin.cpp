@@ -17,6 +17,8 @@
 #include "esp_timer.h"
 #include "net_stack/credentials.h"
 #include "net_stack/net_task.h"
+#include "net_stack/wifi_list.h"
+#include "net_stack/wifi_manager.h"
 #include "sd_card.h"
 #include "source_credential_usage.h"
 
@@ -298,33 +300,52 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
 
     case AdminCommandType::ApplyWifi: {
       // NVS 为密码权威（M13 §4）；config wifi_list 仅 ssid+pass_ref 展示引用。
+      std::vector<net::WifiAccount> previous;
+      net::CredentialStore::loadWifiAccounts(previous);
       std::vector<net::WifiAccount> accounts;
-      net::CredentialStore::loadWifiAccounts(accounts);
-      if (cmd.wifi_remove) {
-        accounts.erase(std::remove_if(accounts.begin(), accounts.end(),
-                                      [&](const net::WifiAccount& a) {
-                                        return a.ssid == cmd.wifi_ssid;
-                                      }),
-                       accounts.end());
-      } else {
-        bool replaced = false;
-        for (auto& a : accounts) {
-          if (a.ssid == cmd.wifi_ssid) {
-            a.password = cmd.wifi_password;
-            replaced = true;
-            break;
-          }
+      auto wipe = [&]() {
+        for (auto& a : previous) net::CredentialStore::secureErase(a.password);
+        for (auto& a : accounts) net::CredentialStore::secureErase(a.password);
+      };
+      if (cmd.wifi_list != nullptr) {
+        net::WifiListError list_error;
+        if (!net::applyWifiListEdit(previous, *cmd.wifi_list, accounts, list_error)) {
+          wipe();
+          res.ok = false;
+          res.err = list_error.field + ": " + list_error.message;
+          return;
         }
-        if (!replaced) {
-          if (accounts.size() >= 4) {
-            res.ok = false;
-            res.err = "wifi account list full (max 4)";
-            return;
+      } else {
+        accounts = previous;
+        if (cmd.wifi_remove) {
+          accounts.erase(std::remove_if(accounts.begin(), accounts.end(),
+                                        [&](const net::WifiAccount& a) {
+                                          return a.ssid == cmd.wifi_ssid;
+                                        }),
+                         accounts.end());
+        } else {
+          bool replaced = false;
+          for (auto& a : accounts) {
+            if (a.ssid == cmd.wifi_ssid) {
+              a.password = cmd.wifi_password;
+              replaced = true;
+              break;
+            }
           }
-          accounts.push_back({cmd.wifi_ssid, cmd.wifi_password});
+          if (!replaced) {
+            if (accounts.size() >= net::kMaxWifiNetworks) {
+              wipe();
+              res.ok = false;
+              res.err = "wifi account list full (max " +
+                        std::to_string(net::kMaxWifiNetworks) + ")";
+              return;
+            }
+            accounts.push_back({cmd.wifi_ssid, cmd.wifi_password});
+          }
         }
       }
       if (net::CredentialStore::saveWifiAccounts(accounts) != ESP_OK) {
+        wipe();
         res.ok = false;
         res.err = "failed to persist wifi credentials to NVS";
         return;
@@ -337,12 +358,25 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       std::string err;
       if (store.setWifiListInDom(dom, list) && store.commit(dom, err)) {
         ADMIN_LOG_INFO("wifi config changed: %s (accounts=%u)",
-                       cmd.wifi_remove ? "removed" : "saved",
+                       cmd.wifi_list ? "list replaced" : (cmd.wifi_remove ? "removed" : "saved"),
                        static_cast<unsigned>(accounts.size()));
       } else {
         ADMIN_LOG_ERROR("wifi_list config sync failed: %s", err.c_str());
       }
-      net::NetStack::instance().reconnectNow();
+      // 只在影响当前连接时重连：未连接、当前网络被删除或其密码变化。
+      // 纯排序/增删其他网络不打断现有连接（新顺序在下次断线重连时生效）。
+      const auto& wifi = net::WifiManager::instance();
+      bool reconnect = !wifi.isConnected();
+      if (!reconnect) {
+        const std::string current = wifi.currentSsid();
+        const net::WifiAccount* before = nullptr;
+        const net::WifiAccount* after = nullptr;
+        for (const auto& a : previous) if (a.ssid == current) before = &a;
+        for (const auto& a : accounts) if (a.ssid == current) after = &a;
+        reconnect = after == nullptr || before == nullptr || before->password != after->password;
+      }
+      wipe();
+      if (reconnect) net::NetStack::instance().reconnectNow(1000, wifi.isConnected());
       res.ok = true;
       return;
     }
@@ -389,7 +423,7 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
         ok = false;
       }
       net::NetStack::instance().stop();
-      for (const char* ns : {"sec", "source", "wifi", "nimble_bond", "dashboard"}) {
+      for (const char* ns : {"sec", "source", "wifi", "nimble_bond", "dashboard", "touchcal"}) {
         if (net::CredentialStore::clearNamespace(ns) != ESP_OK) {
           ADMIN_LOG_ERROR("factory reset: clear namespace failed: %s", ns);
           ok = false;

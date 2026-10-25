@@ -85,7 +85,8 @@ constexpr int8_t FRONTLIGHT_ENABLE = 12;
 // 板级电源锁存
 constexpr int8_t POWER_LATCH = 4;
 
-// 触控标定映射
+// 出厂触控映射（未标定时的默认值；运行时映射见 touch_calibration.h 的仿射标定，
+// 其 defaultAffine() 逐像素复现这两个函数）
 inline uint16_t rawTouchToLogicalX(uint16_t rawY) {
     uint16_t limitedY = rawY > 680 ? 680 : rawY;
     return static_cast<uint32_t>(limitedY) * 551 / 680;

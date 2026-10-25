@@ -259,10 +259,33 @@ int16_t drawWifiIcon(PortraitCanvas& c, int16_t x, int16_t y, int16_t h, int sta
 
 // 状态/帮助页的「分节标题 + 标签/值」列表（S3 与帮助页共用同一排版）。
 int16_t drawKvList(PortraitCanvas& c, const std::vector<std::pair<std::string, std::string>>& rows,
-                   int16_t y) {
+                   const std::vector<bool>& big, int16_t y) {
   const int16_t lh = lineHeight(style::kSmall.scale);
   const int16_t fh = fontH(style::kSmall.scale);
-  for (const auto& row : rows) {
+  for (size_t i = 0; i < rows.size(); ++i) {
+    const auto& row = rows[i];
+    const bool large = i < big.size() && big[i];
+    if (large && row.second.empty()) {
+      // 正文字号分节标题（粗体）+ 深灰下划线（状态页）。
+      const int16_t fhBig = fontH(style::kBodyStrong.scale);
+      if (y + fhBig > geom::kContentBottom) break;
+      textFit(c, geom::kInnerX, y, geom::kInnerW, row.first.c_str(), style::kBodyStrong);
+      hline(c, geom::kInnerX, static_cast<int16_t>(y + fhBig + 3), geom::kInnerW, kRuleGray);
+      y = static_cast<int16_t>(y + fhBig + 12);
+      continue;
+    }
+    if (large && !row.second.empty()) {
+      // 正文字号行：标签深灰、值黑色，标签列加宽（英文标签较长）。
+      const int16_t lhBig = lineHeight(style::kBody.scale);
+      if (y + fontH(style::kBody.scale) > geom::kContentBottom) break;
+      const int16_t labelW = kKvLabelW + 16;
+      textFit(c, geom::kInnerX, y, static_cast<int16_t>(labelW - 8), row.first.c_str(),
+              style::kBodyMuted);
+      textFit(c, static_cast<int16_t>(geom::kInnerX + labelW), y,
+              static_cast<int16_t>(geom::kInnerW - labelW), row.second.c_str(), style::kBody);
+      y = static_cast<int16_t>(y + lhBig);
+      continue;
+    }
     if (y + fh > geom::kContentBottom) break;
     if (row.second.empty()) {
       // 分节标题 + 深灰下划线
@@ -412,8 +435,8 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
   TextStyle muted = body;
   muted.gray = 6;
   const int16_t ty = centerY(y, barH, body.scale);
-  // 图标高 ≈ 状态文字大写/数字字高（行高的 ~45%）
-  const int16_t capH = std::max<int16_t>(12, static_cast<int16_t>(fontH(body.scale) * 9 / 20));
+  // 图标高 ≈ 状态文字大写/数字字高（行高的 ~1/2）
+  const int16_t capH = std::max<int16_t>(12, static_cast<int16_t>(fontH(body.scale) / 2));
 
   // 左：时间
   const int16_t leftEnd = static_cast<int16_t>(
@@ -457,8 +480,9 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
     }
   }
 
-  // 中：徽章（配网窗口/AP 回退为黑底白字胶囊，静音为灰字）；放不下则省略
-  const int16_t mx0 = static_cast<int16_t>(leftEnd + 12);
+  // 中（左对齐）：配网/AP 胶囊（黑底白字）→ 设备状态（图标 + 正文字号标签）→ 静音
+  // 计数（灰字）。放不下时先省略静音，再截断状态标签，最后省略状态。
+  const int16_t mx0 = static_cast<int16_t>(leftEnd + 16);
   const int16_t mx1 = static_cast<int16_t>(rx - 12);
   const char* portal = m.portalOpen ? tr(Str::PortalOpen)
                                     : (m.apFallback ? tr(Str::ApFallback) : nullptr);
@@ -469,29 +493,37 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
   const int16_t pillPad = 8;
   const int16_t portalW =
       portal != nullptr ? static_cast<int16_t>(styleW(portal, strong) + 2 * pillPad) : 0;
+  int16_t bx = mx0;
+  if (portalW > 0 && bx + portalW <= mx1) {
+    const int16_t pillH = std::min<int16_t>(static_cast<int16_t>(fontH(body.scale) + 4),
+                                            static_cast<int16_t>(barH - 4));
+    const int16_t py = static_cast<int16_t>(y + (barH - pillH) / 2);
+    c.fillRoundRectGray(bx, py, portalW, pillH, static_cast<int16_t>(pillH / 2), 0);
+    TextStyle onDark = strong;
+    onDark.gray = 15;
+    text(c, static_cast<int16_t>(bx + pillPad), ty, portal, onDark);
+    bx = static_cast<int16_t>(bx + portalW + 10);
+  }
   const int16_t muteW = mute[0] != '\0' ? styleW(mute, muted) : 0;
-  const int16_t span = static_cast<int16_t>(mx1 - mx0);
-  bool showPortal = portalW > 0;
-  bool showMute = muteW > 0;
-  auto total = [&]() {
-    return static_cast<int16_t>((showPortal ? portalW : 0) + (showMute ? muteW : 0) +
-                                (showPortal && showMute ? 10 : 0));
-  };
-  if (total() > span) showMute = false;
-  if (total() > span) showPortal = false;
-  if (total() > 0) {
-    int16_t bx = static_cast<int16_t>(mx0 + (span - total()) / 2);
-    if (showPortal) {
-      const int16_t pillH = std::min<int16_t>(static_cast<int16_t>(fontH(body.scale) + 4),
-                                              static_cast<int16_t>(barH - 4));
-      const int16_t py = static_cast<int16_t>(y + (barH - pillH) / 2);
-      c.fillRoundRectGray(bx, py, portalW, pillH, static_cast<int16_t>(pillH / 2), 0);
-      TextStyle onDark = strong;
-      onDark.gray = 15;
-      text(c, static_cast<int16_t>(bx + pillPad), ty, portal, onDark);
-      bx = static_cast<int16_t>(bx + portalW + 10);
+  if (m.stateText[0] != '\0') {
+    const int16_t icon = stateIconSize(fontH(body.scale));
+    const char* label = m.stateText;
+    if (m.stateShort[0] != '\0' &&
+        styleW(m.stateText, body) > static_cast<int16_t>(mx1 - bx - icon - 6)) {
+      label = m.stateShort;
     }
-    if (showMute) text(c, bx, ty, mute, muted);
+    const int16_t stateW = styleW(label, body);
+    int16_t room = static_cast<int16_t>(mx1 - bx - icon - 6);
+    const bool muteFits = muteW > 0 && stateW + 10 + muteW <= room;
+    if (muteFits) room = static_cast<int16_t>(room - muteW - 10);
+    if (room >= styleW("...", body) + textW("W", body.scale)) {
+      drawStateIcon(c, bx, static_cast<int16_t>(y + (barH - icon) / 2), icon, m.state);
+      const int16_t used = textFit(c, static_cast<int16_t>(bx + icon + 6), ty, room, label, body);
+      bx = static_cast<int16_t>(bx + icon + 6 + used + 10);
+      if (muteFits) text(c, bx, ty, mute, muted);
+    }
+  } else if (muteW > 0 && bx + muteW <= mx1) {
+    text(c, bx, ty, mute, muted);
   }
 
   // 横幅（操作结果/二次确认）：内容区顶部 kBannerH 浅灰条（标题在其下方）
@@ -634,7 +666,7 @@ void drawStatus(PortraitCanvas& c, const KvModel& m) {
     textRight(c, geom::kInnerRight, centerY(geom::kTitleY, geom::kTitleH, style::kCaption.scale),
               120, m.pageText, style::kCaption);
   }
-  const int16_t y = drawKvList(c, m.rows, geom::kBodyTop);
+  const int16_t y = drawKvList(c, m.rows, m.big, geom::kBodyTop);
   const int16_t stripH = static_cast<int16_t>(fontH(style::kCaptionStrong.scale) + 8);
   if (!m.configValid && y + 4 + stripH <= geom::kContentBottom) {
     const int16_t sy = static_cast<int16_t>(y + 4);
@@ -648,7 +680,7 @@ void drawStatus(PortraitCanvas& c, const KvModel& m) {
 
 void drawHelp(PortraitCanvas& c, const KvModel& m) {
   drawPageTitle(c, Str::PageHelp);
-  drawKvList(c, m.rows, geom::kBodyTop);
+  drawKvList(c, m.rows, m.big, geom::kBodyTop);
 }
 
 // ── S4 设置 ─────────────────────────────────────────────────────────────────

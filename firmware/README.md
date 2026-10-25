@@ -27,17 +27,42 @@ idf.py -C firmware -B .tmp/firmware-build size-components
 
 ## 本机默认凭据（可选）
 
-不想使用配网热点时，可在 `firmware/main/local_secrets.h` 定义本机默认值：
+不想使用配网热点时，可复制模板 `firmware/main/local_secrets.example.h` 为
+`firmware/main/local_secrets.h` 并填写本机默认值（模板逐项说明了全部宏）：
 
 ```cpp
-#define EEGO_LOCAL_WIFI_SSID "your-ssid"
-#define EEGO_LOCAL_WIFI_PASSWORD "your-wifi-password"
-#define EEGO_LOCAL_ADMIN_PASSWORD "your-admin-password"
+// 按顺序尝试，列表顺序即优先级；最多 8 个，密码为空表示开放网络
+#define EEGO_LOCAL_WIFI_LIST { {"home-ssid", "home-password"}, {"office-ssid", "office-password"} }
+#define EEGO_LOCAL_ADMIN_PASSWORD "your-admin-password"   // 8..128 字节
 ```
 
-该文件被 `.gitignore` 排除。仅当 NVS 中没有 WiFi 账号或管理密码时，固件会在首次
-启动写入对应默认值，之后不覆盖修改。需要替换现有 WiFi 账号时，可临时定义
-`EEGO_LOCAL_WIFI_REPLACE`，写入新默认值后应移除并重新构建，避免每次启动覆盖。
+只有一个网络时也可用简写 `EEGO_LOCAL_WIFI_SSID` / `EEGO_LOCAL_WIFI_PASSWORD`
+（同时定义时以 `EEGO_LOCAL_WIFI_LIST` 为准）。SSID 超长/重复、WiFi 密码不是空或
+8..63 字节、管理密码短于 8 字节时会在编译期报错。
+
+该文件被 `.gitignore` 排除。每次启动都会确保默认 WiFi 列表生效：列表中的网络一定
+存在、密码以编译期为准、按列表顺序排在最前；之前保存的其他网络（配网门户、管理端或
+旧固件写入）保持原顺序排在后面，超过 8 个时丢弃末尾的（启动日志打印最终 SSID 列表）。
+管理密码仅在尚未设置时写入。定义 `EEGO_LOCAL_WIFI_REPLACE` 时只保留默认网络。
+
+联网时固件先扫描，可见的已保存网络按列表顺序优先尝试（各两次，全信道扫描后按信号选
+同名 AP），未扫描到的网络（隐藏 SSID 等）随后各试一次；全部失败后指数退避（10s 起，
+封顶 60s）再遍历整表，断线后立即重新遍历。开放网络（空密码）按 OPEN 阈值连接。国家码
+默认 CN（信道 1–13，可用 `-DEEGO_WIFI_COUNTRY_CODE='"XX"'` 覆盖）。连续 3 轮失败
+（或已存网络 2 分钟都扫不到）才自动打开恢复热点，热点信道取信号最强的已存网络所在
+信道；热点开着时 STA 继续重试，连上后自动关闭热点（有客户端连着时宽限 2 分钟）。
+web 管理端「网络 / WiFi」页可增删网络、改密码、拖动排序并查看当前连接。
+
+### WiFi 离线诊断
+
+不需要互联网：手机连上设备热点 `EEGO-A4-Setup` 后打开 `http://192.168.4.1/wifi-diag`。
+页面列出已保存网络（按优先级）、每个网络最近一次尝试时间/结果、最近与本次开机首次的
+断开原因码及中文说明、最近一次扫描（SSID、信号、信道、加密方式，已保存的网络标★），
+并可「立即重试」「重新扫描」。JSON 在 `GET /api/v1/wifi/diag`（`POST /api/v1/wifi/retry`、
+`POST /api/v1/wifi/scan`）。已设管理密码时（含恢复热点）数据端点需要 Bearer 登录，页面
+内输入管理密码即可；首次配网门户期间（尚无管理密码）与门户其余端点一样免认证。输出
+只含 SSID/信号/原因码，绝不含密码。设备「状态」页网络分节与串口 `wifi`（`wifi scan`、
+`wifi retry`）显示同样的信息。
 需要临时关闭深睡时，可定义 `EEGO_LOCAL_POWER_MODE_MAINS`，确认 Mains 生效后移除；
 NVS 会保留该电源模式，之后仍可在设置中改回 Auto 或 Battery。新设备默认显示时区为
 UTC+8，可在设置中逐小时调整；已有设备可用 `EEGO_LOCAL_TIMEZONE_OFFSET_MIN` 写入一次。
@@ -85,10 +110,10 @@ python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
 
 | 屏幕 | 进入方式 | 内容 |
 |---|---|---|
-| 主页 · Dashboard | 开机、前置键短按 | 已应用的 dashboard（多页/多子屏），底部状态行显示屏号、时钟来源、数据源在线数与最新告警横幅 |
+| 主页 · Dashboard | 开机、前置键短按 | 已应用的 dashboard（多页/多子屏），底部状态行（正文字号）显示设备状态、「更新于 HH:MM」、屏号、离线源数与最新告警横幅（见下文「设备状态一眼可见」） |
 | 主页 · 开始使用 | 未配置 dashboard 时 | 管理地址（或配网热点与 `http://192.168.4.1/`）、WiFi 状态、三步配置说明 |
 | 告警详情 | 点按告警面板中的一行或底部横幅；告警面板上按 Power | 严重度、状态、来源、时间与字段；↑/↓ 浏览同一面板的告警；确认 / 静音 / 删除 / 趋势 |
-| 设备状态 | 前置键双击；引导页软键 | WiFi、信号、地址、时间来源、电池与供电、存储（alerts.db 大小）、硬件、固件版本、运行时长、各数据源最近更新与错误、外部告警计数 |
+| 设备状态 | 前置键双击；引导页软键 | 「电源 / 休眠」（正文字号：模式、供电来源与判定原因、保持唤醒剩余、下次唤醒/刷新、唤醒原因、休眠次数）、WiFi、信号、地址、时间来源、电池、存储（alerts.db 大小）、硬件、固件版本、运行时长、各数据源最近更新与错误、外部告警计数；软键 刷新 / 保持唤醒 / 返回 |
 | 设置 | 前置键长按；引导页软键 | 本机设置（网络恢复、前光、刷新周期、电池模式与夜间暂停、静音列表、按键映射重置等） |
 | 输入帮助 | 设置 → 输入帮助 | 本节按键说明 |
 
@@ -101,12 +126,53 @@ python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
 | Power 短按 | 选择/确认：告警面板 → 告警详情；按钮面板 → 执行动作；本机页面 → 当前软键/行。未选面板时先打开本屏告警，否则显示焦点框 |
 | Power 长按 | 返回：子页面回主页；dashboard 先退跳转栈，再回默认页第一屏 |
 | 前置键 短按 / 长按 / 双击 | 主页 / 设置 / 设备状态 |
+| ↑ + ↓ 同按 | 保持唤醒（默认绑定 builtin `keep_awake`；再按：剩余不足一半时延长，否则取消） |
 | 左滑或上滑 / 右滑或下滑 | 下一屏（项）/ 上一屏（项）；子页面首屏右滑 = 返回 |
 | 点按 | 告警行 → 详情；按钮 → 动作；其余面板 → 选中；底部状态行左/右半 → 上/下一屏 |
 
 告警详情中「确认」对外部告警写入设备告警库（等同 `POST /alerts/{id}/ack`），对
 规则告警只在本机视图中压制本次触发；「静音」「删除」只对外部告警可用，静音按指纹
 持久化到 `config.json` 的 `mute_rules`（设置 → 静音列表 可清空）。
+
+### 设备状态一眼可见
+
+顶部状态栏（本机页面）与 dashboard 底部状态行（40 px，UI 字体 2x + 同尺寸图标）都显示：
+
+| 图标 | 状态 | 含义 |
+|---|---|---|
+| ● | 运行中 | 常供电、最近有交互：屏幕即时更新 |
+| ☀ | 保持唤醒 · 剩余 NN 分 | 配置模式：不进空闲节奏、不自动深睡（> 10 分钟时按 5 分钟取整，最后 10 分钟逐分钟） |
+| 时钟 | 空闲 · 下次 HH:MM | 空闲刷新节奏：非交互更新合并到该墙钟边界（进入空闲时即时刷一次） |
+| ◯ | 已唤醒 · 无操作 N 秒后休眠 | 电池供电、按键唤醒后的交互期 |
+| 月牙 | 休眠中 · 下次 HH:MM · 按键唤醒 / 夜间暂停 · HH:MM 恢复 | 深睡前的最后一帧（数据帧保留），「下次」= 保证刷新的最迟时刻 |
+
+底部状态行右侧常驻「更新于 HH:MM」（该帧实际刷屏时刻；深睡帧另附电量），屏幕是否
+陈旧一目了然。空间不足时依次省略：页码 → 电量 → 状态标签的后半段。底部状态行高度
+与 web 编辑器（`web/src/model/grid.ts` `CONTENT.h = 672`、`STATUS_LINE_Y = 700`）一致。
+
+输入后的「处理中」提示未实现：UC8279C 驱动没有局部窗口刷新，任何提示都要一次整屏
+Fast 刷新（并计入 Fast→Full 自动升级计数），反而拖慢真正的更新。
+
+### 保持唤醒（配置模式）
+
+限时覆盖：期间不进入空闲刷新节奏、电池交互期不因超时深睡、常供电/电池都不进入夜间
+暂停深睡，WiFi 与管理 API 保持在线。时长 `keep_awake_min`（10/30/60/120，默认 30）。
+只保存在 RAM，重启或深睡即失效，到期自动结束；到期后按最后一次交互重新计时（不额外
+宽限）。触发：设置第一行「保持唤醒 30 分钟」、设备状态页软键「保持唤醒」、↑+↓ 同按
+（以上三者：未开启 → 开启；剩余不足一半 → 延长回整段；否则取消），或 web 端：
+
+```text
+POST /api/v1/device/keep-awake  {"minutes": 30}   # 0 = 取消，上限 240
+→ {"active":true,"remaining_s":1800,"until":<unix>,"default_min":30}
+GET  /api/v1/device/keep-awake
+```
+
+`GET /api/v1/status` 增加 `keep_awake`（同上）与 `power`：`source`（mains/battery）、
+`source_reason`、`power_mode`、`mode`（active/keep_awake/idle/awake/sleeping）、
+`battery_pct`/`battery_mv`/`charging`/`usb_host`、`next_wake`、`next_refresh`、
+`sleep_in_s`（电池交互期距自动深睡的秒数，-1 = 不会）、`last_wake_reason`、
+`sleeps_since_boot`、`last_screen_update`。`GET /status` 与 `GET /device/keep-awake`
+是被动轮询，不计入「有人在用」；其余已认证请求照旧推迟电池交互期深睡。
 
 ## 数据面板
 
@@ -167,7 +233,7 @@ python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
   （`bundle`/`live`/`mixed`/`placeholder`/`none`）。
 - 数值来源：bundle 自带的 `samples`/`events`；bundle 没有样本的数据源用设备上同 id
   数据源的实时数据；仍完全没有样本时，每个指标面板用与 Web 编辑器相同的确定性演示序列。
-  远程图片不抓取（显示占位），SD 本地图片照常渲染。底部状态行显示 `Preview <页> n/m`。
+  远程图片不抓取（显示占位），SD 本地图片照常渲染。底部状态行显示 `预览 · <页>  n/m`。
 - 错误：`400 invalid_request`（请求字段不对）、`400 validation_failed`
   （bundle 校验失败，`error.fields` 为逐字段错误；或页/屏不存在）、
   `415`（非 JSON）、`413`（过大）、`429`（限速，带 `Retry-After`）、
@@ -208,15 +274,23 @@ DELETE /api/v1/sources/credentials   {"key":"weather"}
 - 按键与手势见「设备操作」。自定义绑定最多 24 条，页面上下文为
   `dashboard`、`dashboard:<page_id>`、`onboarding`、`detail`、`status`、`settings`、
   `help` 或 `*`；动作只能是白名单 builtin（`page_previous/page_next/focus_previous/
-  focus_next/home/settings/status/help/refresh`）或已注册 panel action。
+  focus_next/home/settings/status/help/refresh/keep_awake`）或已注册 panel action。
   Power、前置键短按（主页）、确认和恢复流程不可重映射。
 - 危险操作第一次激活只布防；5 秒内在同一控件上再按一次（全新短按）确认，长按或其他输入取消。
   网络恢复、工厂恢复和 BLE 配网/解绑只接受实体 Power。
 - 首次管理密码必须在 AP 门户设置。之后的本地 BLE 配网使用限时窗口、随机 PoP
   和 Security 1；被动 BLE observer 默认关闭。Bluetooth Classic、持续手机 GATT
   和通用蓝牙上网不在范围内。
-- Auto 按充电状态选择常电或电池模式。电池模式只在唤醒窗口联网；深睡时 HTTP
-  和 BLE 不可达，HTTP 推送会延迟到唤醒后。行为见下节「电池模式」。
+- 供电判定（`main/battery_policy` `MainsDetector`，主机单测 `power_source`）：Auto
+  下 无电池读数 / 充电中 / USB 主机已连接（USB-Serial-JTAG SOF）→ 常供电并锁存；
+  GPIO11 只是**充电状态**而非 VBUS，电池充满后充电停止，所以锁存后只要电压 ≥ 4050 mV
+  且未持续下降就保持常供电（`full_hold`）；自峰值起 2 分钟后仍低 ≥ 60 mV（`voltage_drop`）
+  或跌破 4050 mV（`below_hold`）才判定拔电。插着充电器冷启动且电压 ≥ 4050 mV 时预先
+  锁存。判定结果与原因显示在设备状态页、`GET /api/v1/status` 的 `power.source/
+  source_reason` 与串口日志 `power mode -> battery (reason: …)`。**插着 USB 却被判成
+  电池（会按电池节奏深睡、WiFi 断开）时，把 设置 → 供电模式 改为「持续供电」即可强制常供电。**
+  电池模式只在唤醒窗口联网；深睡时 HTTP 和 BLE 不可达，HTTP 推送会延迟到唤醒后。
+  行为见下节「电池模式」。
 
 忘记管理密码只能全量恢复出厂。WiFi-only 重置不会清除管理密码或数据源凭据。
 危险恢复操作可从本机设置页发起，并需实体 Power 确认。
@@ -239,20 +313,23 @@ DELETE /api/v1/sources/credentials   {"key":"weather"}
   以完整应用重启（面板不清屏）。
 - **不变不刷**：深睡帧先离屏渲染，对 1-bit 帧与灰阶平面求哈希；与上次显示的帧相同且
   未超过 `battery_max_stale_min`（15–480，默认 60，须 ≥ 唤醒间隔）就完全不碰屏。
-  状态行显示 `电量 75% · 更新于 14:00 · 最迟 15:00`：电量按 5% 分档并带滞回，
-  “更新于”是上次真正刷屏的时刻，“最迟”由它和 max-stale 推出，因此数据不变时帧
-  逐像素不变，时钟本身不会逼出刷新。
+  深睡帧状态行显示 `☾ 休眠中 · 下次 15:00 · 按键唤醒 … 75% · 更新于 14:00`（放不下时
+  依次省略电量与「按键唤醒」）：电量按 5% 分档并带滞回，“更新于”是上次真正刷屏的
+  时刻，“下次”是由它和 max-stale 推出的最迟刷新时刻（而不是下一次定时唤醒——那会让
+  每次唤醒的帧都不同、逼出刷屏），因此数据不变时帧逐像素不变，时钟本身不会逼出刷新。
 - **跨深睡 Fast 刷新**：每次刷屏后把 B/W 帧 PackBits 压缩、经 atomic_file 原子写到
   `/sdcard/alertpanel/battery_frame.bin`；下次唤醒读回（CRC + 帧哈希校验）预载到
   控制器 DTM1 作为旧帧，再 Fast 刷新。每 12 次刷屏或距上次 Full 满 24 小时、或帧文件
   缺失/损坏时用 Full。
 - **夜间暂停**：`sleep_start_min`–`sleep_end_min` 窗口内不唤醒、不联网；进入前状态行
-  一次性显示 `夜间暂停 · 06:00 恢复`，睡到窗口结束。常供电模式同样遵守该窗口。
+  一次性显示 `夜间暂停 · 06:00 恢复 · 按键唤醒`，睡到窗口结束。常供电模式同样遵守该
+  窗口；保持唤醒期间推迟。
 - **按键唤醒**：电源键（GPIO8，高有效）为 EXT0；↑/↓（GPIO5/7，RTC GPIO，低有效）为
   EXT1 任一为低唤醒，深睡期间保持 RTC 上拉。触控 GSLX680 没有 INT 引脚（I²C 轮询），
   不能唤醒。按键唤醒运行完整应用（WiFi、管理 API、BLE 扫描窗口），唤醒那一下不当作
   操作；`battery_interactive_timeout_s`（20–600，默认 60）内没有按键/触控/已认证的
-  管理请求则回到主页渲染深睡帧，并深睡到下一个对齐时刻。
+  管理请求（被动的 `GET /status` 轮询不算）且未开启保持唤醒，则回到主页渲染深睡帧，
+  并深睡到下一个对齐时刻。
 
 能耗依据：一次唤醒中 WiFi（关联 + DHCP + TLS，约 100 mA 量级持续数秒）远大于墨水屏
 刷新（Full 约 2–3 s 高压，Fast 不到 1 s），二者都远大于深睡电流。因此先压缩 WiFi

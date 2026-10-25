@@ -51,6 +51,7 @@ void printHelp() {
       "  rtc             - read PCF8563 wall-clock time\n"
       "  sd              - SD status + alertpanel dir listing\n"
       "  net             - wifi state + source health table\n"
+      "  wifi [scan|retry] - saved networks: last attempt/result/reason + last scan\n"
       "  alerts          - alert snapshot summary\n"
       "  inject <json>   - ingest alert event(s) (enqueue only)\n"
       "  ack-all         - acknowledge all active alerts\n"
@@ -58,7 +59,9 @@ void printHelp() {
       "  version         - firmware/chip/heap/framebuffer info\n"
       "  lang zh|en      - switch panel UI language\n"
       "  page home|dashboard|detail|status|settings|help - jump to screen (bench aid)\n"
-      "  dashboard <cmd> - status/vars/panels/refresh/inject/interval/smoke\n");
+      "  dashboard <cmd> - status/vars/panels/refresh/inject/interval/smoke\n"
+      "  touch [trace]   - print raw/mapped touch coordinates for 20 s\n"
+      "  touch cal|marks on|off|show|reset - calibration screen / tap markers / coefficients\n");
   fflush(stdout);
 }
 
@@ -113,6 +116,10 @@ void dispatch(char* line) {
   } else if ((strcmp(verb, "dashboard") == 0 || strcmp(verb, "dash") == 0) &&
              g_handlers.dashboard) {
     g_handlers.dashboard(arg);
+  } else if (strcmp(verb, "wifi") == 0 && g_handlers.wifi) {
+    g_handlers.wifi(arg);
+  } else if (strcmp(verb, "touch") == 0 && g_handlers.touch) {
+    g_handlers.touch(arg);
   } else {
     printf("ERR unknown cmd '%s', type help\n", verb);
   }

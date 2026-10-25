@@ -17,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "net_stack/credentials.h"
+#include "net_stack/wifi_list.h"
 
 namespace eego::admin {
 
@@ -24,7 +25,7 @@ namespace {
 
 constexpr size_t kMaxConfigBodyBytes = 4 * 1024;  // M13：config body ≤4KB（httpd 强制）
 constexpr size_t kMaxOverrides = 64;
-constexpr size_t kMaxWifiList = 4;
+constexpr size_t kMaxWifiList = net::kMaxWifiNetworks;
 constexpr size_t kMaxMuteRules = 32;              // M21：静音规则上限
 constexpr int64_t kSchemaVersion = 1;
 constexpr int64_t kMaxMuteExpiresAt = 4102444800LL;  // 2100-01-01T00:00:00Z（规则 TTL 上限）
@@ -210,7 +211,8 @@ void validateAdminSection(const alert_core::JsonValue& admin, FieldErrors& errs,
         continue;
       }
       if (v.arrayItems().size() > kMaxWifiList) {
-        addErr(errs, "admin.wifi_list", "too many entries (max 4)");
+        addErr(errs, "admin.wifi_list",
+               "too many entries (max " + std::to_string(kMaxWifiList) + ")");
       }
     } else if (k == "network") {
       if (v.type() != JsonValue::Type::Object) {
@@ -897,8 +899,8 @@ const char* ConfigStore::schemaJson() {
     "admin": {
       "type": "object",
       "fields": {
-        "wifi_list": {"type": "array", "max_items": 4, "read_only": true,
-                      "item": {"ssid": "string 1..32B", "pass_ref": "\"nvs:wifi/<idx>\" (managed via /api/v1/config/wifi)"}},
+        "wifi_list": {"type": "array", "max_items": 8, "read_only": true,
+                      "item": {"ssid": "string 1..32B", "pass_ref": "\"nvs:wifi/<idx>\" (managed via /api/v1/config/wifi; list order = connect priority)"}},
         "network": {"type": "object", "fields": {"auto_ap_fallback": {"type": "bool", "default": false}}},
         "security": {"type": "object", "fields": {
           "session_ttl_s": {"type": "int", "range": [300, 86400], "default": 86400},

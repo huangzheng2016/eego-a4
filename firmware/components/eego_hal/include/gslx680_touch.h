@@ -6,7 +6,8 @@
 // 经手势 FSM 后写入 FreeRTOS 队列；app_task 用 poll() 非阻塞取事件。
 // 渲染阻塞 app_task 期间采样不中断，滑动不会被压缩成同坐标的 Tap。
 // 未启动任务时 poll() 退回旧的同步读帧模式。
-// 坐标经 eego_pins.h 的 rawTouchToLogicalX/Y 映射为 portrait 逻辑坐标。
+// 坐标经仿射标定（touch_calibration.h；默认 = eego_pins.h 的出厂映射）映射为 portrait
+// 逻辑坐标；标定在 begin() 时从 NVS "touchcal" 载入，可运行时更换/保存/清除。
 // 屏下电容键（raw_x≈0x03a0, raw_y≈0x1020 sentinel）与普通触控互斥；
 // 输出带时间戳的轨迹、tap/hold/swipe 与 Front short/long/double。
 #pragma once
@@ -19,8 +20,10 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "input_gesture.h"
+#include "touch_calibration.h"
 
 #include <atomic>
+#include <mutex>
 #include <vector>
 
 namespace eego {
@@ -49,6 +52,16 @@ public:
     bool hasPending() const;
     uint32_t droppedEvents() const { return dropped_.load(); }
 
+    // ---- 仿射标定（任意任务调用；采样任务每帧取一致副本）----
+    touchcal::Affine calibration() const;
+    bool calibrationCustom() const;  // 当前使用的不是出厂映射
+    // 仅运行时生效（不持久化）。不合理的标定被拒绝（返回 false）。
+    bool applyCalibration(const touchcal::Affine& affine);
+    // 校验 → 写 NVS → 生效。
+    esp_err_t saveCalibration(const touchcal::Affine& affine);
+    // 擦除 NVS 记录并恢复出厂映射。
+    esp_err_t clearCalibration();
+
 private:
     static void pollTask(void* arg);
     std::vector<TouchEvent> sampleFrame();
@@ -73,6 +86,13 @@ private:
     std::atomic<bool> pressed_{false};
     std::atomic<uint32_t> dropped_{0};
     SemaphoreHandle_t wake_ = nullptr;
+
+    mutable std::mutex calMutex_;
+    touchcal::Affine cal_ = touchcal::defaultAffine();
+    // 当前接触的原始坐标累计（仅采样任务/同步 poll 访问）
+    uint32_t rawSumX_ = 0;
+    uint32_t rawSumY_ = 0;
+    uint16_t rawCount_ = 0;
 };
 
 }  // namespace eego

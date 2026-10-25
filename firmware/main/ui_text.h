@@ -74,6 +74,9 @@ enum class Lang : uint8_t {
   X(WifiConnected, "WiFi 已连接", "CONNECTED") \
   X(WifiFailed, "WiFi 连接失败", "FAILED") \
   X(WifiOffline, "WiFi 离线", "OFFLINE") \
+  X(WifiNotTried, "未尝试", "NOT TRIED") \
+  X(WifiNotSeen, "未扫描到", "NOT SEEN") \
+  X(WifiDiag, "WiFi 诊断", "WIFI DIAG") \
   X(Sources, "数据源", "DATA SOURCES") \
   X(NoSources, "未配置数据源", "NO SOURCES") \
   X(NoDashboard, "未配置仪表盘", "NO DASHBOARD") \
@@ -200,6 +203,21 @@ enum class Lang : uint8_t {
   X(InputResetDone, "按键映射已恢复默认", "INPUT DEFAULTS RESTORED") \
   X(SetInputHelp, "输入帮助", "INPUT HELP") \
   X(SetInputReset, "重置按键映射", "RESET INPUT MAPPINGS") \
+  X(SetTouchCal, "触摸校准", "TOUCH CALIBRATION") \
+  X(SetTouchMarks, "显示触点", "SHOW TOUCHES") \
+  X(TouchCalibrated, "已校准", "CALIBRATED") \
+  X(TouchFactory, "默认", "DEFAULT") \
+  X(TouchCalTapFmt, "点击十字中心（%u/%u）", "TAP THE CROSS CENTER (%u/%u)") \
+  X(TouchCalHoldStill, "请保持手指不动后抬起", "HOLD STILL, THEN LIFT") \
+  X(TouchCalCancelHint, "长按电源键取消", "HOLD POWER TO CANCEL") \
+  X(TouchCalVerify, "点击任意位置检查，触点会显示为圆点", "TAP ANYWHERE TO CHECK; TOUCHES SHOW AS DOTS") \
+  X(TouchCalErrorFmt, "最大误差 %u px", "MAX ERROR %u PX") \
+  X(TouchCalKeys, "电源键：短按保存 · 长按取消；上键重做", "POWER: SAVE · HOLD: CANCEL; UP: REDO") \
+  X(TouchCalFailed, "校准失败：点击任意位置重做，长按电源键取消", "CALIBRATION FAILED: TAP TO REDO, HOLD POWER TO CANCEL") \
+  X(TouchCalSave, "保存", "SAVE") \
+  X(TouchCalRedo, "重做", "REDO") \
+  X(TouchCalCancel, "取消", "CANCEL") \
+  X(TouchCalSaved, "触摸校准已保存", "TOUCH CALIBRATION SAVED") \
   X(HelpUpDownShort, "↑/↓ 短按", "UP/DOWN SHORT") \
   X(HelpScreen, "上/下一屏；列表中上/下一项", "PREV/NEXT SCREEN; ITEM IN LISTS") \
   X(HelpUpDownLong, "↑/↓ 长按", "UP/DOWN LONG") \
@@ -224,9 +242,54 @@ enum class Lang : uint8_t {
   X(NextPage, "下一页", "NEXT") \
   X(PollEveryMinFmt, "每 %u 分钟", "EVERY %uMIN") \
   X(PollEveryHourFmt, "每 %u 小时", "EVERY %uH") \
-  X(PollEveryDayFmt, "每 %u 天", "EVERY %uD")
+  X(PollEveryDayFmt, "每 %u 天", "EVERY %uD") \
+  X(StateRunning, "运行中", "RUNNING") \
+  X(StateKeepAwakeFmt, "保持唤醒 · 剩余 %u 分", "KEEP AWAKE · %uMIN LEFT") \
+  X(StateIdleFmt, "空闲 · 下次 %02d:%02d", "IDLE · NEXT %02d:%02d") \
+  X(StateIdleNoClockFmt, "空闲 · 每 %u 分钟刷新", "IDLE · EVERY %uMIN") \
+  X(StateAwakeFmt, "已唤醒 · 无操作 %u 秒后休眠", "AWAKE · SLEEPS AFTER %uS IDLE") \
+  X(StateSleepingFmt, "休眠中 · 下次 %02d:%02d · 按键唤醒", "ASLEEP · NEXT %02d:%02d · PRESS A KEY") \
+  X(StateSleeping, "休眠中 · 按键唤醒", "ASLEEP · PRESS A KEY") \
+  X(StateKeepAwakeShortFmt, "保持唤醒 %u 分", "AWAKE %uMIN") \
+  X(StateIdleShortFmt, "空闲 %02d:%02d", "IDLE %02d:%02d") \
+  X(StateAwake, "已唤醒", "AWAKE") \
+  X(StateSleepingNextFmt, "休眠中 · 下次 %02d:%02d", "ASLEEP · NEXT %02d:%02d") \
+  X(StateSleepingShort, "休眠中", "ASLEEP") \
+  X(StateNightShort, "夜间暂停", "NIGHT PAUSE") \
+  X(StateNightFmt, "夜间暂停 · %02d:%02d 恢复 · 按键唤醒", "NIGHT PAUSE · %02d:%02d · PRESS A KEY") \
+  X(UpdatedFmt, "更新于 %02d:%02d", "UPDATED %02d:%02d") \
+  X(UpdatedNoClock, "更新于 --:--", "UPDATED --:--") \
+  X(OfflineCountFmt, "离线 %u", "OFF %u") \
+  X(PreviewTag, "预览", "PREVIEW") \
+  X(SecPower, "电源 / 休眠", "POWER / SLEEP") \
+  X(LblMode, "模式", "MODE") \
+  X(LblKeepAwake, "保持唤醒", "KEEP AWAKE") \
+  X(LblNextWake, "下次唤醒", "NEXT WAKE") \
+  X(LblNextRefresh, "下次刷新", "NEXT UPDATE") \
+  X(LblWakeReason, "唤醒原因", "WAKE REASON") \
+  X(LblSleeps, "休眠次数", "SLEEPS") \
+  X(LblScreenUpdated, "屏幕更新", "SCREEN") \
+  X(KeepAwakeRemainFmt, "剩余 %u 分 · 至 %s", "%uMIN LEFT · UNTIL %s") \
+  X(SetKeepAwakeFmt, "保持唤醒 %u 分钟", "KEEP AWAKE %uMIN") \
+  X(KeepAwakeKey, "保持唤醒", "AWAKE") \
+  X(KeepAwakeStartedFmt, "已保持唤醒 %u 分钟", "KEEPING AWAKE FOR %uMIN") \
+  X(KeepAwakeExtendedFmt, "保持唤醒已延长到 %u 分钟", "KEEP AWAKE EXTENDED TO %uMIN") \
+  X(KeepAwakeCancelled, "已取消保持唤醒", "KEEP AWAKE CANCELLED") \
+  X(SleepNever, "不会自动休眠", "NO AUTO SLEEP") \
+  X(SleepInFmt, "无操作 %u 秒后休眠", "SLEEPS AFTER %uS IDLE") \
+  X(SleepsFmt, "%u 次（上电以来）", "%u SINCE POWER-ON") \
+  X(ReasonForced, "手动设定", "SET MANUALLY") \
+  X(ReasonNoBattery, "无电池读数", "NO BATTERY") \
+  X(ReasonCharging, "充电中", "CHARGING") \
+  X(ReasonUsbHost, "USB 已连接", "USB HOST") \
+  X(ReasonFullHold, "满电保持", "FULL, HELD") \
+  X(ReasonVoltageDrop, "电压下降", "VOLTAGE DROP") \
+  X(ReasonBelowHold, "电压偏低", "LOW VOLTAGE") \
+  X(ReasonBattery, "未检测到外部供电", "NO EXTERNAL POWER") \
+  X(HelpUpDownChord, "↑+↓ 同按", "UP+DOWN TOGETHER") \
+  X(HelpKeepAwake, "保持唤醒（再按延长/取消）", "KEEP AWAKE (AGAIN: EXTEND/CANCEL)")
 
-enum class Str : uint8_t {
+enum class Str : uint16_t {  // >255 entries possible
 #define X(k, zh, en) k,
   PANEL_STR_LIST(X)
 #undef X

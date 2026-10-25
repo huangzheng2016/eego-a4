@@ -8,6 +8,7 @@
 // 移植自 eego-a4-template-ref/lib/InputManager 的 gslx680* 实现。
 #include "gslx680_touch.h"
 #include "gslx680_firmware.h"
+#include "touch_calibration_store.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -192,6 +193,13 @@ esp_err_t Gslx680Touch::begin(i2c_port_t port) {
         startChip();
     }
     enabled_ = checkChip();
+    if (enabled_) {
+        touchcal::Affine saved;
+        if (touchcal::loadPersisted(saved) == ESP_OK) {
+            applyCalibration(saved);
+            ESP_LOGI("gslx680", "touch calibration loaded from NVS");
+        }
+    }
     return enabled_ ? ESP_OK : ESP_FAIL;
 }
 
@@ -214,6 +222,9 @@ std::vector<TouchEvent> Gslx680Touch::sampleFrame() {
     const int64_t now = esp_timer_get_time();
     uint8_t frame[24] = {};
     std::vector<TouchEvent> events;
+    bool screenFrame = false;
+    uint16_t rawX = 0;
+    uint16_t rawY = 0;
     if (readReg(0x80, frame, sizeof(frame)) != ESP_OK) {
         events = gestures_.invalidate(now);
     } else {
@@ -228,15 +239,74 @@ std::vector<TouchEvent> Gslx680Touch::sampleFrame() {
         } else if (homeKey) {
             events = gestures_.sample(TouchContact::Front, 0, 0, now);
         } else {
-            const uint16_t rawY = rawYWord & 0x0fff;
-            const uint16_t rawX = rawXWord & 0x0fff;
-            events = gestures_.sample(TouchContact::Screen,
-                                      rawTouchToLogicalX(rawY),
-                                      rawTouchToLogicalY(rawX), now);
+            rawY = rawYWord & 0x0fff;
+            rawX = rawXWord & 0x0fff;
+            screenFrame = true;
+            if (!gestures_.screenPressed()) {  // 新的屏幕接触：重置原始坐标累计
+                rawSumX_ = rawSumY_ = 0;
+                rawCount_ = 0;
+            }
+            if (rawCount_ < 0xffff) {
+                rawSumX_ += rawX;
+                rawSumY_ += rawY;
+                ++rawCount_;
+            }
+            uint16_t x = 0;
+            uint16_t y = 0;
+            touchcal::map(calibration(), rawX, rawY, x, y);
+            events = gestures_.sample(TouchContact::Screen, x, y, now);
+        }
+    }
+    // 附带原始坐标：Press/Move 用本帧值，接触结束类事件用本次接触的均值。
+    for (TouchEvent& ev : events) {
+        if (screenFrame &&
+            (ev.type == TouchEventType::Press || ev.type == TouchEventType::Move)) {
+            ev.raw_x = rawX;
+            ev.raw_y = rawY;
+            ev.raw_samples = 1;
+        } else if (rawCount_ > 0 &&
+                   (ev.type == TouchEventType::Release || ev.type == TouchEventType::Tap ||
+                    ev.type == TouchEventType::Hold || ev.type == TouchEventType::Cancel ||
+                    ev.type == TouchEventType::SwipeLeft ||
+                    ev.type == TouchEventType::SwipeRight ||
+                    ev.type == TouchEventType::SwipeUp ||
+                    ev.type == TouchEventType::SwipeDown)) {
+            ev.raw_x = static_cast<uint16_t>((rawSumX_ + rawCount_ / 2) / rawCount_);
+            ev.raw_y = static_cast<uint16_t>((rawSumY_ + rawCount_ / 2) / rawCount_);
+            ev.raw_samples = rawCount_;
         }
     }
     pressed_.store(gestures_.screenPressed());
     return events;
+}
+
+// --- 仿射标定 ---
+
+touchcal::Affine Gslx680Touch::calibration() const {
+    std::lock_guard<std::mutex> lock(calMutex_);
+    return cal_;
+}
+
+bool Gslx680Touch::calibrationCustom() const { return !touchcal::isDefault(calibration()); }
+
+bool Gslx680Touch::applyCalibration(const touchcal::Affine& affine) {
+    if (!touchcal::plausible(affine)) return false;
+    std::lock_guard<std::mutex> lock(calMutex_);
+    cal_ = affine;
+    return true;
+}
+
+esp_err_t Gslx680Touch::saveCalibration(const touchcal::Affine& affine) {
+    if (!touchcal::plausible(affine)) return ESP_ERR_INVALID_ARG;
+    const esp_err_t err = touchcal::savePersisted(affine);
+    if (err != ESP_OK) return err;
+    applyCalibration(affine);
+    return ESP_OK;
+}
+
+esp_err_t Gslx680Touch::clearCalibration() {
+    applyCalibration(touchcal::defaultAffine());
+    return touchcal::erasePersisted();
 }
 
 // --- 后台采样任务 ---

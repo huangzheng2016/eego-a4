@@ -51,9 +51,11 @@ set(FW_SOURCES
   ${C}/data_pipeline/src/source_plan.cpp
   ${C}/data_pipeline/src/cache.cpp
   ${C}/net_stack/src/credentials.cpp
+  ${C}/net_stack/src/wifi_list.cpp
   ${C}/device_settings/src/settings_model.cpp
   ${C}/eego_hal/input_gesture.cpp
   ${C}/eego_hal/atomic_file.cpp
+  ${C}/eego_hal/touch_calibration.cpp
   ${C}/admin/src/probe_mask.cpp
   ${C}/admin/src/input_binding_model.cpp
   ${FW_ROOT}/main/refresh_policy.cpp
@@ -80,7 +82,9 @@ target_compile_options(fw_under_test PRIVATE ${HT_WARN} ${HT_SAN})
 target_link_options(fw_under_test PUBLIC ${HT_SAN})
 
 set(TEST_SUITES dashboard layout expression pipeline gesture settings probe_mask alert_store atomic_file
-    refresh_policy battery_policy confirm)
+    refresh_policy battery_policy confirm wifi_list)
+list(APPEND TEST_SUITES touch_cal)
+list(APPEND TEST_SUITES keep_awake power_source)
 add_executable(firmware_host_tests
   test_main.cpp
   test_dashboard.cpp
@@ -95,6 +99,9 @@ add_executable(firmware_host_tests
   test_refresh_policy.cpp
   test_battery_policy.cpp
   test_confirm.cpp
+  test_touch_calibration.cpp
+  test_wifi_list.cpp
+  test_keep_awake.cpp
 )
 target_include_directories(firmware_host_tests PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}

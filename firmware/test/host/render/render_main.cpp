@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -19,6 +20,10 @@
 #include "dashboard_core/config.h"
 #include "dashboard_ui/layout.h"
 #include "dashboard_ui/renderer.h"
+#include "device_status.h"
+#include "net_stack/wifi_list.h"
+#include "panel_render.h"
+#include "ui_text.h"
 #include "host_font.h"
 #include "lodepng.h"
 #include "portrait_canvas.h"
@@ -119,6 +124,181 @@ class ContactSheet {
   unsigned sheet_ = 0;
 };
 
+constexpr int16_t kStatusLineH = 40;  // dashboard_runtime.cpp kStatusLineH
+constexpr int16_t kStatusLineY = 28 + 712 - kStatusLineH;
+constexpr int kTz = 480;
+constexpr uint64_t kSampleUnix = 1792893600ULL + 5 * 60;  // 10:05 local (UTC+8)
+
+bool writePng(const Uc8279cDisplay& display, const fs::path& path, bool fast);
+
+// Device-local screens drawn by main/panel_render + device_status (status bar,
+// Status page with the power/sleep section, Settings with the keep-awake row) and
+// the dashboard status line in every device state, for visual review.
+int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const fs::path& out,
+                        const Dashboard* sample) {
+  using namespace panel;
+  int failures = 0;
+  auto save = [&](const std::string& name) {
+    if (!writePng(display, out / "device" / name, false) ||
+        !writePng(display, out / "device" / "fast" / name, true)) {
+      ++failures;
+    }
+  };
+  struct Variant {
+    const char* name;
+    DeviceStateInfo info;
+    bool sleep;
+  };
+  DeviceStateInfo keep;
+  keep.state = DeviceState::KeepAwake;
+  keep.keep_awake_min = 25;
+  DeviceStateInfo idle;
+  idle.state = DeviceState::Idle;
+  idle.next_unix = kSampleUnix + 5 * 60;
+  DeviceStateInfo awake;
+  awake.state = DeviceState::Awake;
+  awake.awake_timeout_s = 60;
+  DeviceStateInfo asleep;
+  asleep.state = DeviceState::Sleeping;
+  asleep.next_unix = kSampleUnix + 55 * 60;
+  const Variant variants[] = {{"running", DeviceStateInfo{}, false}, {"keep_awake", keep, false},
+                              {"idle", idle, false},                {"awake", awake, false},
+                              {"sleeping", asleep, true}};
+  for (const Lang lang : {Lang::Zh, Lang::En}) {
+    setLang(lang);
+    const std::string suffix = lang == Lang::Zh ? "_zh.png" : "_en.png";
+    for (const Variant& v : variants) {
+      canvas.clear();
+      if (sample != nullptr) {
+        ui::DashboardRenderer renderer;
+        ui::RenderOptions options;
+        options.page_id = sample->pages.front().id;
+        options.force_full = true;
+        options.layout_config.content = ui::Rect{ui::kDashboardContent.x, ui::kDashboardContent.y,
+                                                 ui::kDashboardContent.w,
+                                                 static_cast<int16_t>(kStatusLineY - 28)};
+        VariableValues variables;
+        std::string error;
+        defaultVariableValues(sample->variables, {}, variables, error);
+        options.variables = variables;
+        renderer.render(canvas, *sample, options);
+      }
+      StatusLineContent line;
+      line.icon = v.info.state;
+      const std::vector<std::string> labels = deviceStateLabels(v.info, kTz);
+      line.left = labels.front();
+      line.left_alt.assign(labels.begin() + 1, labels.end());
+      const std::string updated = updatedLabel(v.sleep ? kSampleUnix - 5 * 60 : kSampleUnix, kTz);
+      line.right = v.sleep ? "85% · " + updated : updated + " · 1/2";
+      line.right_alt.push_back(updated);
+      canvas.resetClip();
+      drawStatusLine(canvas, 28, kStatusLineY, 496, kStatusLineH, line);
+      save(std::string("statusline_") + v.name + suffix);
+    }
+
+    // Status page: status bar (keep-awake) + power/sleep section + soft keys.
+    canvas.clear();
+    canvas.useUiContentRect();
+    StatusBarModel bar;
+    std::snprintf(bar.timeText, sizeof(bar.timeText), "10:05");
+    bar.batPercent = 85;
+    bar.batMv = 4020;
+    bar.wifiState = 2;
+    bar.state = DeviceState::KeepAwake;
+    std::snprintf(bar.stateText, sizeof(bar.stateText), "%s", deviceStateLabel(keep, kTz).c_str());
+    std::snprintf(bar.stateShort, sizeof(bar.stateShort), "%s",
+                  deviceStateLabels(keep, kTz)[1].c_str());
+    drawStatusBar(canvas, bar);
+    KvModel kv;
+    auto big = [&](Str label, std::string value) {
+      kv.rows.emplace_back(tr(label), std::move(value));
+      kv.big.resize(kv.rows.size(), false);
+      kv.big.back() = true;
+    };
+    auto heading = [&](Str label) {
+      kv.rows.emplace_back(tr(label), "");
+      kv.big.resize(kv.rows.size(), false);
+      kv.big.back() = true;  // section headings: body-size bold
+    };
+    heading(Str::SecPower);
+    big(Str::LblMode, deviceStateLabel(keep, kTz));
+    big(Str::LblPower, std::string(tr(Str::ModeMains)) + " 85% · " + tr(Str::ReasonUsbHost));
+    big(Str::LblKeepAwake, lang == Lang::Zh ? "剩余 25 分 · 至 10:30" : "25MIN LEFT · UNTIL 10:30");
+    big(Str::LblWakeReason, tr(Str::WakeReset));
+    char sleeps[48];
+    std::snprintf(sleeps, sizeof(sleeps), tr(Str::SleepsFmt), 3u);
+    big(Str::LblSleeps, sleeps);
+    heading(Str::SecNetwork);
+    big(Str::LblWifi, std::string(tr(Str::WifiConnected)) + " · office-2g");
+    std::snprintf(kv.pageText, sizeof(kv.pageText), "1/3");
+    drawStatus(canvas, kv);
+    const SoftKeyModel keys[3] = {{tr(Str::Refresh), true}, {tr(Str::KeepAwakeKey), true},
+                                  {tr(Str::Back), true}};
+    drawSoftKeys(canvas, keys, 3, 1);
+    canvas.resetClip();
+    save(std::string("status_page") + suffix);
+
+    // Status page 2: network section while offline — per saved network the last
+    // failure reason (short text + code), AP fallback and the offline diag URL.
+    canvas.clear();
+    canvas.useUiContentRect();
+    bar.wifiState = 4;
+    drawStatusBar(canvas, bar);
+    kv = KvModel{};
+    const bool en = lang == Lang::En;
+    heading(Str::SecNetwork);
+    big(Str::LblWifi, tr(Str::WifiOffline));
+    kv.rows.emplace_back("HydrogenSH", std::string(eego::net::wifiReasonShort(2, en)) + " (2)");
+    kv.big.resize(kv.rows.size(), true);
+    kv.rows.emplace_back("office-2g", std::string(eego::net::wifiReasonShort(201, en)) + " (201) · " +
+                                          tr(Str::WifiNotSeen));
+    kv.big.resize(kv.rows.size(), true);
+    kv.rows.emplace_back("phone-ap", tr(Str::WifiNotTried));
+    kv.big.resize(kv.rows.size(), true);
+    big(Str::ApFallback, "EEGO-A4-Setup");
+    big(Str::WifiDiag, "192.168.4.1/wifi-diag");
+    big(Str::TimeLabel, "SNTP · 10-25 10:01");
+    std::snprintf(kv.pageText, sizeof(kv.pageText), "2/3");
+    drawStatus(canvas, kv);
+    drawSoftKeys(canvas, keys, 3, 1);
+    canvas.resetClip();
+    save(std::string("status_page_wifi") + suffix);
+
+    // Settings page 1 with the keep-awake action row (idle state in the bar).
+    canvas.clear();
+    canvas.useUiContentRect();
+    bar.state = DeviceState::Idle;
+    std::snprintf(bar.stateText, sizeof(bar.stateText), "%s", deviceStateLabel(idle, kTz).c_str());
+    std::snprintf(bar.stateShort, sizeof(bar.stateShort), "%s",
+                  deviceStateLabels(idle, kTz)[1].c_str());
+    drawStatusBar(canvas, bar);
+    S4Model s4;
+    S4RowModel row;
+    char label[64];
+    std::snprintf(label, sizeof(label), tr(Str::SetKeepAwakeFmt), 30u);
+    row.label = label;
+    row.value = tr(Str::Off);
+    row.isAction = true;
+    s4.rows.push_back(row);
+    row.label = tr(Str::SetNetwork);
+    row.value = "192.168.1.50";
+    row.isAction = false;
+    s4.rows.push_back(row);
+    row.label = tr(Str::SetLanguage);
+    row.value = tr(Str::LangZh);
+    s4.rows.push_back(row);
+    s4.pageCount = 5;
+    drawS4(canvas, s4);
+    const SoftKeyModel skeys[3] = {{tr(Str::PrevPage), false}, {tr(Str::Back), true},
+                                   {tr(Str::NextPage), true}};
+    drawSoftKeys(canvas, skeys, 3, static_cast<size_t>(-1));
+    canvas.resetClip();
+    save(std::string("settings_page") + suffix);
+  }
+  setLang(Lang::Zh);
+  return failures;
+}
+
 bool writePng(const Uc8279cDisplay& display, const fs::path& path, bool fast) {
   const unsigned w = LOGICAL_WIDTH;
   const unsigned h = LOGICAL_HEIGHT;
@@ -200,10 +380,10 @@ int main(int argc, char** argv) {
     for (const Page& page : dash.pages) {
       if (!page.visible) continue;
       ui::LayoutConfig config;
-      // Same as the device: the bottom 22 px status line is reserved.
+      // Same as the device: the bottom kStatusLineH (40 px) status line is reserved.
       config.content = ui::Rect{ui::kDashboardContent.x, ui::kDashboardContent.y,
                                 ui::kDashboardContent.w,
-                                static_cast<int16_t>(28 + 712 - 22 - ui::kDashboardContent.y)};
+                                static_cast<int16_t>(kStatusLineY - ui::kDashboardContent.y)};
       const ui::PageLayout probe = ui::buildPageLayout(page, 0, config);
       const size_t screens = std::max<size_t>(1, probe.page_count);
       for (size_t screen = 0; screen < screens; ++screen) {
@@ -217,8 +397,12 @@ int main(int argc, char** argv) {
         options.layout_config = config;
         canvas.clear();
         renderer.render(canvas, dash, options);
-        // Status line placeholder (drawn by the runtime on device).
-        canvas.drawLine(28, 718, 28 + 495, 718, 0);
+        // Status line as the runtime draws it (state icon + label, updated time, screen).
+        panel::StatusLineContent line;
+        line.left = panel::deviceStateLabel(panel::DeviceStateInfo{}, kTz);
+        line.right = panel::updatedLabel(kSampleUnix, kTz) + " · " + std::to_string(screen + 1) +
+                     "/" + std::to_string(screens);
+        panel::drawStatusLine(canvas, 28, kStatusLineY, 496, kStatusLineH, line);
         const std::string stem = name + "__" + page.id + "_" + std::to_string(screen) + ".png";
         if (!writePng(display, out / stem, false) || !writePng(display, out / "fast" / stem, true)) {
           std::fprintf(stderr, "%s: png write failed\n", stem.c_str());
@@ -229,6 +413,18 @@ int main(int argc, char** argv) {
         }
       }
     }
+  }
+  {
+    // Device screens use the first fixture that parses (dashboard behind the status line).
+    std::optional<Dashboard> sample;
+    for (const fs::path& file : files) {
+      ParseResult parsed = parseDashboard(slurp(file));
+      if (parsed.ok() && !parsed.dashboard.pages.empty()) {
+        sample = parsed.dashboard;
+        break;
+      }
+    }
+    failures += renderDeviceScreens(canvas, display, out, sample ? &*sample : nullptr);
   }
   std::printf("%d screens rendered, %d failures\n", written, failures);
   return failures == 0 ? 0 : 1;

@@ -31,6 +31,7 @@
 #include <utility>
 #include <vector>
 
+#include "device_status.h"
 #include "eego_ui.h"
 #include "ui_text.h"
 
@@ -94,7 +95,8 @@ constexpr int16_t kBodyTop = kTitleY + kTitleH + 4;                      // 152
 // 严重度芯片（告警详情头部）。
 constexpr int16_t kSevChip = 48;
 
-// 状态页每子页最多行数（分节标题计一行；drawKvList 另按内容区底边截断）。
+// 状态页每子页最多行数（分节标题计一行、正文字号行计两行；drawKvList 另按内容区
+// 底边截断）。
 constexpr size_t kStatusRowsPerPage = 16;
 
 // S4 设置：每页 kSettingsRowsPerPage 行（= panel_app kSettingsPageRows），
@@ -117,7 +119,12 @@ static_assert(kSettingsPagerY + kSettingsPagerH <= kContentBottom,
 // ── 模型（panel_app 构建；render 只读）──────────────────────────────────────
 
 struct StatusBarModel {
-  char timeText[24] = "--:--";  // "MM-DD HH:MM"（统一时间源可信）或「时间不可用」
+  char timeText[24] = "--:--";  // "HH:MM"（统一时间源可信）
+  // 设备状态（运行中 / 保持唤醒 · 剩余 N 分 / 空闲 · 下次 HH:MM / 已唤醒…）：
+  // 状态栏中部「图标 + 正文字号标签」。
+  DeviceState state = DeviceState::Running;
+  char stateText[96] = "";
+  char stateShort[64] = "";  // 放不下 stateText 时的短写法（空 = 无）
   uint8_t batPercent = 0;
   uint16_t batMv = 0;
   bool charging = false;
@@ -151,6 +158,9 @@ struct AlertDetailModel {
 // value 呈现。
 struct KvModel {
   std::vector<std::pair<std::string, std::string>> rows;
+  // 与 rows 下标对齐：true = 正文字号（2x）行（状态页分节标题、「电源 / 休眠」与「网络」
+  // 分节；值为空的行是分节标题，粗体）。缺省 false。
+  std::vector<bool> big;
   char pageText[16] = "";  // 多子页时 "1/2"
   bool configValid = true;
 };

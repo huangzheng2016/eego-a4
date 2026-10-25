@@ -33,7 +33,9 @@ idf_component_register(
         "src/dashboard_config.cpp"
         "src/provision_portal.cpp"
         "src/portal_page.cpp"
+        "src/wifi_diag.cpp"
         "src/source_credential_usage.cpp"
+        "src/keep_awake.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
         alert_core

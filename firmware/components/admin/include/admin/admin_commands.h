@@ -16,10 +16,12 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "alert_core/json.h"
 #include "admin/dashboard_config.h"
 #include "admin/input_binding_model.h"
+#include "net_stack/wifi_list.h"
 
 namespace eego::admin {
 
@@ -71,6 +73,9 @@ struct AdminCommand {
   std::string wifi_ssid;
   std::string wifi_password;
   bool wifi_remove = false;
+  // ApplyWifi 整表模式（非空指针时忽略上面三项）：按顺序替换完整网络列表
+  // （顺序 = 连接优先级；增/删/改密码/排序一次提交）。app_task 对 NVS 当前列表合并。
+  std::shared_ptr<const std::vector<net::WifiListEntry>> wifi_list;
 
   // Write/DeleteSourceCredential：固定 source 命名空间内的 key；value 仅写入时携带。
   std::string credential_key;

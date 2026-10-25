@@ -9,11 +9,13 @@ export const SCREEN_W = 552;
 export const SCREEN_H = 768;
 /**
  * Dashboard area: geometry.h kDashboardContent (28, 28, 496×712) minus the
- * 22 px status line the runtime reserves at the bottom (dashboard_runtime.cpp
- * kStatusLineY = 718), i.e. what buildPageLayout() actually receives.
+ * 40 px body-size status line the runtime reserves at the bottom
+ * (dashboard_runtime.cpp kStatusLineH = 40, kStatusLineY = 700), i.e. what
+ * buildPageLayout() actually receives. 672 + 8 = 8 rows × 85 px exactly.
  */
-export const CONTENT = { x: 28, y: 28, w: 496, h: 690 } as const;
-export const STATUS_LINE_Y = 718;
+export const CONTENT = { x: 28, y: 28, w: 496, h: 672 } as const;
+export const STATUS_LINE_Y = 700;
+export const STATUS_LINE_H = 40;
 export const GAP_X = 8;
 export const GAP_Y = 8;
 export const ROWS_PER_SCREEN = 8;

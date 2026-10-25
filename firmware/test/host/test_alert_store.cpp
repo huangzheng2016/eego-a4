@@ -241,6 +241,8 @@ TEST(alert_store, input_defaults_follow_navigation_model) {
   CHECK(target("detail", InputTrigger::DownLong) == "focus_next");
   CHECK(target("onboarding", InputTrigger::FrontLong) == "settings");
   CHECK(target("status", InputTrigger::FrontDouble) == "status");
+  CHECK(target("dashboard:main", InputTrigger::UpDownChord) == "keep_awake");
+  CHECK(eego::admin::inputBuiltinAllowed("keep_awake"));
   CHECK(eego::admin::inputBuiltinAllowed("home"));
   CHECK(!eego::admin::inputBuiltinAllowed("overview"));
 

@@ -34,6 +34,8 @@ struct Handlers {
   std::function<void(const char* arg)> lang;     // lang zh|en（界面语言切换）
   std::function<void(const char* arg)> page;     // page home|dashboard|detail|status|settings|help（台架跳转）
   std::function<void(const char* arg)> dashboard;  // dashboard 状态/变量/面板/数据/刷新/smoke
+  std::function<void(const char* arg)> touch;      // touch [trace]|cal|marks on|off|show|reset
+  std::function<void(const char* arg)> wifi;       // wifi [scan|retry]（已存网络诊断，不含密码）
 };
 
 // 启动 USB Serial/JTAG 读行后台任务（栈/优先级内部固定）。幂等；false = 队列/任务创建失败。

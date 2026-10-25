@@ -56,11 +56,13 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "net_stack/net_stack.h"
 #include "net_stack/sd_alert_file_io.h"
+#include "net_stack/wifi_list.h"
 #include "input_merge.h"
 #include "panel_app.h"
 #include "time_source.h"
@@ -121,20 +123,66 @@ void onDeviceSettingsChanged(const eego::settings::Settings& values, uint32_t ch
   }
 }
 
-#if defined(EEGO_LOCAL_WIFI_SSID) || defined(EEGO_LOCAL_ADMIN_PASSWORD)
-void seedLocalCredentials() {
-#ifdef EEGO_LOCAL_WIFI_SSID
+// ── 编译期默认凭据（gitignored local_secrets.h；模板见 local_secrets.example.h）──
+// WiFi：每次启动确保默认网络存在、密码为编译期值且按列表顺序排在最前（其余已存
+// 网络保持顺序跟在后面；定义 EEGO_LOCAL_WIFI_REPLACE 时只保留默认网络）；
+// 管理密码：仅在尚未设置时写入。非法值在编译期即报错。
+#if defined(EEGO_LOCAL_WIFI_LIST)
+constexpr eego::net::WifiDefault kLocalWifiDefaults[] = EEGO_LOCAL_WIFI_LIST;
+#elif defined(EEGO_LOCAL_WIFI_SSID)
+#ifndef EEGO_LOCAL_WIFI_PASSWORD
+#define EEGO_LOCAL_WIFI_PASSWORD ""
+#endif
+constexpr eego::net::WifiDefault kLocalWifiDefaults[] = {
+    {EEGO_LOCAL_WIFI_SSID, EEGO_LOCAL_WIFI_PASSWORD}};
+#endif
+#if defined(EEGO_LOCAL_WIFI_LIST) || defined(EEGO_LOCAL_WIFI_SSID)
+#define EEGO_HAS_LOCAL_WIFI 1
+static_assert(eego::net::validWifiDefaults(kLocalWifiDefaults),
+              "local_secrets.h WiFi defaults: 1..8 networks, unique SSID 1..32 bytes, "
+              "password empty (open) or 8..63 bytes");
+#endif
+#ifdef EEGO_LOCAL_ADMIN_PASSWORD
+static_assert(eego::net::wifiCstrLen(EEGO_LOCAL_ADMIN_PASSWORD) >= 8 &&
+                  eego::net::wifiCstrLen(EEGO_LOCAL_ADMIN_PASSWORD) <= 128,
+              "EEGO_LOCAL_ADMIN_PASSWORD must be 8..128 bytes");
+#endif
+
+#if defined(EEGO_HAS_LOCAL_WIFI) || defined(EEGO_LOCAL_ADMIN_PASSWORD)
+// 在 ConfigStore 初始化之后调用：播种 WiFi 时同步 config admin.wifi_list 展示引用。
+void seedLocalCredentials(admin::ConfigStore& config) {
+  (void)config;
+#ifdef EEGO_HAS_LOCAL_WIFI
   std::vector<eego::net::WifiAccount> accounts;
   eego::net::CredentialStore::loadWifiAccounts(accounts);
 #if defined(EEGO_LOCAL_WIFI_REPLACE)
-  accounts.clear();
+  constexpr bool kReplace = true;
+#else
+  constexpr bool kReplace = false;
 #endif
-  if (accounts.empty()) {
-    accounts.push_back({EEGO_LOCAL_WIFI_SSID, EEGO_LOCAL_WIFI_PASSWORD});
+  if (eego::net::seedWifiDefaults(accounts, kLocalWifiDefaults,
+                                  sizeof(kLocalWifiDefaults) / sizeof(kLocalWifiDefaults[0]),
+                                  kReplace)) {
     const esp_err_t err = eego::net::CredentialStore::saveWifiAccounts(accounts);
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "local WiFi defaults save failed: %s", esp_err_to_name(err));
+    } else {
+      ESP_LOGI(TAG, "ensured %u build-time WiFi default(s); saved list now %u network(s)",
+               (unsigned)(sizeof(kLocalWifiDefaults) / sizeof(kLocalWifiDefaults[0])),
+               (unsigned)accounts.size());
+      std::vector<std::pair<std::string, std::string>> refs;
+      for (size_t i = 0; i < accounts.size(); i++) {
+        refs.emplace_back(accounts[i].ssid, "nvs:wifi/" + std::to_string(i));
+      }
+      alert_core::JsonValue dom = config.rawDom();
+      std::string commit_error;
+      if (!config.setWifiListInDom(dom, refs) || !config.commit(dom, commit_error)) {
+        ESP_LOGW(TAG, "wifi_list config sync failed: %s", commit_error.c_str());
+      }
     }
+  }
+  for (size_t i = 0; i < accounts.size(); i++) {
+    ESP_LOGI(TAG, "wifi[%u] %s", (unsigned)i, accounts[i].ssid.c_str());  // SSID only
   }
   for (auto& account : accounts) eego::net::CredentialStore::secureErase(account.password);
 #endif
@@ -150,6 +198,68 @@ void seedLocalCredentials() {
 #endif
 }
 #endif
+
+// 串口 `wifi [scan|retry]`：已存网络的最近尝试/结果/原因码 + 最近扫描（只打 SSID，不打密码）。
+void diagWifi(const char* arg) {
+  eego::net::WifiManager& wifi = eego::net::WifiManager::instance();
+  if (arg != nullptr && strcmp(arg, "retry") == 0) {
+    const bool done = eego::net::NetStack::instance().reconnectNow(1000);
+    printf("wifi retry: %s\n", done ? "queued" : "queued (net task busy connecting)");
+    return;
+  }
+  if (arg != nullptr && strcmp(arg, "scan") == 0) {
+    printf("wifi scan: %s\n", wifi.scanNow() ? "ok" : "busy/failed (showing last scan)");
+  }
+  {
+    std::vector<eego::net::WifiAccount> saved;
+    eego::net::CredentialStore::loadWifiAccounts(saved);
+    wifi.syncSavedNetworks(saved);
+    for (auto& account : saved) eego::net::CredentialStore::secureErase(account.password);
+  }
+  const eego::net::WifiDiagSnapshot d = wifi.diagnostics();
+  const int64_t now = esp_timer_get_time() / 1000;
+  printf("wifi: %s\n", wifi.summary().c_str());
+  if (wifi.isConnected()) {
+    printf("  connected: %s ip=%s rssi=%d\n", wifi.currentSsid().c_str(), wifi.currentIp().c_str(),
+           (int)wifi.rssi());
+  } else if (wifi.lastDisconnectReason() != 0) {
+    printf("  last disconnect: %u %s - %s\n", (unsigned)wifi.lastDisconnectReason(),
+           eego::net::wifiReasonName(wifi.lastDisconnectReason()),
+           eego::net::wifiReasonText(wifi.lastDisconnectReason()));
+  }
+  printf("saved networks (%u), consecutive failed passes %u, fallback due %d:\n",
+         (unsigned)d.networks.size(), (unsigned)d.failed_passes, wifi.apFallbackDue(now) ? 1 : 0);
+  for (size_t i = 0; i < d.networks.size(); i++) {
+    const eego::net::WifiNetworkDiag& n = d.networks[i];
+    const long age = n.last_attempt_ms < 0 ? -1 : (long)((now - n.last_attempt_ms) / 1000);
+    printf("  %u. %-32s %-10s tries=%u fails=%u last=%lds", (unsigned)i + 1, n.ssid.c_str(),
+           eego::net::wifiAttemptResultName(n.result), (unsigned)n.attempts,
+           (unsigned)n.failures, age);
+    if (n.seen) {
+      printf(" seen rssi=%d ch=%u %s\n", (int)n.rssi, (unsigned)n.channel,
+             eego::net::wifiAuthModeName(n.authmode));
+    } else {
+      printf(" NOT seen\n");
+    }
+    if (n.failures > 0) {
+      printf("     last reason %u %s - %s\n", (unsigned)n.last_reason,
+             eego::net::wifiReasonName(n.last_reason), eego::net::wifiReasonText(n.last_reason));
+      printf("     first-pass reason %u %s (%lds ago)\n", (unsigned)n.first_reason,
+             eego::net::wifiReasonName(n.first_reason),
+             (long)((now - n.first_failure_ms) / 1000));
+    }
+  }
+  if (d.scan_ms < 0) {
+    printf("scan: none yet (run `wifi scan`)\n");
+    return;
+  }
+  printf("scan %s, %lds ago, %u APs:\n", d.scan_ok ? "ok" : "FAILED",
+         (long)((now - d.scan_ms) / 1000), (unsigned)d.scan.size());
+  for (const auto& e : d.scan) {
+    printf("  %4d dBm ch%-2u %-18s %s\n", (int)e.rssi, (unsigned)e.channel,
+           eego::net::wifiAuthModeName(e.authmode), e.ssid.c_str());
+  }
+}
 
 // ── 组合根持有的长生命周期对象（store/registry/publisher 必须 outlive NetStack）──
 
@@ -289,7 +399,7 @@ esp_err_t saveBleWifiCredentials(const char* ssid, const char* password, void* c
     }
   }
   if (!replaced) {
-    if (updated.size() >= 4) {
+    if (updated.size() >= eego::net::kMaxWifiNetworks) {
       wipeWifiAccounts(previous);
       wipeWifiAccounts(updated);
       return ESP_ERR_NO_MEM;
@@ -353,14 +463,14 @@ extern "C" void app_main(void) {
     ESP_LOGE(TAG, "NVS init failed; credentials/config persistence unavailable");
   }
   admin::AuthManager::instance().init();
-#if defined(EEGO_LOCAL_WIFI_SSID) || defined(EEGO_LOCAL_ADMIN_PASSWORD)
-  seedLocalCredentials();
-#endif
   admin::ConfigStore& config = admin::ConfigStore::instance();
   config.init("/sdcard/alertpanel/config.json");
   if (!config.valid()) {
     ESP_LOGW(TAG, "config.json invalid (backup made), running on defaults");
   }
+#if defined(EEGO_HAS_LOCAL_WIFI) || defined(EEGO_LOCAL_ADMIN_PASSWORD)
+  seedLocalCredentials(config);
+#endif
   admin::DashboardStore::instance().init("/sdcard/alertpanel/dashboard.json");
   const alert_core::JsonValue dom = config.rawDom();
   const alert_core::JsonValue* overrides = dom.find("alert_type_overrides");
@@ -523,6 +633,27 @@ extern "C" void app_main(void) {
       ESP_LOGE(TAG, "BLE manager init failed: %s", esp_err_to_name(bleErr));
     }
   }
+  {
+    // 启动 WiFi 摘要（只打 SSID，绝不打密码）：已存网络、射频模式、BLE、共存、快连提示。
+    std::vector<eego::net::WifiAccount> saved;
+    eego::net::CredentialStore::loadWifiAccounts(saved);
+    eego::net::WifiManager::instance().syncSavedNetworks(saved);
+    std::string ssids;
+    for (auto& account : saved) {
+      if (!ssids.empty()) ssids += ", ";
+      ssids += account.ssid;
+      eego::net::CredentialStore::secureErase(account.password);
+    }
+#if defined(CONFIG_ESP_COEX_SW_COEXIST_ENABLE)
+    constexpr const char* kCoex = "sw";
+#else
+    constexpr const char* kCoex = "off";
+#endif
+    const eego::ble::Status ble = eego::ble::BleManager::instance().status();
+    ESP_LOGI(TAG, "wifi boot: saved=[%s] %s ble=%s/%s coex=%s", ssids.c_str(),
+             eego::net::WifiManager::instance().summary().c_str(),
+             ble.compiled ? "on" : "off", eego::ble::roleName(ble.role), kCoex);
+  }
 
   // 6b. 静音规则恢复（M21）：config.mute_rules → net_task（重估已恢复记录的
   //     muted 标志 + 快照发布）。
@@ -610,6 +741,8 @@ extern "C" void app_main(void) {
   hooks.lang = [](const char* arg) { app.diagLang(arg); };
   hooks.page = [](const char* arg) { app.diagPage(arg); };
   hooks.dashboard = [](const char* arg) { app.diagDashboard(arg); };
+  hooks.touch = [](const char* arg) { app.diagTouch(arg); };
+  hooks.wifi = [](const char* arg) { diagWifi(arg); };
   if (!fastWake && !diag::start(hooks)) {
     ESP_LOGW(TAG, "diag start failed (serial diagnostics unavailable)");
   }

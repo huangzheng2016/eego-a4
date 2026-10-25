@@ -193,8 +193,71 @@ void rtcReset(RtcState& state);
 void rtcSeal(RtcState& state);
 bool rtcValid(const RtcState& state);
 
-// 自动供电判定（DeviceSettings PowerMode：0 auto / 1 mains / 2 battery）：auto 时
-// 无电池读数视为常供电，否则以充电状态为准。
+// 简单供电判定（DeviceSettings PowerMode：0 auto / 1 mains / 2 battery）：auto 时
+// 无电池读数或充电中视为常供电。注意：GPIO11 是「充电状态」而非 VBUS——电池充满
+// 后充电停止，单凭它会把插着 USB 的设备误判为电池供电。设备侧一律用 MainsDetector。
 bool mainsPowered(uint8_t power_mode, bool charging, uint16_t battery_mv);
+
+// ── 供电来源判定（带锁存与滞回）──────────────────────────────────────────────
+//
+// auto 模式下按优先级：
+//   1. 无电池读数（0 mV）                  → 常供电（no_battery）
+//   2. 充电中                              → 常供电，并锁存（charging）
+//   3. USB 主机已连接（USB-Serial-JTAG SOF）→ 常供电，并锁存（usb_host）
+//   4. 已锁存（曾判定为常供电，或冷启动时电压 ≥ kMainsHoldMv）：电池满电后充电停止，
+//      只要电压仍 ≥ kMainsHoldMv 且未持续下降就保持常供电（full_hold）；锁存期内
+//      记录电压峰值，自峰值起 ≥ kUnplugWindowMs 后电压仍低于峰值 kUnplugDropMv 以上，
+//      或电压跌破 kMainsHoldMv → 判定拔电（voltage_drop / below_hold）；
+//   5. 其余                                → 电池（battery）。
+// 强制模式：mains → 常供电（forced_mains）；battery → 电池（forced_battery）。
+inline constexpr uint16_t kMainsHoldMv = 4050;
+inline constexpr uint16_t kUnplugDropMv = 60;
+inline constexpr int64_t kUnplugWindowMs = 120000;
+
+enum class PowerReason : uint8_t {
+  ForcedMains = 0,
+  ForcedBattery,
+  NoBattery,
+  Charging,
+  UsbHost,
+  FullHold,
+  VoltageDrop,
+  BelowHold,
+  Battery,
+};
+const char* powerReasonName(PowerReason reason);  // 稳定的 API/日志名（snake_case）
+
+struct PowerSample {
+  bool charging = false;
+  bool usb_host = false;
+  uint16_t battery_mv = 0;
+};
+
+class MainsDetector {
+ public:
+  // 冷启动（非深睡唤醒）且电压 ≥ kMainsHoldMv：插着充电器开机、电池已满时充电
+  // 指示不亮，预先锁存，随后由滞回在几分钟内识别是否真的在用电池。
+  void seedColdBoot(uint16_t battery_mv, int64_t now_ms);
+  // 每次新采样（或模式变化）调用；返回是否常供电。
+  bool update(uint8_t power_mode, const PowerSample& sample, int64_t now_ms);
+  bool mains() const { return mains_; }
+  PowerReason reason() const { return reason_; }
+  bool latched() const { return latched_; }
+
+ private:
+  void latch(uint16_t mv, int64_t now_ms);
+  bool mains_ = true;
+  PowerReason reason_ = PowerReason::NoBattery;
+  bool latched_ = false;
+  uint16_t peak_mv_ = 0;
+  int64_t peak_ms_ = 0;
+};
+
+// 电池交互期 / 常供电夜间暂停是否应进入深睡：保持唤醒（keep_awake_until_ms 为单调
+// 时钟截止时刻，0 = 未开启）期间一律不睡；到期后按最后一次活动重新计时（不额外
+// 宽限：过期即恢复原节奏）。
+bool keepAwakeBlocks(int64_t now_ms, int64_t keep_awake_until_ms);
+bool interactiveSleepDue(int64_t now_ms, int64_t last_activity_ms, uint32_t timeout_s,
+                         int64_t keep_awake_until_ms);
 
 }  // namespace panel::battery

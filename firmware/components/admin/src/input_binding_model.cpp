@@ -21,9 +21,11 @@ using eego::dashboard::Dashboard;
 //   home      dashboard first screen      settings  settings screen
 //   status    device status screen        help      input help screen
 //   refresh   refresh dashboard sources (current screen)
-constexpr std::array<const char*, 9> kBuiltins = {
+//   keep_awake  keep-awake toggle: start (keep_awake_min) / extend when less than half
+//               is left / otherwise cancel (no idle batching, no auto deep sleep)
+constexpr std::array<const char*, 10> kBuiltins = {
     "page_previous", "page_next", "focus_previous", "focus_next", "home",
-    "settings",      "status",    "help",           "refresh",
+    "settings",      "status",    "help",           "refresh",    "keep_awake",
 };
 constexpr std::array<const char*, 7> kLocalPages = {
     "dashboard", "onboarding", "detail", "status", "settings", "help", "*",
@@ -193,7 +195,7 @@ bool inputBuiltinAllowed(std::string_view name) {
 
 const std::vector<InputBinding>& defaultInputBindings() {
   // Up/Down short = previous/next screen (or item in a list), long = panel
-  // focus; front long = Settings, front double = Status. Power short/long
+  // focus; front long = Settings, front double = Status, Up+Down together = keep awake. Power short/long
   // (select/back) and front short (home) are fixed and not bindable.
   static const std::vector<InputBinding> defaults = {
       builtin(InputTrigger::UpShort, "page_previous"),
@@ -202,6 +204,7 @@ const std::vector<InputBinding>& defaultInputBindings() {
       builtin(InputTrigger::DownLong, "focus_next"),
       builtin(InputTrigger::FrontLong, "settings"),
       builtin(InputTrigger::FrontDouble, "status"),
+      builtin(InputTrigger::UpDownChord, "keep_awake"),
   };
   return defaults;
 }

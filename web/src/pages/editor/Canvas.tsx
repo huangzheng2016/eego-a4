@@ -4,7 +4,8 @@
 // grid snapping; overlapped panels are pushed aside (model/layout.ts) and the
 // result is previewed live while dragging.
 import { forwardRef, useImperativeHandle, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent as RPointerEvent } from 'react';
-import { CONTENT, STATUS_LINE_Y, GAP_X, GAP_Y, ROWS_PER_SCREEN, SCREEN_H, SCREEN_W, columnsOf, edge, isVisible, panelPixels, pitch, screenIndex, type LayoutIssue } from '../../model/grid';
+import { useI18n } from '../../i18n';
+import { CONTENT, STATUS_LINE_H, STATUS_LINE_Y, GAP_X, GAP_Y, ROWS_PER_SCREEN, SCREEN_H, SCREEN_W, columnsOf, edge, isVisible, panelPixels, pitch, screenIndex, type LayoutIssue } from '../../model/grid';
 import { HANDLES, nudgePlacement, resizeRect, resolvePlacement, type Handle, type Placement } from '../../model/layout';
 import type { Bundle, GridRect, Page, Panel } from '../../model/types';
 import type { ObservedMetrics } from '../../model/metrics';
@@ -71,6 +72,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   { page, bundle, observed, scale, selectedId, issues = [], showGrid = true, editable, insert, screenLabel, sizeLabel, onSelect, onCommit, onBlocked, onDelete, onDuplicate },
   ref,
 ) {
+  const { t } = useI18n();
   const columns = columnsOf(page);
   const rootRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
@@ -235,6 +237,15 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
             <div className={`screen${s >= used ? ' empty-screen' : ''}`} style={{ top: screenTop(s), width: SCREEN_W, height: SCREEN_H }}>
               {(showGrid || drag || insert) && gridSvg}
               <div style={{ position: 'absolute', left: CONTENT.x, top: STATUS_LINE_Y, width: CONTENT.w, height: 1, background: '#000' }} />
+              {/* Device status line (dashboard_runtime drawStatus): body-size state + updated time. */}
+              <div
+                aria-hidden
+                style={{ position: 'absolute', left: CONTENT.x + 12, top: STATUS_LINE_Y + 1, width: CONTENT.w - 24, height: STATUS_LINE_H - 1, display: 'flex', alignItems: 'center', gap: 8, fontSize: 24, lineHeight: 1, color: '#000', opacity: 0.45, pointerEvents: 'none', whiteSpace: 'nowrap', overflow: 'hidden' }}
+              >
+                <span style={{ width: 12, height: 12, borderRadius: 6, background: '#000', flex: 'none' }} />
+                <span style={{ flex: 1 }}>{t('editor.status_line_state')}</span>
+                <span>{t('editor.status_line_updated')}</span>
+              </div>
             </div>
           </div>
         ))}

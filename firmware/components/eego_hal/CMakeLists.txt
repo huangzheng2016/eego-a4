@@ -16,6 +16,8 @@ idf_component_register(
         "buttons.cpp"
         "input_gesture.cpp"
         "atomic_file.cpp"
+        "touch_calibration.cpp"
+        "touch_calibration_store.cpp"
     INCLUDE_DIRS "include"
     # 公共头文件 (uc8279c_display.h / power_manager.h / pcf8563_rtc.h /
     # gslx680_touch.h / sd_card.h) 直接 include driver/* 与 esp_adc/、sdmmc_cmd.h，
@@ -27,7 +29,10 @@ idf_component_register(
         sdmmc
         esp_adc
     PRIV_REQUIRES
+        # usb_serial_jtag_is_connected()：USB 主机连接 = 外部供电的强证据。
+        esp_driver_usb_serial_jtag
         fatfs
+        nvs_flash
         esp_timer
         esp_psram
         heap

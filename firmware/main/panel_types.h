@@ -32,7 +32,8 @@ constexpr bool dashboardUsesRuntimeStatus(Page current) { return current == Page
 // S4 设置行标识（显示顺序 = 枚举顺序）。可见行列表由 PanelApp::visibleSettings()
 // 按当前能力（如前光是否可用）过滤生成；行为/取值一律按 id 分发，不依赖行号。
 enum class SettingId : uint8_t {
-  Network = 0,
+  KeepAwake = 0,  // 保持唤醒 N 分钟（动作行：开启 / 剩余不足一半时延长 / 否则取消）
+  Network,
   RecoveryAp,
   WifiReset,
   Bluetooth,
@@ -64,6 +65,8 @@ enum class SettingId : uint8_t {
   Version,
   InputHelp,
   InputReset,
+  TouchCal,     // 触摸校准（全屏五点校准）
+  TouchMarks,   // 显示触点（调试：点按处画标记；运行时开关，默认关）
   BleObserver,
   BleUnbind,
   Count,

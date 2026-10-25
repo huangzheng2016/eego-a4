@@ -36,6 +36,7 @@ void RefreshPolicy::noteInteraction(int64_t mono_ms) {
 
 bool RefreshPolicy::idle(int64_t mono_ms) const {
   if (config_.idle_after_min == 0) return false;
+  if (hold_until_ms_ != 0 && mono_ms < hold_until_ms_) return false;
   return mono_ms - last_interaction_ms_ >= static_cast<int64_t>(config_.idle_after_min) * 60000;
 }
 

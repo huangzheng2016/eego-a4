@@ -34,6 +34,7 @@ const char kPortalHtml[] = R"HTML(<!DOCTYPE html>
   <button id="btn_back" class="sec">返回</button>
 </div>
 <div id="st"></div>
+<p class="dim"><a href="/wifi-diag">WiFi 诊断 / Diagnostics</a></p>
 <script src="/portal.js"></script>
 </body>
 </html>)HTML";

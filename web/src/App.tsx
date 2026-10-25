@@ -11,12 +11,15 @@ import { EditorPage } from './pages/editor/EditorPage';
 import { TemplatesPage } from './pages/TemplatesPage';
 import { SourcesPage } from './pages/SourcesPage';
 import { CredentialsPage } from './pages/CredentialsPage';
+import { WifiPage } from './pages/WifiPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { AlertsPage } from './pages/AlertsPage';
 import { SystemPage } from './pages/SystemPage';
 import { PreviewPage } from './pages/PreviewPage';
 import { RulesPage } from './pages/RulesPage';
 import { WelcomePage, WELCOME_SKIP_KEY } from './pages/WelcomePage';
+import { KeepAwakeToggle, PowerBanner } from './pages/PowerControls';
+import { probablyAsleep } from './model/power';
 
 export function App() {
   return (
@@ -61,7 +64,7 @@ function Login() {
       setPw('');
     } catch (x) {
       if (x instanceof ApiError && x.status === 429) setErr(t('login.rate', { s: x.retryAfter ?? 60 }));
-      else if (x instanceof ApiError && x.status === 0) setErr(t('err.network'));
+      else if (x instanceof ApiError && x.status === 0) setErr(`${t('err.network')} — ${t('err.asleep')}`);
       else setErr(t('login.failed'));
     } finally {
       setBusy(false);
@@ -119,6 +122,7 @@ const NAV_GROUPS: { key: DictKey; items: NavItem[] }[] = [
       { route: 'preview', key: 'nav.preview', icon: 'device' },
       { route: 'alerts', key: 'nav.alerts', icon: 'bell' },
       { route: 'settings', key: 'nav.settings', icon: 'sliders' },
+      { route: 'wifi', key: 'nav.wifi', icon: 'wifi' },
       { route: 'credentials', key: 'nav.credentials', icon: 'key' },
       { route: 'system', key: 'nav.system', icon: 'cpu' },
     ],
@@ -160,7 +164,9 @@ function Shell() {
     applyTheme(next);
   };
   const activeAlerts = status?.alerts.available ? status.alerts.active_total ?? 0 : 0;
-  const connLabel = connection === 'online' ? t('conn.online') : connection === 'offline' ? t('conn.offline') : t('conn.unknown');
+  // Unreachable: a battery/sleep-scheduled device is most likely asleep — say how to wake it.
+  const offlineLabel = probablyAsleep(status?.power) ? `${t('conn.offline')} · ${t('conn.asleep')}` : t('conn.offline');
+  const connLabel = connection === 'online' ? t('conn.online') : connection === 'offline' ? offlineLabel : t('conn.unknown');
   const badgeFor = (r: Route) =>
     r === 'editor' && draft.dirty && draft.configured ? (
       <span className="nav-pip" title={t('draft.dirty')} />
@@ -217,6 +223,7 @@ function Shell() {
           </nav>
         ))}
         <div className="sidebar-foot">
+          <KeepAwakeToggle />
           <div className="conn" title={status ? `${status.network.ssid} · ${status.network.ip}` : ''}>
             <span className={`dot ${connection === 'online' ? 'ok' : connection === 'offline' ? 'bad' : ''}`} />
             <span className="grow">{connLabel}</span>
@@ -232,13 +239,16 @@ function Shell() {
         <div className="topbar">
           <Logo size={26} />
           <strong className="grow truncate">{current ? t(current.key) : route === 'welcome' ? t('wz.title') : t('app.title')}</strong>
+          <KeepAwakeToggle compact />
           <span className={`dot ${connection === 'online' ? 'ok' : connection === 'offline' ? 'bad' : ''}`} title={connLabel} />
         </div>
+        <PowerBanner />
         {route === 'editor' && <EditorPage />}
         {route === 'templates' && <TemplatesPage />}
         {route === 'sources' && <SourcesPage sourceId={arg} />}
         {route === 'rules' && <RulesPage ruleId={arg} />}
         {route === 'credentials' && <CredentialsPage />}
+        {route === 'wifi' && <WifiPage />}
         {route === 'settings' && <SettingsPage />}
         {route === 'alerts' && <AlertsPage />}
         {route === 'system' && <SystemPage />}

@@ -9,6 +9,10 @@ interface SessionCtx {
   authed: boolean;
   connection: Connection;
   status: api.DeviceStatus | null;
+  /** performance.now() when `status` was fetched (local countdowns of remaining_s/sleep_in_s). */
+  statusAt: number;
+  /** Merge a fresh keep-awake state (POST /device/keep-awake response) into `status`. */
+  setKeepAwake: (ka: api.DeviceStatus['keep_awake']) => void;
   login: (password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshStatus: () => Promise<void>;
@@ -20,6 +24,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [authed, setAuthed] = useState(() => !!api.getToken());
   const [connection, setConnection] = useState<Connection>('unknown');
   const [status, setStatus] = useState<api.DeviceStatus | null>(null);
+  const [statusAt, setStatusAt] = useState(0);
   const toast = useToast();
   const { t } = useI18n();
 
@@ -36,7 +41,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const refreshStatus = useCallback(async () => {
     try {
-      setStatus(await api.getStatus());
+      const next = await api.getStatus();
+      setStatus(next);
+      setStatusAt(performance.now());
     } catch {
       /* connectivity listener records the failure */
     }
@@ -65,7 +72,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setStatus(null);
   }, []);
 
-  const value = useMemo(() => ({ authed, connection, status, login, logout, refreshStatus }), [authed, connection, status, login, logout, refreshStatus]);
+  const setKeepAwake = useCallback((ka: api.DeviceStatus['keep_awake']) => {
+    setStatus((s) => (s ? { ...s, keep_awake: ka } : s));
+    setStatusAt(performance.now());
+  }, []);
+
+  const value = useMemo(
+    () => ({ authed, connection, status, statusAt, setKeepAwake, login, logout, refreshStatus }),
+    [authed, connection, status, statusAt, setKeepAwake, login, logout, refreshStatus],
+  );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

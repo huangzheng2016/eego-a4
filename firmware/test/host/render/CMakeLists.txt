@@ -41,7 +41,12 @@ if(FREETYPE_FOUND)
 endif()
 
 if(EEGO_HOST_RENDER)
-  add_executable(dashboard_render ${R}/render_main.cpp)
+  # main/ drawing layer (status bar, Status/Settings screens, device status line).
+  add_executable(dashboard_render ${R}/render_main.cpp
+    ${FW_ROOT}/main/panel_render.cpp
+    ${FW_ROOT}/main/device_status.cpp
+    ${FW_ROOT}/main/ui_text.cpp)
+  target_include_directories(dashboard_render PRIVATE ${FW_ROOT}/main)
   target_compile_options(dashboard_render PRIVATE ${HT_WARN} ${HT_SAN})
   target_link_libraries(dashboard_render PRIVATE dashboard_ui_host)
 endif()

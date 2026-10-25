@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "dashboard_core/model.h"
+#include "device_status.h"
 
 namespace alert_core {
 struct AlertRecord;
@@ -94,9 +95,12 @@ class DashboardRuntime {
   // 结束电池取数批次（取消在途请求；深睡前调用）。
   void cancelBatteryCycle();
   bool networkIdle() const;
-  // 电池深睡帧的状态行文字（替代常规的页码/时钟/数据源计数；告警横幅仍优先）。
-  // 空串恢复常规状态行。
-  void setBatteryStatus(const std::string& text);
+  // 状态行左侧的设备状态（运行中/保持唤醒/空闲/已唤醒/休眠中/夜间暂停；见
+  // device_status.h）。只在内容变化时标脏。
+  void setDeviceState(const DeviceStateInfo& info, int tz_offset_min);
+  // 深睡帧：右侧「更新于」固定为 stamp_unix（帧哈希不随时钟变化）并附电量
+  // （battery_pct < 0 = 不显示）；enabled=false 恢复实时「更新于 + 页码」。
+  void setSleepFrame(bool enabled, uint64_t stamp_unix = 0, int battery_pct = -1);
   // 只渲染进 framebuffer、不刷屏（调用方随后自行哈希/决定刷新方式）。
   void renderOffscreen();
   void setMains(bool mains);

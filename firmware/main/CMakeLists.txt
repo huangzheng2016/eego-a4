@@ -5,6 +5,7 @@
 # dashboard_runtime.* dashboard 配置/缓存/调度/导航/动作/局部渲染（DP4/M26）
 # panel_app.*      应用状态机（页面/导航/动作/电源 FSM）
 # panel_render.*   S0–S4 纯绘制层（安全区内，灰阶严重度）
+# device_status.*  设备状态标签/图标/状态行（运行中、保持唤醒、空闲、休眠…）
 # panel_diag.cpp   diag 串口命令钩子实现
 # ui_text.*        中英界面文案表
 # time_source.*    统一时间源（SNTP 系统时间 > RTC > 不可用；M21）
@@ -12,6 +13,7 @@
 # refresh_policy.* 空闲感知刷新节奏（纯逻辑，主机单测）
 # battery_policy.* 电池模式决策：对齐唤醒/夜间暂停/低电量/退避、刷屏判定、帧编码（纯逻辑，主机单测）
 # battery_mode.*   电池模式设备胶水：RTC 内存状态、SD 上一帧、深睡唤醒源
+# touch_cal_screen.* 五点触摸校准全屏（拟合/校验在 eego_hal touch_calibration）
 idf_component_register(
     SRCS
         "app_main.cpp"
@@ -19,6 +21,7 @@ idf_component_register(
         "panel_app.cpp"
         "panel_diag.cpp"
         "panel_render.cpp"
+        "device_status.cpp"
         "ui_text.cpp"
         "time_source.cpp"
         "input_confirm.cpp"
@@ -27,6 +30,8 @@ idf_component_register(
         "refresh_policy.cpp"
         "battery_policy.cpp"
         "battery_mode.cpp"
+        "touch_cal_screen.cpp"
+        "panel_touch.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         board
