@@ -17,4 +17,4 @@ compile_commands.json
 .venv/
 venv/
 # 本地自备字体，不随仓库分发
-/firmware/components/eego_ui/fonts/HarmonyOS_Sans_SC_16.eefont
+/firmware/components/eego_ui/fonts/*.eefont

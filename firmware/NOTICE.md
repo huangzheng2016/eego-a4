@@ -39,7 +39,7 @@ SPDX 标识为准。原 weread 项目的阅读器业务形态（书籍/章节/�
 - **qrcodegen**（MIT，weread 组件内）：评估后未随固件打包；配网走门户页面，
   无二维码渲染需求。
 - **HarmonyOS Sans SC 字体**（weread 字体目录，华为免费商用许可）：不随仓库
-  分发字体二进制。用户可自备 16px `.eefont` 到 `components/eego_ui/fonts/`
+  分发字体二进制。用户可自备 12px `.eefont` 到 `components/eego_ui/fonts/`
   进行本地嵌入，也可使用 SD 卡 `.eefont`/`.bin` 或内置 5x7 ASCII 回退字体；
   字体许可由使用者自行核对。
 - **web_flasher**（esptool-js，Apache-2.0）：不在本目录；如需浏览器 USB

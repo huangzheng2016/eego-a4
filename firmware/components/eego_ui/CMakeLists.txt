@@ -22,7 +22,7 @@ idf_component_register(
     PRIV_REQUIRES heap
 )
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fonts/HarmonyOS_Sans_SC_16.eefont")
-    target_add_binary_data(${COMPONENT_LIB} "fonts/HarmonyOS_Sans_SC_16.eefont" "BINARY")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fonts/HarmonyOS_Sans_SC_12.eefont")
+    target_add_binary_data(${COMPONENT_LIB} "fonts/HarmonyOS_Sans_SC_12.eefont" "BINARY")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE EEGO_EMBEDDED_FONT=1)
 endif()
