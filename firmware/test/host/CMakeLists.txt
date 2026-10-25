@@ -27,31 +27,40 @@ endif()
 # Firmware sources under test, compiled unmodified. ESP-IDF headers that a few
 # translation units include are replaced by tiny stubs in ./stubs.
 set(FW_SOURCES
-  ${C}/alert_core/src/json.cpp
+  ${C}/json_dom/src/json.cpp
   ${C}/alert_core/src/sha1.cpp
-  ${C}/dashboard_core/src/json.cpp
+  ${C}/alert_core/src/types.cpp
+  ${C}/alert_core/src/type_registry.cpp
+  ${C}/alert_core/src/time_util.cpp
+  ${C}/alert_core/src/ulid.cpp
+  ${C}/alert_core/src/store.cpp
+  ${C}/alert_core/src/persistence.cpp
+  ${C}/alert_core/src/file_io_stdio.cpp
   ${C}/dashboard_core/src/model.cpp
   ${C}/dashboard_core/src/expression.cpp
   ${C}/dashboard_core/src/config.cpp
-  ${C}/dashboard_core/src/migration.cpp
   ${C}/dashboard_core/src/serialize.cpp
   ${C}/dashboard_core/src/validate.cpp
-  ${C}/dashboard_core/src/snapshot.cpp
   ${C}/dashboard_ui/src/geometry.cpp
   ${C}/dashboard_ui/src/layout.cpp
+  ${C}/dashboard_ui/src/preview_data.cpp
   ${C}/data_pipeline/src/types.cpp
   ${C}/data_pipeline/src/json_path.cpp
   ${C}/data_pipeline/src/parser.cpp
   ${C}/data_pipeline/src/history.cpp
   ${C}/data_pipeline/src/source_plan.cpp
+  ${C}/data_pipeline/src/cache.cpp
   ${C}/net_stack/src/credentials.cpp
   ${C}/device_settings/src/settings_model.cpp
   ${C}/eego_hal/input_gesture.cpp
+  ${C}/eego_hal/atomic_file.cpp
   ${C}/admin/src/probe_mask.cpp
+  ${C}/admin/src/input_binding_model.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs/net_request_host.cpp
 )
 add_library(fw_under_test STATIC ${FW_SOURCES})
 target_include_directories(fw_under_test PUBLIC
+  ${C}/json_dom/include
   ${C}/alert_core/include
   ${C}/dashboard_core/include
   ${C}/dashboard_ui/include
@@ -59,12 +68,13 @@ target_include_directories(fw_under_test PUBLIC
   ${C}/net_stack/include
   ${C}/device_settings/include
   ${C}/eego_hal/include
+  ${C}/admin/include
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs
 )
 target_compile_options(fw_under_test PRIVATE ${HT_WARN} ${HT_SAN})
 target_link_options(fw_under_test PUBLIC ${HT_SAN})
 
-set(TEST_SUITES dashboard layout expression pipeline gesture settings probe_mask)
+set(TEST_SUITES dashboard layout expression pipeline gesture settings probe_mask alert_store atomic_file)
 add_executable(firmware_host_tests
   test_main.cpp
   test_dashboard.cpp
@@ -74,6 +84,8 @@ add_executable(firmware_host_tests
   test_gesture.cpp
   test_settings.cpp
   test_probe_mask.cpp
+  test_alert_store.cpp
+  test_atomic_file.cpp
 )
 target_include_directories(firmware_host_tests PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
@@ -83,7 +95,25 @@ target_compile_definitions(firmware_host_tests PRIVATE EEGO_FIRMWARE_ROOT="${FW_
 target_compile_options(firmware_host_tests PRIVATE ${HT_WARN} ${HT_SAN})
 target_link_libraries(firmware_host_tests PRIVATE fw_under_test)
 
+option(EEGO_HOST_RENDER "Build the dashboard PNG render harness (test/host/render)" OFF)
+add_subdirectory(render)  # dashboard_ui_host (+ dashboard_render when EEGO_HOST_RENDER)
+
+# dashboard_ui tests that need the real renderer, canvas and (fallback) font.
+set(UI_TEST_SUITES alert_hit preview)
+add_executable(firmware_ui_tests
+  test_main.cpp
+  test_alert_hit.cpp
+  test_preview.cpp
+)
+target_include_directories(firmware_ui_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(firmware_ui_tests PRIVATE EEGO_FIRMWARE_ROOT="${FW_ROOT}")
+target_compile_options(firmware_ui_tests PRIVATE ${HT_WARN} ${HT_SAN})
+target_link_libraries(firmware_ui_tests PRIVATE dashboard_ui_host)
+
 enable_testing()
 foreach(suite IN LISTS TEST_SUITES)
   add_test(NAME ${suite} COMMAND firmware_host_tests --suite ${suite})
+endforeach()
+foreach(suite IN LISTS UI_TEST_SUITES)
+  add_test(NAME ${suite} COMMAND firmware_ui_tests --suite ${suite})
 endforeach()

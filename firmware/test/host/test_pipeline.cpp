@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // data_pipeline: JSONPath subset, response parsing, history aggregation.
+#include <sys/stat.h>
+
+#include <cstdio>
+#include <cstdlib>
+
+#include "data_pipeline/cache.h"
 #include "data_pipeline/history.h"
 #include "data_pipeline/json_path.h"
 #include "data_pipeline/parser.h"
@@ -324,4 +330,60 @@ TEST(pipeline, downsample_preserves_bounds) {
   CHECK_EQ(after.sample_count, size_t{100});
   CHECK_NEAR(aggregateHistoryEntries(entries, Aggregation::Max).value, 99.0, 1e-9);
   CHECK_NEAR(aggregateHistoryEntries(entries, Aggregation::Min).value, 0.0, 1e-9);
+}
+
+namespace {
+
+HistoryEntry rawEntry(int64_t ts, double value) {
+  HistoryEntry entry;
+  entry.sample = sample("cpu", ts, value);
+  entry.count = 1;
+  entry.sum = entry.min = entry.max = entry.first_value = entry.last_value = value;
+  entry.first_timestamp_ms = ts;
+  return entry;
+}
+
+std::string cacheTestDir() {
+  const char* tmpdir = std::getenv("TMPDIR");
+  std::string dir = std::string(tmpdir != nullptr && *tmpdir != '\0' ? tmpdir : "/tmp") +
+                    "/eego_host_cache";
+  mkdir(dir.c_str(), 0775);
+  for (const char* suffix : {"", ".tmp", ".bak"}) {
+    std::remove((dir + "/src.history.jsonl" + suffix).c_str());
+    std::remove((dir + "/src.generation" + suffix).c_str());
+  }
+  return dir;
+}
+
+}  // namespace
+
+TEST(pipeline, history_reads_recover_interrupted_replace) {
+  const std::string dir = cacheTestDir();
+  SdCache cache(dir);
+  std::string error;
+  REQUIRE_MSG(cache.appendHistory("src", {rawEntry(kNow - 2 * kMin, 1.0)}, error), error);
+  std::vector<HistoryEntry> baseline;
+  REQUIRE_MSG(cache.loadHistory("src", baseline, error), error);
+  auto hasValue = [](const std::vector<HistoryEntry>& entries, double value) {
+    for (const HistoryEntry& entry : entries) {
+      if (!entry.coverage_sample && entry.sample.value == value) return true;
+    }
+    return false;
+  };
+  REQUIRE(hasValue(baseline, 1.0));
+  // Power cut mid-replace: only <history>.bak survives.
+  const std::string history = dir + "/src.history.jsonl";
+  REQUIRE(std::rename(history.c_str(), (history + ".bak").c_str()) == 0);
+
+  std::vector<HistoryEntry> loaded;
+  CHECK_MSG(cache.loadHistory("src", loaded, error), error);
+  CHECK_EQ(loaded.size(), baseline.size());
+
+  // Same for append: the recovered history is extended, not restarted.
+  REQUIRE(std::rename(history.c_str(), (history + ".bak").c_str()) == 0);
+  CHECK_MSG(cache.appendHistory("src", {rawEntry(kNow - kMin, 2.0)}, error), error);
+  loaded.clear();
+  CHECK_MSG(cache.loadHistory("src", loaded, error), error);
+  CHECK(hasValue(loaded, 1.0));
+  CHECK(hasValue(loaded, 2.0));
 }

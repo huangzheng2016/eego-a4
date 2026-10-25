@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // dashboard_ui layout: proportional mapping, 8 rows per screen, no overlaps,
-// and legacy layout repair.
+// and strict rejection of invalid screen layouts.
 #include <array>
 #include <map>
 
@@ -161,7 +161,7 @@ TEST(layout, hit_test_and_find_bounds) {
 
 namespace {
 
-JsonValue legacyDashboard(const std::vector<std::array<int, 4>>& grids) {
+JsonValue gridDashboard(const std::vector<std::array<int, 4>>& grids) {
   JsonValue::Array panels;
   int n = 0;
   for (const auto& g : grids) {
@@ -176,9 +176,9 @@ JsonValue legacyDashboard(const std::vector<std::array<int, 4>>& grids) {
     panels.push_back(p);
   }
   JsonValue d;
-  hosttest::parseJson(R"({"schema":"eego.dashboard/2","schema_version":2,"id":"legacy","title":"L",
+  hosttest::parseJson(R"({"schema":"eego.dashboard/2","schema_version":2,"id":"grid","title":"L",
     "default_page_id":"main","refresh_ms":60000,"sources":[],"variables":[],
-    "pages":[{"id":"main","title":"M","visible":true,"grid_columns":24,"row_height":16,"panels":[]}],
+    "pages":[{"id":"main","title":"M","visible":true,"grid_columns":24,"panels":[]}],
     "alert_rules":[],"assets":[],"samples":[],"events":[]})",
                       d);
   *d.find("pages")->arrayItems()[0].find("panels") = JsonValue::makeArray(std::move(panels));
@@ -187,77 +187,16 @@ JsonValue legacyDashboard(const std::vector<std::array<int, 4>>& grids) {
 
 }  // namespace
 
-TEST(layout, repair_legacy_fixes_overlap_crossing_and_tall_panels) {
-  JsonValue d = legacyDashboard({{0, 0, 24, 6},     // ok
-                                 {0, 4, 12, 4},     // overlaps p0
-                                 {12, 6, 12, 4},    // crosses screen boundary 6..9
-                                 {0, 10, 24, 12}}); // taller than a screen
-  REQUIRE(!dashboardFromJson(d).ok());
-  const size_t changed = repairLegacyLayout(d);
-  CHECK_EQ(changed, size_t{3});
-  const ParseResult repaired = dashboardFromJson(d);
-  CHECK_MSG(repaired.ok(), [&] {
-    std::string s;
-    for (const auto& e : repaired.errors) s += e.field + ": " + e.message + "; ";
-    return s;
-  }());
-  if (repaired.ok()) {
-    const Page& page = repaired.dashboard.pages[0];
-    CHECK_EQ(page.panels[0].grid.y, 0u);      // untouched
-    CHECK(page.panels[1].grid.y >= 4u);       // moved at/after original row
-    CHECK(page.panels[3].grid.h <= kGridRowsPerScreen);
-    for (const PanelSpec& p : page.panels) CHECK(gridFitsScreen(p.grid));
-    checkPageInvariants("repaired", page);
-  }
-  // Idempotent: a repaired layout needs no further changes.
-  CHECK_EQ(repairLegacyLayout(d), size_t{0});
+TEST(layout, strict_validation_rejects_bad_screen_layouts) {
+  CHECK(dashboardFromJson(gridDashboard({{0, 0, 24, 6}, {0, 8, 24, 8}})).ok());
+  CHECK(!dashboardFromJson(gridDashboard({{0, 0, 24, 6}, {0, 4, 12, 4}})).ok());  // overlap
+  CHECK(!dashboardFromJson(gridDashboard({{12, 6, 12, 4}})).ok());  // crosses a screen
+  CHECK(!dashboardFromJson(gridDashboard({{0, 8, 24, 12}})).ok());  // taller than a screen
 }
 
-TEST(layout, repair_leaves_valid_layouts_untouched) {
-  for (const auto& bundle : hosttest::loadCorpus()) {
-    JsonValue copy = bundle.dashboard;
-    const std::string before = copy.toString();
-    CHECK_MSG(repairLegacyLayout(copy) == 0, bundle.name);
-    CHECK_MSG(copy.toString() == before, bundle.name);
-  }
-}
-
-TEST(layout, repair_ignores_hidden_panels) {
-  JsonValue d = legacyDashboard({{0, 0, 24, 8}, {0, 0, 24, 8}});
+TEST(layout, strict_validation_ignores_hidden_panels) {
+  JsonValue d = gridDashboard({{0, 0, 24, 8}, {0, 0, 24, 8}});
   JsonValue& second = d.find("pages")->arrayItems()[0].find("panels")->arrayItems()[1];
   *second.find("visible") = JsonValue::makeBool(false);
-  CHECK_EQ(repairLegacyLayout(d), size_t{0});
   CHECK(dashboardFromJson(d).ok());
-}
-
-// Finding: the admin store must persist the repaired bundle (and the runtime
-// repairs defensively) because the runtime validates the stored file strictly.
-TEST(layout, repair_stored_bundle_round_trips_through_strict_parse) {
-  JsonValue model = legacyDashboard({{0, 0, 24, 6}, {0, 4, 12, 4}, {12, 6, 12, 4}});
-  JsonValue::Object members;
-  members.emplace_back("schema", JsonValue::makeString("eego.dashboard-bundle/1"));
-  members.emplace_back("schema_version", JsonValue::makeInt(1));
-  members.emplace_back("revision", JsonValue::makeInt(3));
-  members.emplace_back("dashboard", model);
-  JsonValue bundle = JsonValue::makeObject(std::move(members));
-  REQUIRE(!dashboardFromJson(*bundle.find("dashboard")).ok());
-
-  CHECK(repairLegacyStoredLayout(bundle) > 0);
-  // What the admin store writes back to the card...
-  const std::string persisted = bundle.toString();
-  // ...must load with strict validation and no further repair (runtime path).
-  JsonValue reloaded;
-  REQUIRE(hosttest::parseJson(persisted, reloaded));
-  REQUIRE(reloaded.find("dashboard") != nullptr);
-  CHECK(dashboardFromJson(*reloaded.find("dashboard")).ok());
-  CHECK_EQ(repairLegacyStoredLayout(reloaded), size_t{0});
-  CHECK_EQ(reloaded.toString(), persisted);
-}
-
-TEST(layout, repair_stored_bare_dashboard) {
-  JsonValue d = legacyDashboard({{0, 0, 24, 8}, {0, 2, 24, 4}});
-  CHECK_EQ(repairLegacyStoredLayout(d), size_t{1});
-  CHECK(dashboardFromJson(d).ok());
-  JsonValue scalar = JsonValue::makeInt(1);
-  CHECK_EQ(repairLegacyStoredLayout(scalar), size_t{0});
 }

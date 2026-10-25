@@ -27,7 +27,7 @@ JsonValue validDashboardJson() {
   const char* text = R"({
     "schema":"eego.dashboard/2","schema_version":2,"id":"t","title":"T",
     "default_page_id":"main","refresh_ms":60000,"sources":[],"variables":[],
-    "pages":[{"id":"main","title":"Main","visible":true,"grid_columns":24,"row_height":16,
+    "pages":[{"id":"main","title":"Main","visible":true,"grid_columns":24,
       "panels":[
         {"id":"a","kind":"text","grid":{"x":0,"y":0,"w":12,"h":4},"title":"A","visible":true,
          "text":{"content":"a","multiline":false,"max_lines":1}},
@@ -198,6 +198,21 @@ TEST(dashboard, rejects_bad_schema_version) {
   *d.find("schema_version") = JsonValue::makeInt(7);
   *d.find("schema") = JsonValue::makeString("eego.dashboard/7");
   CHECK(!dashboardFromJson(d).ok());
+}
+
+TEST(dashboard, accepts_only_current_schema) {
+  JsonValue v1 = validDashboardJson();
+  *v1.find("schema_version") = JsonValue::makeInt(1);
+  *v1.find("schema") = JsonValue::makeString("eego.dashboard/1");
+  CHECK(!dashboardFromJson(v1).ok());
+  JsonValue missing = validDashboardJson();
+  auto& items = missing.objectItems();
+  items.erase(items.begin());  // drop "schema"
+  CHECK(!dashboardFromJson(missing).ok());
+  JsonValue row_height = validDashboardJson();
+  row_height.find("pages")->arrayItems()[0].objectItems().emplace_back(
+      "row_height", JsonValue::makeInt(16));
+  CHECK(!dashboardFromJson(row_height).ok());  // removed field is now unknown
 }
 
 TEST(dashboard, strict_json_parser) {

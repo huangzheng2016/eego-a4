@@ -179,22 +179,6 @@ TEST(settings, patch_accepts_good_values) {
   CHECK(!(changed & kChangedFrontlight));
 }
 
-TEST(settings, legacy_display_mapping) {
-  Settings s;
-  applyLegacyDisplay(json(R"({"brightness":0,"warmth":20})"), s);
-  CHECK(!s.frontlight_enabled);
-  CHECK_EQ(s.frontlight_warmth, uint8_t{20});
-  applyLegacyDisplay(json(R"({"brightness":45})"), s);
-  CHECK(s.frontlight_enabled);
-  CHECK_EQ(s.frontlight_brightness, uint8_t{45});
-  FieldErrors errors;
-  validateLegacyDisplayCapability(json(R"({"brightness":10})"), s, false, errors);
-  CHECK(hasField(errors, "admin.display.brightness"));
-  errors.clear();
-  validateLegacyDisplayCapability(json(R"({"brightness":10})"), s, true, errors);
-  CHECK(errors.empty());
-}
-
 TEST(settings, scheduled_sleep_window) {
   Settings s;
   s.timezone_offset_min = 0;
