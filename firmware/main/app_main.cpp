@@ -68,6 +68,9 @@ void seedLocalCredentials() {
 #ifdef EEGO_LOCAL_WIFI_SSID
   std::vector<eego::net::WifiAccount> accounts;
   eego::net::CredentialStore::loadWifiAccounts(accounts);
+#if defined(EEGO_LOCAL_WIFI_REPLACE)
+  accounts.clear();
+#endif
   if (accounts.empty()) {
     accounts.push_back({EEGO_LOCAL_WIFI_SSID, EEGO_LOCAL_WIFI_PASSWORD});
     const esp_err_t err = eego::net::CredentialStore::saveWifiAccounts(accounts);
