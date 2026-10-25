@@ -10,8 +10,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: Template version or commit
-      placeholder: 1.0.18 or commit SHA
+      label: Firmware version or commit
+      placeholder: commit SHA
     validations:
       required: true
   - type: dropdown
@@ -33,7 +33,7 @@ body:
     id: hardware
     attributes:
       label: Hardware and host
-      description: EEGO A4 variant, frontlight presence, OS, PlatformIO version.
+      description: EEGO A4 variant, frontlight presence, OS, ESP-IDF version.
     validations:
       required: true
   - type: textarea

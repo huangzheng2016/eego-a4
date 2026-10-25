@@ -20,8 +20,8 @@ idf.py -C firmware -B .tmp/firmware-build size-components
 ```
 
 `validate_firmware.py` 检查组件依赖、必需文件、许可、schema 和预设；它不做编译、
-刷写或真机验收。分区使用 `firmware/partitions.csv`，与旧 Arduino 模板不同，不能
-混用 app 镜像。预留 A/B 分区不代表已开放 OTA。
+刷写或真机验收。分区使用 `firmware/partitions.csv`，刷写时只使用同一构建目录生成
+的镜像。预留 A/B 分区不代表已开放 OTA。
 
 ## 刷写与首次配置
 

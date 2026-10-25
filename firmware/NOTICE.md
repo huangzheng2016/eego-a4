@@ -10,7 +10,7 @@ respective owners. Product and project names may be trademarks of their owners.
 | Input | License | Use |
 |---|---|---|
 | [eego-a4-weread](https://github.com/MokuMMk/eego-a4-weread)（单 commit 85e63c0「项目停止维护」） | GPL-3.0 | 主要移植来源：`components/eego_hal`、`components/eego_ui` 显示/字体/图片/电源实现、`sdkconfig.defaults`、`partitions.csv` 的已验证板级经验 |
-| eego-a4-template-firmware（本仓库模板树，`lib/`） | MIT | 板级硬件事实来源（引脚/时序/LUT/触控固件表），经 weread 移植链间接进入 |
+| eego-a4-template-firmware（历史 Arduino 模板，已从本仓库移除） | MIT | 板级硬件事实来源（引脚/时序/LUT/触控固件表），经 weread 移植链间接进入 |
 
 衍生作品整体按 GPL-3.0-or-later 许可（见 [LICENSE](LICENSE)）；各源文件头部
 SPDX 标识为准。原 weread 项目的阅读器业务形态（书籍/章节/登录/书架）不在
