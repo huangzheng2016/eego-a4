@@ -17,6 +17,7 @@
 idf_component_register(
     SRCS
         "src/credentials.cpp"
+        "src/wifi_list.cpp"
         "src/wifi_manager.cpp"
         "src/http_pool.cpp"
         "src/net_task.cpp"

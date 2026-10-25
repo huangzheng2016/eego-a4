@@ -19,6 +19,7 @@
 #include "host/ble_store.h"
 #include "net_stack/credentials.h"
 #include "net_stack/net_task.h"
+#include "net_stack/wifi_manager.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "wifi_provisioning/scheme_ble.h"
@@ -273,8 +274,10 @@ void BleManager::onSync() {
   int rc = ble_hs_id_infer_auto(0, &own_addr_type);
   if (rc == 0) {
     ble_gap_disc_params params = {};
-    params.itvl = 0x50;
-    params.window = 0x30;
+    // 被动扫描 ~25% 占空比（interval 100ms / window 25ms，单位 0.625ms）：与 WiFi
+    // 共用 2.4G 射频（软件共存），高占空比会挤占 STA 关联/握手时隙。
+    params.itvl = 0xA0;
+    params.window = 0x28;
     params.passive = 1;
     params.filter_duplicates = 0;
     rc = ble_gap_disc(own_addr_type,
@@ -611,6 +614,8 @@ void BleManager::service(bool mains) {
       recovery_ap_active_.load() || now < next_observer_ms_) {
     return;
   }
+  // WiFi 正在关联/握手：推迟 BLE 扫描窗口，避免共存时隙争用导致连接失败。
+  if (eego::net::WifiManager::instance().state() == eego::net::WifiState::Connecting) return;
   if (!mains_ && (!battery_window_open_ || battery_scan_done_)) return;
   startObserverLocked();
 }

@@ -19,8 +19,8 @@ namespace eego::net {
 
 static const char* TAG = "net.task";
 
-// WiFi 指数退避（M13 F3）：30s → 60s → 120s → 240s → 300s 封顶
-static const uint32_t kWifiBackoffStartMs = 30000;
+// WiFi 重连退避见 wifi_list.h WifiReconnectScheduler（10s 起翻倍，封顶
+// NetStackConfig.wifi_reconnect_backoff_max_ms，默认 60s；永不放弃）。
 
 // ---------------------------------------------------------------------------
 // 命令队列模型。
@@ -51,6 +51,7 @@ struct NetStack::Impl {
 
   struct IdPayload {  // ReconnectNow
     std::string id;
+    bool force = false;  // 已连接时先断开再重连
     PendingOp op;
   };
   struct HttpPayload {
@@ -86,8 +87,8 @@ struct NetStack::Impl {
   TaskHandle_t task = nullptr;
 
   // WiFi 重连状态（net_task 上下文私有）
-  int64_t next_wifi_retry_ms_ = 0;
-  uint32_t wifi_backoff_ms_ = kWifiBackoffStartMs;
+  WifiReconnectScheduler wifi_sched_;
+  uint32_t wifi_disconnects_ = 0;  // 已连接 → 断开 的累计次数
   WifiState last_wifi_state_ = WifiState::Disconnected;
   bool wifi_provisioning_was_held_ = false;
 
@@ -176,8 +177,11 @@ struct NetStack::Impl {
     switch (cmd->type) {
       case CmdType::ReconnectNow: {
         auto p = std::static_pointer_cast<IdPayload>(cmd->payload);
-        wifi_backoff_ms_ = kWifiBackoffStartMs;
-        next_wifi_retry_ms_ = nowMs();
+        if (p->force && self->wifi_.isConnected()) {
+          ESP_LOGI(TAG, "wifi list changed; reconnecting from top priority");
+          self->wifi_.disconnect();
+        }
+        wifi_sched_.kick(nowMs());
         p->op.ok = true;
         p->op.give();
         break;
@@ -301,7 +305,16 @@ struct NetStack::Impl {
         p->snapshot.wifi.rssi = self->wifi_.rssi();
         p->snapshot.wifi.ip = self->wifi_.currentIp();
         p->snapshot.wifi.last_reason = self->wifi_.lastReason();
-        p->snapshot.wifi.reconnect_backoff_ms = wifi_backoff_ms_;
+        p->snapshot.wifi.reconnect_backoff_ms = wifi_sched_.backoffMs();
+        p->snapshot.wifi.last_disconnect_reason = self->wifi_.lastDisconnectReason();
+        p->snapshot.wifi.reconnect_attempts = wifi_sched_.attempts();
+        p->snapshot.wifi.disconnects = wifi_disconnects_;
+        p->snapshot.wifi.driver_restarts = self->wifi_.driverRestarts();
+        {
+          const int64_t since = wifi_sched_.offlineSinceMs();
+          p->snapshot.wifi.offline_ms =
+              since < 0 ? 0 : static_cast<uint32_t>(std::min<int64_t>(nowMs() - since, UINT32_MAX));
+        }
         p->snapshot.pool_sessions = self->pool_ ? self->pool_->sessionCount() : 0;
         p->snapshot.running = true;
         if (self->store_) {
@@ -342,42 +355,64 @@ struct NetStack::Impl {
     }
   }
 
-  // ---- WiFi 重连（指数退避，M13 F3）----
+  // ---- WiFi 重连（指数退避，永不放弃；M13 F3）----
   void pumpWifi(int64_t now) {
     if (!self->cfg_.wifi_auto_reconnect) return;
     const bool provisioning_hold = self->wifiProvisioningHold();
     if (provisioning_hold) {
       wifi_provisioning_was_held_ = true;
-      next_wifi_retry_ms_ = now + 1000;
+      wifi_sched_.deferUntil(now + 1000);
       return;
     }
     if (wifi_provisioning_was_held_) {
       wifi_provisioning_was_held_ = false;
-      wifi_backoff_ms_ = kWifiBackoffStartMs;
-      next_wifi_retry_ms_ = 0;
+      wifi_sched_.kick(now);
     }
     WifiState st = self->wifi_.state();
     if (st == WifiState::Connected) {
       if (last_wifi_state_ != WifiState::Connected) {
         // 刚连上：退避复位 + SNTP（重）同步（M21）。dashboard 数据源由
         // data_pipeline 自行重试（离线退避到期即拉取）。
-        wifi_backoff_ms_ = kWifiBackoffStartMs;
-        next_wifi_retry_ms_ = 0;
+        wifi_sched_.onConnected(now);
         self->time_sync_.onWifiConnected();
       }
-    } else if (st != WifiState::Connecting && now >= next_wifi_retry_ms_) {
-      std::vector<WifiAccount> accounts;
-      CredentialStore::loadWifiAccounts(accounts);
-      if (accounts.empty()) {
-        next_wifi_retry_ms_ = now + wifi_backoff_ms_;  // 未配网：按退避节奏空转
-        return;
+    } else if (st != WifiState::Connecting) {
+      if (last_wifi_state_ == WifiState::Connected) {
+        wifi_disconnects_++;
+        ESP_LOGW(TAG, "wifi link lost (reason=%u); reconnecting through saved networks",
+                 (unsigned)self->wifi_.lastDisconnectReason());
+        wifi_sched_.kick(now);  // 断线：立即重新遍历整表
       }
-      ESP_LOGI(TAG, "wifi reconnect attempt (backoff %ums)", (unsigned)wifi_backoff_ms_);
-      self->wifi_.connectMulti(accounts);
-      if (self->wifi_.state() != WifiState::Connected) {
-        next_wifi_retry_ms_ = now + wifi_backoff_ms_;
-        wifi_backoff_ms_ =
-            std::min(wifi_backoff_ms_ * 2, self->cfg_.wifi_reconnect_backoff_max_ms);
+      wifi_sched_.onOffline(now);
+      if (wifi_sched_.due(now)) {
+        std::vector<WifiAccount> accounts;
+        CredentialStore::loadWifiAccounts(accounts);
+        if (accounts.empty()) {
+          wifi_sched_.onAttemptFailed(now);  // 未配网：按退避节奏空转
+        } else {
+          if (wifi_sched_.driverRestartDue(now)) {
+            ESP_LOGW(TAG, "wifi offline too long; restarting wifi driver");
+            self->wifi_.restartDriver();
+            wifi_sched_.onDriverRestarted(now);
+          }
+          ESP_LOGI(TAG, "wifi reconnect attempt #%u (%u networks, backoff %ums)",
+                   (unsigned)wifi_sched_.attempts() + 1, (unsigned)accounts.size(),
+                   (unsigned)wifi_sched_.backoffMs());
+          self->wifi_.connectMulti(accounts);
+          for (auto& account : accounts) CredentialStore::secureErase(account.password);
+          if (self->wifi_.state() != WifiState::Connected) {
+            const int64_t after = nowMs();
+            wifi_sched_.onAttemptFailed(after);
+            ESP_LOGW(TAG, "wifi reconnect failed (last reason=%u); next try in %lldms",
+                     (unsigned)self->wifi_.lastDisconnectReason(),
+                     (long long)(wifi_sched_.nextRetryMs() - after));
+          }
+        }
+      }
+      st = self->wifi_.state();
+      if (st == WifiState::Connected) {
+        wifi_sched_.onConnected(now);
+        self->time_sync_.onWifiConnected();
       }
     }
     if (st != last_wifi_state_) {
@@ -389,7 +424,8 @@ struct NetStack::Impl {
   // 距下一个事件点的毫秒数（上限 1000ms 保 housekeeping 精度）
   int64_t nextWakeMs(int64_t now) {
     int64_t next = now + 1000;
-    if (next_wifi_retry_ms_ > 0 && next_wifi_retry_ms_ < next) next = next_wifi_retry_ms_;
+    const int64_t retry = wifi_sched_.nextRetryMs();
+    if (retry > 0 && retry < next) next = retry;
     return std::max<int64_t>(next - now, 10);
   }
 
@@ -469,8 +505,8 @@ esp_err_t NetStack::start(const NetStackConfig& cfg, alert_core::AlertStore* sto
 
   if (!impl_) impl_ = std::make_unique<Impl>();
   impl_->self = this;
-  impl_->next_wifi_retry_ms_ = 0;
-  impl_->wifi_backoff_ms_ = kWifiBackoffStartMs;
+  impl_->wifi_sched_ = WifiReconnectScheduler(kWifiBackoffStartMs, cfg.wifi_reconnect_backoff_max_ms);
+  impl_->wifi_disconnects_ = 0;
   impl_->last_wifi_state_ = WifiState::Disconnected;
   impl_->last_digest_ = 0;
   impl_->have_digest_ = false;
@@ -522,8 +558,9 @@ bool NetStack::sendCmdAndWait(CmdType type, const std::shared_ptr<void>& payload
   return true;  // 入队成功；结果经 payload->op 等待（由调用方决定等多久）
 }
 
-bool NetStack::reconnectNow(uint32_t wait_ms) {
+bool NetStack::reconnectNow(uint32_t wait_ms, bool force) {
   auto p = std::make_shared<Impl::IdPayload>();
+  p->force = force;
   if (!sendCmdAndWait(CmdType::ReconnectNow, p, wait_ms) ||
       xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
     return false;

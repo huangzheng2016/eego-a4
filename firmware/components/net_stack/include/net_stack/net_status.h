@@ -19,6 +19,11 @@ struct WifiStatus {
   std::string ip;
   uint8_t last_reason = 0;
   uint32_t reconnect_backoff_ms = 0;  // 当前 WiFi 重连退避（指数退避档位）
+  uint8_t last_disconnect_reason = 0;  // 最近一次 STA_DISCONNECTED 原因码（不随重试清零）
+  uint32_t reconnect_attempts = 0;     // 累计失败的重连轮数（每轮遍历全部已存网络）
+  uint32_t disconnects = 0;            // 已连接后掉线的累计次数
+  uint32_t driver_restarts = 0;        // 长时间离线触发的 esp_wifi stop/start 次数
+  uint32_t offline_ms = 0;             // 当前连续离线时长（在线为 0）
 };
 
 // 统一时间源状态（net_task 用 time_fn/time_valid_fn 填充；SNTP 状态由

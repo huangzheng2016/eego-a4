@@ -24,8 +24,11 @@
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
 #include "net_stack/credentials.h"
+#include "net_stack/wifi_list.h"
 #include "net_stack/wifi_manager.h"
+#include "net_stack/net_task.h"
 #include "portal_page.h"
+#include "wifi_diag.h"
 
 namespace eego::admin {
 
@@ -41,31 +44,8 @@ int g_dns_sock = -1;
 TaskHandle_t g_dns_task = nullptr;
 volatile bool g_dns_running = false;
 
-// 失败原因码 → 中文（M13 F1：复用参考实现原因码表的功能）
-const char* failReasonText(uint8_t reason) {
-  switch (reason) {
-    case WIFI_REASON_NO_AP_FOUND:
-      return "找不到该网络（SSID 错误或信号差）";
-    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
-    case WIFI_REASON_MIC_FAILURE:
-      return "密码错误";
-    case WIFI_REASON_AUTH_FAIL:
-    case WIFI_REASON_NOT_AUTHED:
-      return "认证失败";
-    case WIFI_REASON_ASSOC_FAIL:
-    case WIFI_REASON_ASSOC_EXPIRE:
-      return "关联失败（AP 拒绝）";
-    case WIFI_REASON_HANDSHAKE_TIMEOUT:
-      return "握手超时";
-    case WIFI_REASON_BEACON_TIMEOUT:
-    case WIFI_REASON_AUTH_LEAVE:
-      return "连接被断开（信号差）";
-    case 0:
-      return "连接超时";
-    default:
-      return "连接失败";
-  }
-}
+// 失败原因码 → 中文（与诊断页/设备状态页同一张表，见 net_stack wifi_list.h）
+const char* failReasonText(uint8_t reason) { return net::wifiReasonText(reason); }
 
 // ---------------------------------------------------------------------------
 // DNS 劫持（captive portal）：一切 A 查询应答 192.168.4.1
@@ -195,46 +175,19 @@ esp_err_t p_scan(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  wifi_scan_config_t scan_cfg = {};
-  scan_cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
-  if (esp_wifi_scan_start(&scan_cfg, true) != ESP_OK) {
-    httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_send(req, "[]", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  uint16_t ap_num = 0;
-  esp_wifi_scan_get_ap_num(&ap_num);
-  wifi_ap_record_t* aps = nullptr;
-  if (ap_num > 0) {
-    aps = static_cast<wifi_ap_record_t*>(malloc(sizeof(wifi_ap_record_t) * ap_num));
-    if (aps != nullptr) esp_wifi_scan_get_ap_records(&ap_num, aps);
-  }
-
-  // 同名 SSID 合并：只保留信号最强的一条
+  // 经 WifiManager 扫描（与 net_task 的连接串行化；正在连接时返回上一轮扫描结果）。
+  // 结果已同名合并（保留最强）并按信号降序，隐藏 SSID 已剔除。
+  net::WifiManager::instance().scanNow();
+  const net::WifiDiagSnapshot diag = net::WifiManager::instance().diagnostics();
   using alert_core::JsonValue;
   JsonValue::Array arr;
-  for (int i = 0; i < ap_num && aps != nullptr; i++) {
-    if (aps[i].ssid[0] == '\0') continue;  // 跳过隐藏 SSID
-    bool merged = false;
-    for (auto& item : arr) {
-      const JsonValue* s = item.find("ssid");
-      if (s != nullptr && s->stringValue() == reinterpret_cast<const char*>(aps[i].ssid)) {
-        JsonValue* rssi = const_cast<JsonValue*>(item.find("rssi"));
-        if (rssi != nullptr && aps[i].rssi > rssi->intValue(-100)) {
-          *rssi = JsonValue::makeInt(aps[i].rssi);
-        }
-        merged = true;
-        break;
-      }
-    }
-    if (merged) continue;
+  for (const net::WifiScanEntry& e : diag.scan) {
     arr.push_back(JsonValue::makeObject({
-        {"ssid", JsonValue::makeString(reinterpret_cast<const char*>(aps[i].ssid))},
-        {"rssi", JsonValue::makeInt(aps[i].rssi)},
-        {"secure", JsonValue::makeBool(aps[i].authmode != WIFI_AUTH_OPEN)},
+        {"ssid", JsonValue::makeString(e.ssid)},
+        {"rssi", JsonValue::makeInt(e.rssi)},
+        {"secure", JsonValue::makeBool(e.authmode != WIFI_AUTH_OPEN)},
     }));
   }
-  free(aps);
   httpd_resp_set_type(req, "application/json; charset=utf-8");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   const std::string body = JsonValue::makeArray(std::move(arr)).toString();
@@ -331,7 +284,15 @@ esp_err_t p_connect(httpd_req_t* req) {
           sizeof(sta_cfg.sta.ssid) - 1);
   strncpy(reinterpret_cast<char*>(sta_cfg.sta.password), pass.c_str(),
           sizeof(sta_cfg.sta.password) - 1);
-  sta_cfg.sta.threshold.authmode = WIFI_AUTH_WPA_PSK;
+  // 与 WifiManager::connect 相同的 STA 参数（开放网络阈值必须是 OPEN）。
+  sta_cfg.sta.threshold.authmode = pass.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA_PSK;
+  sta_cfg.sta.pmf_cfg.capable = true;
+  sta_cfg.sta.pmf_cfg.required = false;
+  sta_cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+  sta_cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+  sta_cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+  // 试连期间暂停 net_task 自动重连（否则会用已存网络覆盖 STA 配置）；失败/超时/关闭释放。
+  net::NetStack::instance().setWifiProvisioningHold(true);
   esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
   esp_wifi_disconnect();
   esp_wifi_connect();
@@ -367,6 +328,53 @@ esp_err_t p_status(httpd_req_t* req) {
   httpd_resp_set_type(req, "application/json; charset=utf-8");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   httpd_resp_send(req, body.c_str(), body.size());
+  return ESP_OK;
+}
+
+// ---- 离线 WiFi 诊断（门户模式免认证：此时尚无管理密码；不含任何密码）----
+esp_err_t p_diag_static(httpd_req_t* req, const char* type, const char* body) {
+  ProvisionPortal::instance().notePortalActivity();
+  httpd_resp_set_type(req, type);
+  httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_set_hdr(req, "Content-Security-Policy", "default-src 'self'");
+  httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+  return ESP_OK;
+}
+esp_err_t p_diag_page(httpd_req_t* req) {
+  return p_diag_static(req, "text/html; charset=utf-8", wifi_diag::kHtml);
+}
+esp_err_t p_diag_js(httpd_req_t* req) {
+  return p_diag_static(req, "application/javascript; charset=utf-8", wifi_diag::kJs);
+}
+esp_err_t p_diag_css(httpd_req_t* req) {
+  return p_diag_static(req, "text/css; charset=utf-8", wifi_diag::kCss);
+}
+esp_err_t p_diag_json(httpd_req_t* req) {
+  ProvisionPortal::instance().notePortalActivity();
+  const std::string body = wifi_diag::diagJson();
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_send(req, body.c_str(), body.size());
+  return ESP_OK;
+}
+esp_err_t p_diag_action(httpd_req_t* req) {
+  ProvisionPortal::instance().notePortalActivity();
+  const bool scan = strcmp(req->uri, "/api/v1/wifi/scan") == 0;
+  uint32_t retry = 0;
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  if (!AuthManager::instance().consumeBudget(scan ? "scan" : "wifi-retry", 5, 1, retry)) {
+    httpd_resp_set_status(req, "429 Too Many Requests");
+    httpd_resp_send(req, "{\"error\":\"too many requests\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  if (scan && !wifi_diag::scanNow()) {
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_send(req, "{\"error\":\"busy\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  if (!scan) wifi_diag::retryNow();
+  httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
@@ -409,6 +417,14 @@ esp_err_t ProvisionPortal::startAp() {
   esp_err_t err = net::WifiManager::instance().init();
   if (err != ESP_OK) return err;
 
+  // AP 信道 = 信号最强的可见已存网络的信道（单射频：AP 与 STA 同信道，STA 重试时
+  // 不必在 AP 信道与路由器信道间来回切换——否则探测响应/认证帧丢失，表现为
+  // NO_AP_FOUND(201)/AUTH_EXPIRE(2) 反复失败）。net_task 正在连接时 scanNow 立即返回，
+  // 沿用上一轮扫描；都不可见才用信道 1。STA 连上后 AP 仍会自动跟随 STA 信道。
+  net::WifiManager::instance().scanNow();
+  uint8_t ap_channel = net::WifiManager::instance().bestSavedChannel();
+  if (ap_channel == 0 || ap_channel > 13) ap_channel = 1;
+
   // 已联网时先断开 STA：带连接切 APSTA 会导致 AP beacon 异常（weread 实证）
   esp_wifi_disconnect();
   vTaskDelay(pdMS_TO_TICKS(200));
@@ -425,7 +441,7 @@ esp_err_t ProvisionPortal::startAp() {
   wifi_config_t ap_cfg = {};
   strncpy(reinterpret_cast<char*>(ap_cfg.ap.ssid), kApSsid, sizeof(ap_cfg.ap.ssid) - 1);
   ap_cfg.ap.ssid_len = static_cast<uint8_t>(strlen(kApSsid));
-  ap_cfg.ap.channel = 1;
+  ap_cfg.ap.channel = ap_channel;
   ap_cfg.ap.authmode = WIFI_AUTH_OPEN;  // 开放热点（M13 待决策项建议形态）
   ap_cfg.ap.max_connection = 4;
   ap_cfg.ap.beacon_interval = 100;
@@ -435,13 +451,25 @@ esp_err_t ProvisionPortal::startAp() {
     return err;
   }
   esp_wifi_start();
-  ADMIN_LOG_INFO("ap started: %s (open)", kApSsid);
+  ADMIN_LOG_INFO("ap started: %s (open, ch %u)", kApSsid, static_cast<unsigned>(ap_channel));
   return ESP_OK;
 }
 
+int ProvisionPortal::apClientCount() const {
+  if (!apActive()) return 0;
+  wifi_sta_list_t list = {};
+  if (esp_wifi_ap_get_sta_list(&list) != ESP_OK) return 0;
+  return list.num;
+}
+
 void ProvisionPortal::stopAp() {
-  esp_wifi_set_mode(WIFI_MODE_STA);
-  ADMIN_LOG_INFO("ap stopped");
+  // 热点关闭必须回到纯 STA（APSTA 残留会让 AP 继续占用信道/广播）。
+  const esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+  if (err != ESP_OK) ADMIN_LOG_ERROR("ap stop: set STA mode failed (%d)", static_cast<int>(err));
+  ADMIN_LOG_INFO("ap stopped (mode STA)");
+  // 门户试连可能留下了 hold；热点关闭后 STA 立即按已存列表重连（不等待结果）。
+  net::NetStack::instance().setWifiProvisioningHold(false);
+  if (!net::WifiManager::instance().isConnected()) net::NetStack::instance().reconnectNow(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -516,7 +544,7 @@ esp_err_t ProvisionPortal::open() {
 
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 80;
-  config.max_uri_handlers = 10;
+  config.max_uri_handlers = 16;
   config.stack_size = 6144;
   config.max_open_sockets = 5;
   config.recv_wait_timeout = 5;
@@ -545,6 +573,12 @@ esp_err_t ProvisionPortal::open() {
       {.uri = "/scan", .method = HTTP_GET, .handler = &p_scan},
       {.uri = "/connect", .method = HTTP_POST, .handler = &p_connect},
       {.uri = "/status", .method = HTTP_GET, .handler = &p_status},
+      {.uri = "/wifi-diag", .method = HTTP_GET, .handler = &p_diag_page},
+      {.uri = "/wifi-diag.js", .method = HTTP_GET, .handler = &p_diag_js},
+      {.uri = "/wifi-diag.css", .method = HTTP_GET, .handler = &p_diag_css},
+      {.uri = "/api/v1/wifi/diag", .method = HTTP_GET, .handler = &p_diag_json},
+      {.uri = "/api/v1/wifi/retry", .method = HTTP_POST, .handler = &p_diag_action},
+      {.uri = "/api/v1/wifi/scan", .method = HTTP_POST, .handler = &p_diag_action},
       {.uri = "/*", .method = HTTP_GET, .handler = &p_not_found},
   };
   for (const auto& r : routes) {
@@ -621,6 +655,7 @@ void ProvisionPortal::checkConnectTimeout() {
 }
 
 void ProvisionPortal::onConnectFailed(const char* reason) {
+  net::NetStack::instance().setWifiProvisioningHold(false);
   prov_state_ = ProvState::Fail;
   prov_reason_ = reason != nullptr ? reason : "连接失败";
   ADMIN_LOG_WARN("portal: connect failed (%s)", prov_reason_.c_str());
@@ -632,11 +667,21 @@ void ProvisionPortal::onConnectSucceeded(const std::string& ip) {
   prov_state_ = ProvState::Ok;
   ADMIN_LOG_INFO("portal: connect ok ssid=%s ip=%s", prov_ssid_.c_str(), ip.c_str());
 
-  // WiFi 凭据（NVS wifi 命名空间；重新配网即替换旧账号，防残留失效网络）
-  const std::vector<net::WifiAccount> accounts = {{prov_ssid_, prov_wifi_pass_}};
-  if (net::CredentialStore::saveWifiAccounts(accounts) != ESP_OK) {
+  // WiFi 凭据（NVS wifi 命名空间）：刚验证成功的网络置为最高优先级，其余已保存
+  // 网络（如编译期默认列表）按原顺序保留在其后，超出上限的末尾条目丢弃。
+  std::vector<net::WifiAccount> accounts;
+  net::CredentialStore::loadWifiAccounts(accounts);
+  std::vector<net::WifiAccount> ordered = {{prov_ssid_, prov_wifi_pass_}};
+  for (auto& account : accounts) {
+    if (account.ssid != prov_ssid_ && ordered.size() < net::kMaxWifiNetworks) {
+      ordered.push_back(account);
+    }
+    net::CredentialStore::secureErase(account.password);
+  }
+  if (net::CredentialStore::saveWifiAccounts(ordered) != ESP_OK) {
     ADMIN_LOG_ERROR("portal: wifi credential persist failed");
   }
+  for (auto& account : ordered) net::CredentialStore::secureErase(account.password);
 
   // 管理密码（PBKDF2 → NVS sec）
   if (!prov_admin_pass_.empty()) {

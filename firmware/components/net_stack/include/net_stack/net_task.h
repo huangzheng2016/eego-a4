@@ -44,6 +44,7 @@
 #include "net_stack/http_pool.h"
 #include "net_stack/net_status.h"
 #include "net_stack/time_sync.h"
+#include "net_stack/wifi_list.h"
 #include "net_stack/wifi_manager.h"
 
 namespace eego::net {
@@ -66,7 +67,7 @@ using TimeValidFn = std::function<bool()>;  // 统一时间源是否可信（M21
 struct NetStackConfig {
   PoolConfig pool;                          // ≤4 会话、闲置 30s、PSRAM 64K→512K
   bool wifi_auto_reconnect = true;          // 断线指数退避重连
-  uint32_t wifi_reconnect_backoff_max_ms = 300000;  // M13 F3：30s 起翻倍封顶 5min
+  uint32_t wifi_reconnect_backoff_max_ms = kWifiBackoffMaxMs;  // 10s 起翻倍封顶 60s，永不放弃
   uint8_t task_priority = 5;                // M12 任务表：CPU0/5/16KB
   uint16_t task_stack_bytes = 16384;
   int8_t task_core = 0;                     // M12：net_task 固定 CPU0
@@ -110,7 +111,9 @@ class NetStack {
   bool running() const { return running_; }
 
   // 电池唤醒：立即重置 WiFi 退避并发起连接（不等待结果）
-  bool reconnectNow(uint32_t wait_ms = 1000);
+  // force=true：已连接时也先断开再按（新的）网络列表顺序重连（管理端删除/改密
+  // 当前网络后使用）。
+  bool reconnectNow(uint32_t wait_ms = 1000, bool force = false);
   // BLE wifi_prov 验证新凭据期间暂停自动重连，释放后立即恢复既有调度。
   void setWifiProvisioningHold(bool active) { wifi_provisioning_hold_.store(active); }
   bool wifiProvisioningHold() const { return wifi_provisioning_hold_.load(); }

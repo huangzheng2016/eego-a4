@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // NVS 凭据存储实现（wifi/sec/source 命名空间，自管读写）。
 #include "net_stack/credentials.h"
+#include "net_stack/wifi_list.h"
 
 #include <cstdio>
 #include <cstring>
@@ -15,7 +16,7 @@ static const char* TAG = "net.cred";
 static const char* kNsWifi = "wifi";
 static const char* kNsSec = "sec";
 static const char* kKeyCount = "count";
-constexpr size_t kMaxWifiAccounts = 8;  // 与 provision 门户/admin 配置上限对齐
+constexpr size_t kMaxWifiAccounts = kMaxWifiNetworks;  // wifi_list.h：门户/admin/BLE 共用上限
 
 esp_err_t CredentialStore::ensureNvs() {
   esp_err_t err = nvs_flash_init();
