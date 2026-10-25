@@ -22,7 +22,7 @@ idf_component_register(
     PRIV_REQUIRES heap
 )
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fonts/NotoSansCJKsc_3.cpfont")
-    target_add_binary_data(${COMPONENT_LIB} "fonts/NotoSansCJKsc_3.cpfont" "BINARY")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fonts/NotoSansCJKsc_4.cpfont")
+    target_add_binary_data(${COMPONENT_LIB} "fonts/NotoSansCJKsc_4.cpfont" "BINARY")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE EEGO_EMBEDDED_FONT=1)
 endif()
