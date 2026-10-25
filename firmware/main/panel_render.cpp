@@ -199,7 +199,7 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
              0);
 
   // 左：时间（RTC 有效时 MM-DD HH:MM，否则 --:--）
-  textGray(c, x + 8, static_cast<int16_t>(y + 10), m.timeText, 2, 0, true);
+  textGray(c, x + 8, static_cast<int16_t>(y + 6), m.timeText, 2, 0, true);
 
   // 中：电源模式 + WiFi 状态整组居中（避让左侧时间和右侧电池）
   const char* wifi = tr(Str::WifiDisconnected);
@@ -211,8 +211,8 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
     default: break;
   }
   const char* mode = m.mains ? tr(Str::ModeMains) : tr(Str::ModeBattery);
-  const int16_t modeW = static_cast<int16_t>(textW(mode, 1) + 16);
-  const int16_t groupW = static_cast<int16_t>(modeW + 8 + textW(wifi, 1));
+  const int16_t modeW = static_cast<int16_t>(textW(mode, 2) + 16);
+  const int16_t groupW = static_cast<int16_t>(modeW + 8 + textW(wifi, 2));
   const int16_t minCx = x + 120;
   const int16_t maxCx = static_cast<int16_t>(x + w - 100 - groupW);
   int16_t cx = static_cast<int16_t>(x + (w - groupW) / 2);
@@ -222,32 +222,32 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
     if (cx < minCx) cx = minCx;
     if (cx > maxCx) cx = maxCx;
   }
-  c.fillRoundRectGray(cx, static_cast<int16_t>(y + 10), modeW, 24, 6, m.mains ? 5 : 9);
-  textGray(c, static_cast<int16_t>(cx + 8), static_cast<int16_t>(y + 15), mode, 1,
+  c.fillRoundRectGray(cx, static_cast<int16_t>(y + 6), modeW, 36, 6, m.mains ? 5 : 9);
+  textGray(c, static_cast<int16_t>(cx + 8), static_cast<int16_t>(y + 6), mode, 2,
            m.mains ? 15 : 0, true);
   cx = static_cast<int16_t>(cx + modeW + 8);
   const int16_t wifiMaxW = static_cast<int16_t>(x + w - 100 - cx);
   if (wifiMaxW > 40) {
-    cx = static_cast<int16_t>(cx + drawTextFit(c, cx, static_cast<int16_t>(y + 15), wifiMaxW,
-                                               wifi, 1, false, 6) +
+    cx = static_cast<int16_t>(cx + drawTextFit(c, cx, static_cast<int16_t>(y + 6), wifiMaxW,
+                                               wifi, 2, true, 6) +
                               10);
   }
   if ((m.portalOpen || m.apFallback) && cx < x + w - 200) {
     const char* badge = m.portalOpen ? tr(Str::PortalOpen) : tr(Str::ApFallback);
-    textGray(c, cx, static_cast<int16_t>(y + 15), badge, 1, 0, true);
+    textGray(c, cx, static_cast<int16_t>(y + 6), badge, 1, 0, true);
     cx = static_cast<int16_t>(cx + textW(badge, 1) + 10);
   }
   if (m.mutedCount > 0 && cx < x + w - 110) {
     char mute[16];
     snprintf(mute, sizeof(mute), "%s%u", tr(Str::Mute), static_cast<unsigned>(m.mutedCount));
-    textGray(c, cx, static_cast<int16_t>(y + 15), mute, 1, 6);
+    textGray(c, cx, static_cast<int16_t>(y + 6), mute, 1, 6);
   }
 
   // 右：电池（百分比 + 充电标记；右缘对齐内容区 -8）
   char bat[24];
   snprintf(bat, sizeof(bat), "%u%%%s", static_cast<unsigned>(m.batPercent),
            m.charging ? "+" : "");
-  textRightGray(c, static_cast<int16_t>(x + w - 88), static_cast<int16_t>(y + 10), 80, bat, 2,
+  textRightGray(c, static_cast<int16_t>(x + w - 88), static_cast<int16_t>(y + 6), 80, bat, 2,
                 0, true);
 
   // 横幅（操作结果/二次确认）：内容区顶部 28px 浅灰条
