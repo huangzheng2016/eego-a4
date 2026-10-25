@@ -10,8 +10,10 @@
 
 namespace eego::dashboard::ui {
 
-inline constexpr uint32_t kLogicalColumns = 4;
-inline constexpr uint32_t kRowsPerPage = 8;
+// One device screen ("subpage") holds kRowsPerPage grid rows. Columns are
+// mapped proportionally from page.grid_columns; see kGridRowsPerScreen in
+// dashboard_core/model.h for the full rule shared with validation.
+inline constexpr uint32_t kRowsPerPage = kGridRowsPerScreen;
 
 struct LayoutConfig {
   Rect content = kDashboardContent;
@@ -26,6 +28,8 @@ struct PanelLayout {
   size_t panel_index = 0;
   Rect bounds;
   Rect content;
+  // Grid coordinates: column/column_span in page.grid_columns units, row and
+  // row_span in grid rows relative to the top of the current screen.
   uint32_t column = 0;
   uint32_t row = 0;
   uint32_t column_span = 0;
@@ -46,6 +50,9 @@ struct HitTarget {
   size_t action_index = 0;
   Rect bounds;
 };
+
+// Screen index of a panel on its page (same rule as buildPageLayout).
+inline size_t panelScreenIndex(const PanelSpec& panel) { return gridScreenIndex(panel.grid); }
 
 PageLayout buildPageLayout(const Page& page, size_t page_index,
                            const LayoutConfig& config = {});

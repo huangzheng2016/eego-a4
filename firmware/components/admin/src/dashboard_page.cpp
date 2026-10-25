@@ -189,13 +189,18 @@ function newItem(){
   var selectedId=selected(),pageId=selectedId?selectedId.split('/')[0]:pageList[0].id;
   var pg=byId(pageList,'id',pageId);
   if(!pg){status(tr('请先新建页面。','Create a page first.'),true);return;}
-  pg.panels=pg.panels||[];id=unique('panel',pg.panels,'id');pg.panels.push(normalizePanel({id:id,kind:'text',title:id,grid:{x:0,y:0,w:6,h:4},text:{content:'Text',multiline:false,max_lines:1}}));id=pg.id+'/'+id;
+  pg.panels=pg.panels||[];id=unique('panel',pg.panels,'id');pg.panels.push(normalizePanel({id:id,kind:'text',title:id,grid:freeSpot(pg,6,4),text:{content:'Text',multiline:false,max_lines:1}}));id=pg.id+'/'+id;
  }
  if(S.view==='sources'){d.sources=d.sources||[];id=unique('source',d.sources,'id');d.sources.push(normalizeSource({id:id,kind:'http',url:'http://192.168.1.1/metrics',headers:{}}));}
  if(S.view==='variables'){d.variables=d.variables||[];id=unique('variable',d.variables,'name');d.variables.push({name:id,label:id,kind:'text',default_value:'',options:[],source_id:'',value_path:'',multi:false,include_all:false});}
  if(S.view==='alerts'){d.alert_rules=d.alert_rules||[];id=unique('alert',d.alert_rules,'id');d.alert_rules.push({id:id,title:id,enabled:true,source_id:(d.sources[0]||{}).id||'',metric:'metric',expression:'value > 0',for_ms:0,message:'',style:{surfaces:['card'],severity:'info',linked_panel_id:''}});}
  if(id){S.selected[S.view]=id;dirty();render();}
 }
+// First free grid spot under the device rule: 8 rows per screen, a panel never
+// crosses a screen boundary and never overlaps another visible panel.
+function freeSpot(pg,w,h){var cols=Number(pg.grid_columns)||24,R=8;w=Math.min(w,cols);h=Math.min(h,R);var used=(pg.panels||[]).filter(function(p){return p.visible!==false&&p.grid;});
+ for(var y=0;y<R*64;y++){if(y%R+h>R)continue;for(var x=0;x+w<=cols;x++){var free=used.every(function(p){var g=p.grid;return x>=g.x+g.w||g.x>=x+w||y>=g.y+g.h||g.y>=y+h;});if(free)return {x:x,y:y,w:w,h:h};}}
+ return {x:0,y:0,w:w,h:h};}
 function deleteItem(){
  if(S.view==='dashboard'){if(!S.current||!confirm(tr('确定从设备删除整个 dashboard？','Delete the whole dashboard from the device?')))return;api('/dashboard',mutation({method:'DELETE'})).then(function(j){S.current={revision:j.revision};S.dirty=false;loadSample(true);}).catch(showError);return;}
  var id=selected();if(!id||!confirm(tr('确定删除此项？引用检查会在应用时执行。','Delete this item? References are checked when applying.')))return;var d=dash();
@@ -212,7 +217,7 @@ function loadFailed(e){showError(e);if(S.draft)return;S.ready=false;var root=$('
 function setCurrent(j){S.jsonBuffers={};S.current=clone(j);S.draft=clone(j);S.dirty=false;S.ready=true;}
 function reload(){if(S.dirty&&!confirm(tr('放弃未保存修改？','Discard unsaved changes?')))return;loadCredentials().then(function(){if(S.draft)render();}).catch(showError);api('/dashboard').then(function(j){setCurrent(j);status('');render();}).catch(function(e){if(e.status===404){S.current=e.body&&typeof e.body.revision==='number'?{revision:e.body.revision}:null;loadSample(true);}else loadFailed(e);});}
 function loadSample(force){force=force===true;if(!force&&S.dirty&&!confirm(tr('用样板替换当前草稿？','Replace the current draft with the sample?')))return;api('/dashboard/sample').then(function(j){S.jsonBuffers={};S.sample=clone(j);S.draft=clone(j);S.dirty=!force;S.ready=true;status(tr('样板仅载入草稿，点击应用后才生效。','Sample loaded as a draft; apply to make it active.'));render();}).catch(loadFailed);}
-function importFile(e){if(S.dirty&&!confirm(tr('导入文件并替换当前草稿？','Import a file and replace the current draft?'))){e.target.value='';return;}var file=e.target.files&&e.target.files[0];if(!file)return;if(file.size>196608){status(tr('文件超过 192 KiB。','File exceeds 192 KiB.'),true);return;}var reader=new FileReader();reader.onload=function(){try{var j=JSON.parse(reader.result);if(!j.dashboard)j={schema:'eego.dashboard-bundle/1',schema_version:1,revision:baseRevision(),dashboard:j,source_plans:[]};S.jsonBuffers={};S.draft=j;S.dirty=true;status(tr('文件已导入草稿，请先校验再应用。','File imported as a draft; validate before applying.'));render();}catch(err){status('JSON: '+err.message,true);}};reader.readAsText(file);e.target.value='';}
+function importFile(e){if(S.dirty&&!confirm(tr('导入文件并替换当前草稿？','Import a file and replace the current draft?'))){e.target.value='';return;}var file=e.target.files&&e.target.files[0];if(!file)return;if(file.size>196608){e.target.value='';status(tr('文件超过 192 KiB。','File exceeds 192 KiB.'),true);return;}var reader=new FileReader();reader.onload=function(){try{var j=JSON.parse(reader.result);if(!j.dashboard)j={schema:'eego.dashboard-bundle/1',schema_version:1,revision:baseRevision(),dashboard:j,source_plans:[]};S.jsonBuffers={};S.draft=j;S.dirty=true;status(tr('文件已导入草稿，请先校验再应用。','File imported as a draft; validate before applying.'));render();}catch(err){status('JSON: '+err.message,true);}};reader.readAsText(file);e.target.value='';}
 function exportDraft(){if(invalidJsonGuard())return;var blob=new Blob([JSON.stringify(S.draft,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(dash().id||'dashboard')+'.json';document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},0);}
 function variableValues(){var out={};(dash().variables||[]).forEach(function(v){out[v.name]=v.default_value||'';});return out;}
 function testSource(plan){if(invalidJsonGuard())return;status(tr('正在测试…','Testing…'));api('/dashboard/sources/test',{method:'POST',body:JSON.stringify({plan:plan,variables:variableValues()})}).then(function(j){$('de_result').textContent=JSON.stringify(j,null,2);status(tr('预览仅含归一化字段，不含原始响应。','Preview contains normalized fields only; no raw response.'));}).catch(showError);}

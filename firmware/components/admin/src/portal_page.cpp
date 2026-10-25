@@ -18,14 +18,14 @@ const char kPortalHtml[] = R"HTML(<!DOCTYPE html>
 <div id="step1">
   <p id="t_step1">第一步：选择 WiFi 网络并输入密码</p>
   <button id="btn_scan">刷新</button>
-  <div id="list" class="dim" style="margin-top:12px"></div>
-  <div id="passbox" style="display:none">
+  <div id="list" class="dim"></div>
+  <div id="passbox" hidden>
     <div><span id="t_network">网络</span>：<b id="ssidv"></b></div>
     <input id="pass" type="password" autocomplete="off">
     <button id="btn_next">下一步</button>
   </div>
 </div>
-<div id="step2" style="display:none">
+<div id="step2" hidden>
   <p id="t_step2">第二步：设置管理密码（至少 8 位，用于登录管理页）</p>
   <input id="admin_pass" type="password" autocomplete="new-password">
   <input id="admin_pass2" type="password" autocomplete="new-password">
@@ -38,7 +38,9 @@ const char kPortalHtml[] = R"HTML(<!DOCTYPE html>
 </body>
 </html>)HTML";
 
-const char kPortalCss[] = R"CSS(body{font-family:sans-serif;max-width:480px;margin:0 auto;padding:16px;background:#f5f5f5;color:#222}
+const char kPortalCss[] = R"CSS([hidden]{display:none!important}
+#list{margin-top:12px}
+body{font-family:sans-serif;max-width:480px;margin:0 auto;padding:16px;background:#f5f5f5;color:#222}
 h2{font-size:20px}
 button{font-size:16px;padding:8px 20px;border:0;border-radius:6px;background:#222;color:#fff;margin:4px 4px 4px 0}
 button.sec{background:#888}
@@ -104,18 +106,18 @@ function scan(){
 function pick(n){
  sel=n;
  $('ssidv').textContent=n.ssid;
- $('passbox').style.display='block';
+ $('passbox').hidden=false;
  $('pass').focus();
 }
 function toStep2(){
  if(!sel)return;
- $('step1').style.display='none';
- $('step2').style.display='block';
+ $('step1').hidden=true;
+ $('step2').hidden=false;
  $('admin_pass').focus();
 }
 function back(){
- $('step2').style.display='none';
- $('step1').style.display='block';
+ $('step2').hidden=true;
+ $('step1').hidden=false;
 }
 function show(st,txt){
  var el=$('st');
@@ -129,7 +131,7 @@ function conn(){
  if(ap!==ap2){show('fail',i18n.mismatch);return;}
  if(ap.length<8){show('fail',i18n.shortpw);return;}
  var body=JSON.stringify({ssid:sel.ssid,pass:$('pass').value,admin_pass:ap});
- $('step2').style.display='none';
+ $('step2').hidden=true;
  show('connecting');
  fetch('/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:body})
  .then(function(r){return r.json();})
@@ -140,8 +142,8 @@ function conn(){
   }else{
    // 服务端校验拒绝（如管理密码策略）：停 spinner 并回到密码步
    show('fail',i18n.failprefix+(s.reason||''));
-   $('step1').style.display='none';
-   $('step2').style.display='block';
+   $('step1').hidden=true;
+   $('step2').hidden=false;
   }
  })
  .catch(function(){show('fail',i18n.connectfail);back();});

@@ -10,6 +10,59 @@
 
 namespace eego::admin::pages {
 
+// ---------------------------------------------------------------------------
+// Loader for the externally hosted web app. No inline script/style (CSP).
+// ---------------------------------------------------------------------------
+const char kLoaderCsp[] =
+    "default-src 'self'; script-src 'self' " EEGO_WEB_APP_ORIGIN "; style-src 'self' "
+    EEGO_WEB_APP_ORIGIN "; connect-src 'self' " EEGO_WEB_APP_ORIGIN "; img-src 'self' data: blob: "
+    EEGO_WEB_APP_ORIGIN "; font-src 'self' data: " EEGO_WEB_APP_ORIGIN
+    "; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
+
+const char kLoaderHtml[] = R"HTML(<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EEGO A4 管理</title>
+</head>
+<body>
+<div id="root"></div>
+<div id="eego-fallback" hidden>
+<p>管理界面加载失败（需要能访问互联网）。Web app failed to load (internet access required).</p>
+<p><a href="/legacy">打开内置管理页 / Open built-in admin page</a></p>
+</div>
+<script src="/loader.js"></script>
+</body>
+</html>)HTML";
+
+const char kLoaderJs[] = "(function(){'use strict';var BASE='" EEGO_WEB_APP_BASE "';" R"JS(
+var started=false;
+function fail(){
+ if(window.__EEGO_APP_LOADED)return;
+ var n=document.getElementById('eego-fallback');if(n)n.hidden=false;
+}
+function load(v){
+ if(started)return;started=true;
+ var q='?v='+encodeURIComponent(v);
+ var l=document.createElement('link');l.rel='stylesheet';l.href=BASE+'/assets/app.css'+q;
+ document.head.appendChild(l);
+ var s=document.createElement('script');s.type='module';s.src=BASE+'/assets/app.js'+q;s.onerror=fail;
+ document.body.appendChild(s);
+}
+// Fallback cache-bust changes hourly when version.json is unreachable.
+var d=new Date(),fallback='t'+d.getUTCFullYear()+(d.getUTCMonth()+1)+'-'+d.getUTCDate()+'-'+d.getUTCHours();
+var timer=setTimeout(function(){load(fallback);},3000);
+function version(j){var v=j&&(j.version||j.build||j.hash);return v?String(v):fallback;}
+if(window.fetch){
+ fetch(BASE+'/version.json',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;})
+ .then(function(j){clearTimeout(timer);load(version(j));})
+ .catch(function(){clearTimeout(timer);load(fallback);});
+}else{clearTimeout(timer);load(fallback);}
+setTimeout(fail,8000);
+})();
+)JS";
+
 const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -26,7 +79,7 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
   <button id="btn_login">登录</button>
   <div id="login_err" class="err"></div>
 </div>
-<div id="app" style="display:none">
+<div id="app" hidden>
   <div id="topbar">
     <span id="brand">EEGO A4</span>
     <nav>
@@ -49,11 +102,11 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
     </tr></thead><tbody id="alert_rows"></tbody></table>
     <button id="btn_refresh_alerts">刷新</button>
   </section>
-  <section id="pane_status" style="display:none">
+  <section id="pane_status" hidden>
     <pre id="status_pre"></pre>
     <button id="btn_refresh_status">刷新</button>
   </section>
-  <section id="pane_settings" style="display:none">
+  <section id="pane_settings" hidden>
     <div class="presetbox">
       <h3 id="t_set_network"></h3>
       <div id="set_net_status" class="dim"></div>
@@ -101,7 +154,7 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
     <button id="btn_settings_reload" class="sec"></button>
     <pre id="set_capabilities"></pre>
   </section>
-  <section id="pane_sources" style="display:none">
+  <section id="pane_sources" hidden>
     <table id="src_table"><thead><tr>
       <th id="th_src_id">ID</th><th id="th_src_url">URL</th><th id="th_src_op">操作</th>
     </tr></thead><tbody id="src_rows"></tbody></table>
@@ -110,21 +163,21 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
     <div class="presetbox">
       <select id="preset_sel"></select>
       <div id="preset_meta" class="dim"></div>
-      <pre id="preset_notes" style="display:none"></pre>
+      <pre id="preset_notes" hidden></pre>
       <button id="btn_preset_fill">填入配置草稿</button>
     </div>
   </section>
-  <section id="pane_dashboard" style="display:none"></section>
-  <section id="pane_config" style="display:none">
+  <section id="pane_dashboard" hidden></section>
+  <section id="pane_config" hidden>
     <textarea id="cfg_text" spellcheck="false"></textarea>
     <div>
       <button id="btn_cfg_save">保存配置</button>
       <button id="btn_cfg_reload">重新加载</button>
       <button id="btn_cfg_schema">查看 Schema</button>
     </div>
-    <pre id="schema_pre" style="display:none"></pre>
+    <pre id="schema_pre" hidden></pre>
   </section>
-  <section id="pane_system" style="display:none">
+  <section id="pane_system" hidden>
     <h3 id="t_danger">危险操作</h3>
     <div class="danger">
       <button id="btn_reboot" class="warn">重启设备</button>
@@ -139,7 +192,9 @@ const char kAdminHtml[] = R"HTML(<!DOCTYPE html>
 </body>
 </html>)HTML";
 
-const char kAdminCss[] = R"CSS(body{font-family:sans-serif;max-width:720px;margin:0 auto;padding:12px;background:#f5f5f5;color:#222}
+const char kAdminCss[] = R"CSS([hidden]{display:none!important}
+body{font-family:sans-serif;max-width:720px;margin:0 auto;padding:12px;background:#f5f5f5;color:#222}
+body.wide{max-width:1180px}
 #loginbox{max-width:320px;margin:60px auto;background:#fff;border:1px solid #ddd;border-radius:8px;padding:24px}
 #topbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#fff;border:1px solid #ddd;border-radius:8px;padding:10px 14px;margin-bottom:12px}
 #brand{font-weight:bold}
@@ -297,11 +352,13 @@ function api(path,opts){
   });
  });
 }
-function showLogin(){$('loginbox').style.display='block';$('app').style.display='none';}
-function showApp(){$('loginbox').style.display='none';$('app').style.display='block';}
+// Visibility uses the hidden attribute: CSP default-src 'self' blocks inline
+// style="" attributes in markup, so panes must not rely on them.
+function showLogin(){$('loginbox').hidden=false;$('app').hidden=true;document.body.className='';}
+function showApp(){$('loginbox').hidden=true;$('app').hidden=false;}
 function doLogin(){
  api('/auth/login',{method:'POST',body:JSON.stringify({password:$('pw').value})})
- .then(function(j){sessionStorage.setItem('eego_admin_token',j.token);$('pw').value='';msg(t('ok_login'),'ok');showApp();loadAlerts();loadStatus();})
+ .then(function(j){sessionStorage.setItem('eego_admin_token',j.token);$('pw').value='';msg(t('ok_login'),'ok');showApp();switchTab('alerts');})
  .catch(function(e){if(e.message!=='401')msg(t('badpw'),'err');else msg(t('badpw'),'err');});
 }
 function doLogout(){
@@ -401,9 +458,9 @@ function loadPresets(){
 function showPreset(){
  var p=presetById($('preset_sel').value);
  var notes=$('preset_notes'),meta=$('preset_meta'),btn=$('btn_preset_fill');
- if(!p){meta.textContent='';notes.style.display='none';btn.disabled=true;return;}
+ if(!p){meta.textContent='';notes.hidden=true;btn.disabled=true;return;}
  meta.textContent=(p.kind_hint==='http_push'?t('preset_kind_push'):t('preset_kind_poll'))+' · '+(p.builtin_poll?t('preset_cap_native'):t('preset_cap_script'));
- notes.style.display='block';
+ notes.hidden=false;
  notes.textContent=presetNotes(p)+(p.config_template?('\n\n'+JSON.stringify(p.config_template,null,2)):'');
  btn.disabled=!p.config_template;
 }
@@ -419,7 +476,7 @@ function fillPreset(){
   draft.id=nid;
   srcs.push(draft);
   cfg.sources=srcs;
-  $('cfg_text').textContent=JSON.stringify(cfg,null,2);
+  $('cfg_text').value=JSON.stringify(cfg,null,2);
   cfgDraftPending=true;  // 草稿已在文本框中，跳过切页时的 loadConfig 覆盖
   switchTab('config');
   msg(t('preset_filled'),'ok');
@@ -427,18 +484,18 @@ function fillPreset(){
 }
 // ---------- config ----------
 function loadConfig(){
- api('/config').then(function(cfg){$('cfg_text').textContent=JSON.stringify(cfg,null,2);})
+ api('/config').then(function(cfg){$('cfg_text').value=JSON.stringify(cfg,null,2);})
  .catch(function(e){if(e.message!=='401')msg(e.message,'err');});
 }
 function saveConfig(){
  var body;
  try{body=JSON.stringify(JSON.parse($('cfg_text').value));}catch(err){msg('JSON: '+err.message,'err');return;}
  api('/config',{method:'PUT',body:body}).then(function(cfg){
-  msg(t('ok_cfg'),'ok');$('cfg_text').textContent=JSON.stringify(cfg,null,2);
+  msg(t('ok_cfg'),'ok');$('cfg_text').value=JSON.stringify(cfg,null,2);
  }).catch(function(e){if(e.message!=='401')msg(e.message,'err');});
 }
 function showSchema(){
- api('/config/schema').then(function(s){var p=$('schema_pre');p.style.display='block';p.textContent=JSON.stringify(s,null,2);})
+ api('/config/schema').then(function(s){var p=$('schema_pre');p.hidden=false;p.textContent=JSON.stringify(s,null,2);})
  .catch(function(e){if(e.message!=='401')msg(e.message,'err');});
 }
 // ---------- typed device settings ----------
@@ -529,8 +586,9 @@ function doRotateKey(){
 var cfgDraftPending=false;
 function switchTab(name){
  ['alerts','status','settings','sources','dashboard','config','system'].forEach(function(n){
-  $('pane_'+n).style.display=(n===name)?'block':'none';
+  $('pane_'+n).hidden=(n!==name);
  });
+ document.body.className=name==='dashboard'?'wide':'';
  var links=document.querySelectorAll('nav a.tab');
  for(var i=0;i<links.length;i++){links[i].className='tab'+(links[i].getAttribute('data-tab')===name?' on':'');}
  if(name==='alerts')loadAlerts();
@@ -565,7 +623,7 @@ $('btn_reboot').onclick=doReboot;
 $('btn_reset').onclick=doFactoryReset;
 $('btn_rotate').onclick=doRotateKey;
 applyI18n();
-if(token()){showApp();loadAlerts();loadStatus();}else{showLogin();}
+if(token()){showApp();switchTab('alerts');}else{showLogin();}
 )JS";
 
 }  // namespace eego::admin::pages

@@ -28,6 +28,7 @@ idf_component_register(
         "src/admin_httpd.cpp"
         "src/admin_page.cpp"
         "src/dashboard_api.cpp"
+        "src/probe_mask.cpp"
         "src/dashboard_config.cpp"
         "src/dashboard_page.cpp"
         "src/provision_portal.cpp"

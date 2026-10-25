@@ -58,6 +58,20 @@ ParseResult dashboardFromJson(const JsonValue& root, const ParseOptions& options
 bool validateDashboard(const Dashboard& dashboard, const Limits& limits,
                        std::vector<ValidationError>& errors);
 JsonValue dashboardToJson(const Dashboard& dashboard);
+
+// Repairs a stored dashboard JSON object (not a bundle) written before the
+// screen layout rule (kGridRowsPerScreen) was enforced: visible panels that are
+// taller than a screen are shortened, and panels that cross a screen boundary
+// or overlap an earlier visible panel are moved to the first free spot at or
+// after their original row. Valid layouts are left untouched. Returns the
+// number of panels changed. Used only on load so older SD configurations keep
+// working; new submissions are validated strictly instead.
+size_t repairLegacyLayout(JsonValue& dashboard);
+// Same as repairLegacyLayout, applied to a stored document that is either a
+// dashboard bundle (repairs its "dashboard" member) or a bare dashboard object.
+// Shared by the admin store (which persists the result) and the runtime loader
+// (which repairs defensively before strict validation).
+size_t repairLegacyStoredLayout(JsonValue& stored);
 bool exportDashboard(const Dashboard& dashboard, std::string& out,
                      std::vector<ValidationError>& errors,
                      const Limits& limits = {});

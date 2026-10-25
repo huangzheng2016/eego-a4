@@ -443,6 +443,22 @@ class Validator {
       check(panel.grid.w > 0 && panel.grid.h > 0, child(path, "grid"), "panel size must be nonzero");
       check(static_cast<uint64_t>(panel.grid.x) + panel.grid.w <= page.grid_columns,
             child(path, "grid"), "panel exceeds page grid columns");
+      if (panel.visible && panel.grid.h > 0) {
+        // Shared device layout rule: see kGridRowsPerScreen in model.h.
+        check(gridFitsScreen(panel.grid), child(path, "grid"),
+              panel.grid.h > kGridRowsPerScreen
+                  ? "panel is taller than one screen (8 grid rows)"
+                  : "panel crosses a screen boundary (screens are 8 grid rows)");
+        for (size_t j = 0; j < i; ++j) {
+          const PanelSpec& other = *panels_[j].panel;
+          if (panels_[j].page != &page || !other.visible) continue;
+          const uint64_t ax = panel.grid.x, ay = panel.grid.y;
+          const uint64_t bx = other.grid.x, by = other.grid.y;
+          const bool overlap = ax < bx + other.grid.w && bx < ax + panel.grid.w &&
+                               ay < by + other.grid.h && by < ay + panel.grid.h;
+          check(!overlap, child(path, "grid"), "overlaps visible panel " + other.id);
+        }
+      }
       check(panel.refresh_ms <= 86400000, child(path, "refresh_ms"), "invalid refresh interval");
       window(panel.time_window, child(path, "time_window"));
       if (!panel.source_id.empty())
@@ -734,6 +750,93 @@ bool exportDashboard(const Dashboard& dashboard, std::string& out,
     return false;
   }
   return true;
+}
+
+size_t repairLegacyStoredLayout(JsonValue& stored) {
+  if (stored.type() != JsonValue::Type::Object) return 0;
+  JsonValue* dashboard = stored.find("dashboard");
+  return repairLegacyLayout(dashboard != nullptr ? *dashboard : stored);
+}
+
+size_t repairLegacyLayout(JsonValue& dashboard) {
+  if (dashboard.type() != JsonValue::Type::Object) return 0;
+  JsonValue* pages = dashboard.find("pages");
+  if (pages == nullptr || pages->type() != JsonValue::Type::Array) return 0;
+  constexpr int64_t kMaxRow = 100000;
+  auto field = [](JsonValue& grid, const char* key, int64_t fallback) {
+    const JsonValue* value = grid.find(key);
+    return value != nullptr && value->type() == JsonValue::Type::Int ? value->intValue() : fallback;
+  };
+  auto store = [](JsonValue& grid, const char* key, int64_t value) {
+    if (JsonValue* existing = grid.find(key)) {
+      *existing = JsonValue::makeInt(value);
+    } else {
+      grid.objectItems().emplace_back(key, JsonValue::makeInt(value));
+    }
+  };
+  size_t changed = 0;
+  for (JsonValue& page : pages->arrayItems()) {
+    if (page.type() != JsonValue::Type::Object) continue;
+    int64_t columns = 24;
+    if (const JsonValue* value = page.find("grid_columns");
+        value != nullptr && value->type() == JsonValue::Type::Int)
+      columns = value->intValue();
+    JsonValue* panels = page.find("panels");
+    if (columns < 1 || panels == nullptr || panels->type() != JsonValue::Type::Array) continue;
+    std::vector<GridRect> placed;
+    for (JsonValue& panel : panels->arrayItems()) {
+      if (panel.type() != JsonValue::Type::Object) continue;
+      const JsonValue* visible = panel.find("visible");
+      if (visible != nullptr && visible->type() == JsonValue::Type::Bool && !visible->boolValue())
+        continue;
+      JsonValue* grid = panel.find("grid");
+      if (grid == nullptr || grid->type() != JsonValue::Type::Object) continue;
+      const int64_t x = field(*grid, "x", 0), y = field(*grid, "y", 0);
+      const int64_t w = field(*grid, "w", 6), h = field(*grid, "h", 4);
+      // Malformed or column-overflowing grids are left for validation to report.
+      if (x < 0 || y < 0 || y > kMaxRow || w < 1 || h < 1 || x + w > columns) continue;
+      GridRect rect{static_cast<uint32_t>(x), static_cast<uint32_t>(y), static_cast<uint32_t>(w),
+                    static_cast<uint32_t>(std::min<int64_t>(h, kGridRowsPerScreen))};
+      auto fits = [&](const GridRect& candidate) {
+        if (!gridFitsScreen(candidate)) return false;
+        for (const GridRect& other : placed) {
+          if (candidate.x < other.x + other.w && other.x < candidate.x + candidate.w &&
+              candidate.y < other.y + other.h && other.y < candidate.y + candidate.h)
+            return false;
+        }
+        return true;
+      };
+      if (!fits(rect)) {
+        GridRect found = rect;
+        bool ok = false;
+        for (int64_t row = y; row <= kMaxRow && !ok; ++row) {
+          found.y = static_cast<uint32_t>(row);
+          found.x = rect.x;
+          if (fits(found)) {
+            ok = true;
+            break;
+          }
+          for (int64_t column = 0; column + w <= columns; ++column) {
+            found.x = static_cast<uint32_t>(column);
+            if (fits(found)) {
+              ok = true;
+              break;
+            }
+          }
+        }
+        if (!ok) continue;
+        rect = found;
+      }
+      if (rect.x != x || rect.y != y || rect.h != h) {
+        store(*grid, "x", rect.x);
+        store(*grid, "y", rect.y);
+        store(*grid, "h", rect.h);
+        ++changed;
+      }
+      placed.push_back(rect);
+    }
+  }
+  return changed;
 }
 
 }  // namespace eego::dashboard

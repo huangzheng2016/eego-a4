@@ -6,15 +6,11 @@
 namespace eego::dashboard::ui {
 namespace {
 
-uint32_t logicalColumnStart(uint32_t x, uint32_t grid_columns) {
-  return std::min<uint64_t>(kLogicalColumns,
-                            static_cast<uint64_t>(x) * kLogicalColumns / grid_columns);
-}
-
-uint32_t logicalColumnEnd(uint32_t x, uint32_t w, uint32_t grid_columns) {
-  const uint64_t end = static_cast<uint64_t>(x) + w;
-  const uint64_t logical = (end * kLogicalColumns + grid_columns - 1) / grid_columns;
-  return static_cast<uint32_t>(std::min<uint64_t>(kLogicalColumns, logical));
+// Proportional edge mapping: boundary b of n cells over `length` pixels with
+// `gap` gutters. A panel spanning [a, b) occupies [edge(a), edge(b) - gap), so
+// adjacent panels are always separated by exactly one gutter and never overlap.
+int32_t edge(uint64_t boundary, uint64_t cells, int32_t length, int32_t gap) {
+  return static_cast<int32_t>(boundary * static_cast<uint64_t>(length + gap) / cells);
 }
 
 }  // namespace
@@ -24,56 +20,47 @@ PageLayout buildPageLayout(const Page& page, size_t page_index, const LayoutConf
   out.page_index = page_index;
   out.content = config.content;
 
-  uint64_t last_row = 0;
+  uint64_t last_screen = 0;
   for (const PanelSpec& panel : page.panels) {
     if (!panel.visible) continue;
-    last_row = std::max(last_row, static_cast<uint64_t>(panel.grid.y) + panel.grid.h);
+    last_screen = std::max<uint64_t>(last_screen, gridScreenIndex(panel.grid));
   }
-  out.page_count = static_cast<size_t>(std::max<uint64_t>(
-      1, (last_row + kRowsPerPage - 1) / kRowsPerPage));
+  out.page_count = static_cast<size_t>(last_screen + 1);
 
   if (page.grid_columns == 0 || config.content.empty() || config.gap_x < 0 ||
       config.gap_y < 0 || config.panel_inset < 0) {
     return out;
   }
-  const int32_t cell_w = (static_cast<int32_t>(config.content.w) -
-                          (kLogicalColumns - 1) * config.gap_x) /
-                         kLogicalColumns;
-  const int32_t cell_h = (static_cast<int32_t>(config.content.h) -
-                          (kRowsPerPage - 1) * config.gap_y) /
-                         kRowsPerPage;
-  if (cell_w <= 0 || cell_h <= 0 || cell_w > INT16_MAX || cell_h > INT16_MAX) return out;
   out.valid = true;
   if (page_index >= out.page_count) return out;
 
-  const uint64_t page_row = static_cast<uint64_t>(page_index) * kRowsPerPage;
+  const int32_t width = config.content.w;
+  const int32_t height = config.content.h;
   for (size_t index = 0; index < page.panels.size(); ++index) {
     const PanelSpec& panel = page.panels[index];
-    if (!panel.visible) continue;
-    const uint64_t panel_end = static_cast<uint64_t>(panel.grid.y) + panel.grid.h;
-    const uint64_t page_end = page_row + kRowsPerPage;
-    const uint64_t row_start = std::max<uint64_t>(panel.grid.y, page_row);
-    const uint64_t row_end = std::min(panel_end, page_end);
-    if (row_start >= row_end || panel.grid.x >= page.grid_columns) continue;
+    if (!panel.visible || panel.grid.w == 0 || panel.grid.h == 0) continue;
+    if (gridScreenIndex(panel.grid) != page_index || panel.grid.x >= page.grid_columns) continue;
 
-    const uint32_t column = logicalColumnStart(panel.grid.x, page.grid_columns);
-    const uint32_t column_end = logicalColumnEnd(
-        panel.grid.x, std::min<uint32_t>(panel.grid.w, page.grid_columns - panel.grid.x),
-        page.grid_columns);
-    if (column >= column_end) continue;
-    const uint32_t row = static_cast<uint32_t>(row_start - page_row);
-    const uint32_t row_span = static_cast<uint32_t>(row_end - row_start);
-    const uint32_t column_span = column_end - column;
+    const uint32_t column = panel.grid.x;
+    const uint32_t column_span = std::min<uint32_t>(panel.grid.w, page.grid_columns - column);
+    const uint32_t row = gridScreenRow(panel.grid);
+    const uint32_t row_span = std::min<uint32_t>(panel.grid.h, kRowsPerPage - row);
 
-    const int32_t x = config.content.x + column * (cell_w + config.gap_x);
-    const int32_t y = config.content.y + row * (cell_h + config.gap_y);
-    const int32_t w = column_span * cell_w + (column_span - 1) * config.gap_x;
-    const int32_t h = row_span * cell_h + (row_span - 1) * config.gap_y;
+    const int32_t left = edge(column, page.grid_columns, width, config.gap_x);
+    const int32_t right = edge(static_cast<uint64_t>(column) + column_span, page.grid_columns,
+                               width, config.gap_x) - config.gap_x;
+    const int32_t top = edge(row, kRowsPerPage, height, config.gap_y);
+    const int32_t bottom = edge(static_cast<uint64_t>(row) + row_span, kRowsPerPage, height,
+                                config.gap_y) - config.gap_y;
+    if (right <= left || bottom <= top) continue;
+
     PanelLayout item;
     item.panel = &panel;
     item.panel_index = index;
-    item.bounds = clipTo({static_cast<int16_t>(x), static_cast<int16_t>(y),
-                          static_cast<int16_t>(w), static_cast<int16_t>(h)},
+    item.bounds = clipTo({static_cast<int16_t>(config.content.x + left),
+                          static_cast<int16_t>(config.content.y + top),
+                          static_cast<int16_t>(right - left),
+                          static_cast<int16_t>(bottom - top)},
                          config.content);
     item.content = inset(item.bounds, config.panel_inset);
     item.column = column;

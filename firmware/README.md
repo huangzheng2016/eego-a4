@@ -55,6 +55,10 @@ idf.py -C firmware -B .tmp/firmware-build -p <PORT> flash monitor
 3. 通过串口 `net` 或路由器 DHCP 列表找到 IP，打开 `http://<device-ip>/` 登录。
 4. 在「数据面板」导入 JSON，先校验再应用；导入只改草稿，应用后才生效。
 
+`http://<device-ip>/` 是一个加载器：从 GitHub Pages 拉取管理 Web 应用
+（`EEGO_WEB_APP_BASE`，可在编译时覆盖），应用在设备同源下调用 `/api/v1`。
+无法访问互联网时打开 `http://<device-ip>/legacy` 使用内置管理页；配网门户始终内置。
+
 可直接导入 `presets/examples/*.json`，或展开主机侧预设：
 
 ```sh
@@ -65,6 +69,9 @@ python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
 ```
 
 `eego.dashboard-preset/1` 不能原样导入；export 后才是 `eego.dashboard-bundle/1`。
+同一套预设与示例也内置在固件中，可通过 `GET /api/v1/dashboard/templates` 获取；
+修改 `presets/` 后运行 `python3 firmware/tools/preset_tool.py embed` 重新生成
+`components/admin/src/dashboard_templates.inc`（`validate-library` 会检查是否过期）。
 真机联调时 `--mock-host` 必须是电脑的局域网地址，不是 `127.0.0.1`。
 
 ## 数据面板
@@ -74,6 +81,11 @@ python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
   `id/rule_id/timestamp_ms/severity/state/title/message/linked_panel_id`。
 - 页面使用 grid 布局；可配置变量、时间窗口、阈值、告警规则、linked panel 和
   source/panel 独立调度。表达式和按钮 action 都是白名单，不是脚本。
+- 布局规则（设备、固件校验、主机校验共用）：`grid_columns` 按比例映射到屏幕
+  宽度（任意列数和边界都可）；每一屏固定 8 个 grid 行，按比例映射到屏幕高度；
+  可见 panel 不得重叠，且必须完整落在一屏内（`h ≤ 8` 且 `y % 8 + h ≤ 8`），
+  第 n 屏对应 `y` 在 `[8n, 8n+8)`。`row_height` 仅为兼容字段，不影响设备几何。
+  旧版 SD 配置中跨屏/重叠的 panel 会在加载时自动挪到下一个空位。
 - dashboard source 与对应 source plan 的连接字段必须一致；Web 表单会自动同步，
   手工编辑 JSON 时需自行保持 `id/kind/url/refresh_ms/timeout_ms`、TLS、headers
   和凭据引用一致。
@@ -91,6 +103,9 @@ python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
 | `GET/PUT/DELETE /api/v1/dashboard` | 读取、校验后替换或删除 bundle |
 | `POST /api/v1/dashboard/validate` | 只校验候选 bundle，不应用 |
 | `POST /api/v1/dashboard/sources/test` | 测试草稿数据源，返回归一化预览 |
+| `POST /api/v1/dashboard/sources/probe` | 抓取一次原始响应（敏感键值打码、≤16 KiB），用于挑选 JSONPath |
+| `GET /api/v1/dashboard/templates` | 内置预设库与完整示例 |
+| `GET /api/v1/display/snapshot.bmp` | 当前屏幕帧（552×768 1-bpp BMP）；未接线时 503 |
 | `GET/PUT /api/v1/settings` | 本机设置；schema 在同路径加 `/schema` |
 | `GET/PUT/DELETE /api/v1/sources/credentials` | 管理数据源凭据 |
 | `GET/PUT /api/v1/input-bindings` | 自定义输入；另有 `/schema` 和 `/reset` |

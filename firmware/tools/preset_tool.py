@@ -15,7 +15,9 @@ from dashboard_validation import (
     _scan_secrets,
     bundle_from_preset,
     check_library,
+    TEMPLATE_INC,
     load_json,
+    render_template_library,
     validate_bundle,
 )
 
@@ -96,6 +98,22 @@ def command_validate(root, paths):
     return 1 if failed else 0
 
 
+def command_embed(root, check_only):
+    rendered = render_template_library(root)
+    target = root / TEMPLATE_INC
+    current = target.read_text(encoding="utf-8") if target.exists() else None
+    if check_only:
+        if current != rendered:
+            print(f"[FAIL] {TEMPLATE_INC} is stale; run preset_tool.py embed")
+            return 1
+        print(f"[PASS] {TEMPLATE_INC} matches presets/")
+        return 0
+    if current != rendered:
+        target.write_text(rendered, encoding="utf-8")
+    print(f"wrote {target} ({len(rendered.encode('utf-8'))} bytes)")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", help="firmware directory (defaults to this tool's parent)")
@@ -109,6 +127,9 @@ def main():
     validate_parser = subparsers.add_parser("validate", help="validate one or more native bundles")
     validate_parser.add_argument("paths", nargs="+")
     subparsers.add_parser("validate-library", help="validate the complete catalog and four examples")
+    embed_parser = subparsers.add_parser(
+        "embed", help="regenerate the firmware template library served by /api/v1/dashboard/templates")
+    embed_parser.add_argument("--check", action="store_true", help="only verify it is up to date")
     args = parser.parse_args()
     root = firmware_root(args.root)
     try:
@@ -118,6 +139,8 @@ def main():
             return command_export(root, args.preset_id, args.mock_host, args.output)
         if args.command == "validate":
             return command_validate(root, args.paths)
+        if args.command == "embed":
+            return command_embed(root, args.check)
         errors, stats = check_library(root)
         for error in errors:
             print(f"[FAIL] {error}")

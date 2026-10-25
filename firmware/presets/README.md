@@ -14,6 +14,13 @@ python3 firmware/tools/preset_tool.py validate .tmp/chart-kpi.json
 python3 firmware/tools/preset_tool.py validate-library
 ```
 
+布局遵循设备规则：每屏 8 个 grid 行，可见 panel 不重叠、不跨屏；列按
+`grid_columns` 比例映射。`validate-library` 会检查这些规则以及内置样板 dashboard。
+
+预设库同时内置在固件里（`GET /api/v1/dashboard/templates`）。修改本目录后运行
+`python3 firmware/tools/preset_tool.py embed` 重新生成
+`components/admin/src/dashboard_templates.inc`；过期时 `validate-library` 失败。
+
 `--mock-host` 只写演示地址，不带 scheme、路径或凭据。真机必须改为电脑的 LAN
 地址，不能使用设备自身的 `127.0.0.1`。接入真实服务时，同时修改 dashboard source
 与对应 plan；需要认证时先按[数据源凭据](../README.md#数据源凭据)写入 NVS，

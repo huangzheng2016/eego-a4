@@ -72,6 +72,39 @@ struct GridRect {
   uint32_t h = 4;
 };
 
+// Device layout rule (shared by the renderer, firmware validation, the host
+// validator, and the web preview):
+//  * Horizontally, a page's grid_columns are mapped proportionally onto the
+//    screen width, so any column count and any edge position is valid.
+//  * Vertically, every screen holds exactly kGridRowsPerScreen grid rows;
+//    rows are mapped proportionally onto the screen height. Screen s covers
+//    rows [s * kGridRowsPerScreen, (s + 1) * kGridRowsPerScreen).
+//  * A panel is never split across screens. Validation rejects a visible
+//    panel taller than one screen or crossing a screen boundary, and rejects
+//    overlapping visible panels. page.row_height is a legacy hint and does
+//    not affect device geometry.
+inline constexpr uint32_t kGridRowsPerScreen = 8;
+
+// Screen index of a panel. A panel that would cross a screen boundary is
+// moved to the top of the next screen (only reachable for invalid input).
+inline uint32_t gridScreenIndex(const GridRect& grid) {
+  const uint32_t screen = grid.y / kGridRowsPerScreen;
+  const uint32_t row = grid.y % kGridRowsPerScreen;
+  const uint64_t end = static_cast<uint64_t>(row) + grid.h;
+  return end > kGridRowsPerScreen && row != 0 ? screen + 1 : screen;
+}
+
+// Row of the panel within its screen (0-based) after gridScreenIndex().
+inline uint32_t gridScreenRow(const GridRect& grid) {
+  return gridScreenIndex(grid) == grid.y / kGridRowsPerScreen ? grid.y % kGridRowsPerScreen : 0;
+}
+
+// True when a panel fits inside one screen without crossing a boundary.
+inline bool gridFitsScreen(const GridRect& grid) {
+  return grid.h >= 1 && grid.h <= kGridRowsPerScreen &&
+         static_cast<uint64_t>(grid.y % kGridRowsPerScreen) + grid.h <= kGridRowsPerScreen;
+}
+
 struct TimeWindow {
   std::string from = "-1h";
   std::string to = "now";

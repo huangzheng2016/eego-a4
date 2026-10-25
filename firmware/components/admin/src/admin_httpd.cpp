@@ -19,13 +19,18 @@
 //     （ingest key 仅轮换响应完整显示一次）。
 
 #include "admin/admin.h"
+#include "admin/display_snapshot.h"
 
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <algorithm>
+#include <memory>
+#include <mutex>
 #include <strings.h>
+#include <utility>
 #include <vector>
 
 #include "admin_internal.h"
@@ -106,6 +111,46 @@ esp_err_t sendBody(httpd_req_t* req, int status, const char* content_type,
   httpd_resp_set_type(req, content_type);
   httpd_resp_set_status(req, statusText(status));
   httpd_resp_send(req, body.c_str(), body.size());
+  return ESP_OK;
+}
+
+// Build-scoped validator for the zero-data static pages: the first 8 bytes of
+// the application ELF SHA-256, so every firmware build gets a new ETag.
+const char* staticEtag() {
+  static char etag[24] = "";
+  if (etag[0] == '\0') {
+    const esp_app_desc_t* app = esp_app_get_description();
+    char* out = etag;
+    *out++ = '"';
+    for (int i = 0; i < 8; ++i) {
+      snprintf(out, 3, "%02x", app->app_elf_sha256[i]);
+      out += 2;
+    }
+    *out++ = '"';
+    *out = '\0';
+  }
+  return etag;
+}
+
+// Static pages live in flash (.rodata); send them straight from there instead
+// of copying 40 KB into a std::string per request. Browsers revalidate with
+// If-None-Match and get a body-less 304 while the firmware build is unchanged.
+esp_err_t sendStatic(httpd_req_t* req, const char* content_type, const char* body, bool html,
+                     const char* csp = "default-src 'self'") {
+  httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+  httpd_resp_set_hdr(req, "ETag", staticEtag());
+  if (html) httpd_resp_set_hdr(req, "Content-Security-Policy", csp);
+  char presented[40];
+  if (httpd_req_get_hdr_value_str(req, "If-None-Match", presented, sizeof(presented)) == ESP_OK &&
+      strcmp(presented, staticEtag()) == 0) {
+    httpd_resp_set_status(req, "304 Not Modified");
+    httpd_resp_send(req, nullptr, 0);
+    return ESP_OK;
+  }
+  httpd_resp_set_type(req, content_type);
+  httpd_resp_set_status(req, statusText(200));
+  httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
@@ -1638,20 +1683,30 @@ esp_err_t h_ingest_rotate(httpd_req_t* req) {
 // ---------------------------------------------------------------------------
 // 静态管理页（免认证零数据；CSP default-src 'self'；M13 T11）
 // ---------------------------------------------------------------------------
+// GET / : loader for the externally hosted app, with its own CSP that allows
+// scripts/styles from EEGO_WEB_APP_ORIGIN only.
 esp_err_t h_root_page(httpd_req_t* req) {
-  return sendBody(req, 200, "text/html; charset=utf-8", pages::kAdminHtml, true);
+  return sendStatic(req, "text/html; charset=utf-8", pages::kLoaderHtml, true,
+                    pages::kLoaderCsp);
+}
+esp_err_t h_loader_js(httpd_req_t* req) {
+  return sendStatic(req, "application/javascript; charset=utf-8", pages::kLoaderJs, false);
+}
+// GET /legacy : the fully embedded admin page (works without internet).
+esp_err_t h_legacy_page(httpd_req_t* req) {
+  return sendStatic(req, "text/html; charset=utf-8", pages::kAdminHtml, true);
 }
 esp_err_t h_admin_js(httpd_req_t* req) {
-  return sendBody(req, 200, "application/javascript; charset=utf-8", pages::kAdminJs, false);
+  return sendStatic(req, "application/javascript; charset=utf-8", pages::kAdminJs, false);
 }
 esp_err_t h_admin_css(httpd_req_t* req) {
-  return sendBody(req, 200, "text/css; charset=utf-8", pages::kAdminCss, false);
+  return sendStatic(req, "text/css; charset=utf-8", pages::kAdminCss, false);
 }
 esp_err_t h_dashboard_js(httpd_req_t* req) {
-  return sendBody(req, 200, "application/javascript; charset=utf-8", pages::kDashboardJs, false);
+  return sendStatic(req, "application/javascript; charset=utf-8", pages::kDashboardJs, false);
 }
 esp_err_t h_dashboard_css(httpd_req_t* req) {
-  return sendBody(req, 200, "text/css; charset=utf-8", pages::kDashboardCss, false);
+  return sendStatic(req, "text/css; charset=utf-8", pages::kDashboardCss, false);
 }
 
 }  // namespace
@@ -1661,6 +1716,48 @@ esp_err_t h_dashboard_css(httpd_req_t* req) {
 namespace eego::admin {
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// 显示快照（GET /api/v1/display/snapshot.bmp）
+// ---------------------------------------------------------------------------
+std::mutex g_snapshot_mutex;
+DisplaySnapshotProvider g_snapshot_provider;
+
+struct PsramDeleter {
+  void operator()(uint8_t* p) const { heap_caps_free(p); }
+};
+
+esp_err_t h_display_snapshot(httpd_req_t* req) {
+  DisplaySnapshotProvider provider;
+  {
+    std::lock_guard<std::mutex> lock(g_snapshot_mutex);
+    provider = g_snapshot_provider;
+  }
+  if (!provider) return sendError(req, 503, errc::kUnavailable, "display snapshot unavailable");
+  // ~55 KB: keep it out of internal RAM.
+  std::unique_ptr<uint8_t, PsramDeleter> bmp(
+      static_cast<uint8_t*>(heap_caps_calloc(1, kSnapshotFileBytes, MALLOC_CAP_SPIRAM)));
+  if (!bmp) return sendError(req, 503, errc::kUnavailable, "snapshot buffer unavailable");
+  writeSnapshotBmpHeader(bmp.get());
+  if (!provider(bmp.get() + kSnapshotHeaderBytes, kSnapshotStride)) {
+    return sendError(req, 503, errc::kUnavailable, "display frame unavailable");
+  }
+  httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_set_type(req, "image/bmp");
+  httpd_resp_set_status(req, statusText(200));
+  // Sent in 4 KiB chunks straight from the PSRAM buffer.
+  constexpr size_t kChunk = 4096;
+  for (size_t offset = 0; offset < kSnapshotFileBytes; offset += kChunk) {
+    const size_t n = std::min(kChunk, kSnapshotFileBytes - offset);
+    if (httpd_resp_send_chunk(req, reinterpret_cast<const char*>(bmp.get() + offset),
+                              static_cast<ssize_t>(n)) != ESP_OK) {
+      return ESP_FAIL;
+    }
+  }
+  httpd_resp_send_chunk(req, nullptr, 0);
+  return ESP_OK;
+}
 
 // ---------------------------------------------------------------------------
 // 路由分发（/api/v1/*；M13 定稿路由表；其余一切 → 404 JSON，含 /firmware/*）
@@ -1698,6 +1795,9 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
       if (!rateLimit(req, "get:" + clientIp(req), 60, 60)) return ESP_OK;
     } else if (m == HTTP_POST && strcmp(canonical_path.c_str(), "dashboard/sources/test") == 0) {
       if (!rateLimit(req, "dashboard-test:" + token.substr(0, 8), 60, 5)) return ESP_OK;
+    } else if (m == HTTP_POST && strcmp(canonical_path.c_str(), "dashboard/sources/probe") == 0) {
+      // Outbound fetch that echoes a (masked, bounded) body: own small bucket.
+      if (!rateLimit(req, "dashboard-probe:" + token.substr(0, 8), 60, 5)) return ESP_OK;
     } else if (!rateLimit(req, "dashboard-write:" + token.substr(0, 8), 60, 30)) {
       return ESP_OK;
     }
@@ -1717,6 +1817,10 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     if (strcmp(path, "system/logs") == 0) {
       if (!bearer()) return ESP_OK;
       return h_logs(req);
+    }
+    if (strcmp(path, "display/snapshot.bmp") == 0) {
+      if (!bearer()) return ESP_OK;
+      return h_display_snapshot(req);
     }
     if (strcmp(path, "config") == 0) {
       if (!bearer()) return ESP_OK;
@@ -1881,7 +1985,9 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
 esp_err_t wildcardHandler(httpd_req_t* req) {
   const char* uri = req->uri;
   if (req->method == HTTP_GET) {
-    if (strcmp(uri, "/") == 0) return h_root_page(req);
+    if (strcmp(uri, "/") == 0 || strncmp(uri, "/?", 2) == 0) return h_root_page(req);
+    if (strcmp(uri, "/loader.js") == 0) return h_loader_js(req);
+    if (strcmp(uri, "/legacy") == 0 || strcmp(uri, "/legacy/") == 0) return h_legacy_page(req);
     if (strcmp(uri, "/admin.js") == 0) return h_admin_js(req);
     if (strcmp(uri, "/admin.css") == 0) return h_admin_css(req);
     if (strcmp(uri, "/dashboard.js") == 0) return h_dashboard_js(req);
@@ -1968,5 +2074,10 @@ void stopAdminApi() {
 }
 
 bool adminApiRunning() { return g_server != nullptr; }
+
+void setDisplaySnapshotProvider(DisplaySnapshotProvider provider) {
+  std::lock_guard<std::mutex> lock(g_snapshot_mutex);
+  g_snapshot_provider = std::move(provider);
+}
 
 }  // namespace eego::admin
