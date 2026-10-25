@@ -2,6 +2,7 @@
 // S0–S4 与状态栏/软键栏绘制实现（见 panel_render.h 布局与边界契约）。
 #include "panel_render.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -12,6 +13,12 @@ namespace {
 using eego::FontManager;
 using eego::PortraitCanvas;
 
+constexpr uint8_t kDividerGray = 9;   // 行间分隔线（浅灰，白底上可见）
+constexpr uint8_t kRuleGray = 6;      // 分节标题下划线（深灰）
+constexpr int16_t kKvLabelW = 136;    // 状态/帮助页标签列宽
+constexpr int16_t kMetaLabelW = 72;   // 详情页元信息标签列宽
+constexpr int16_t kFieldLabelW = 150; // 详情页字段表标签列宽
+
 int16_t textW(const char* s, int16_t scale) {
   return static_cast<int16_t>(FontManager::instance().uiTextWidth(s) * scale);
 }
@@ -20,23 +27,68 @@ int16_t fontH(int16_t scale) {
   return static_cast<int16_t>(FontManager::instance().uiFontHeight() * scale);
 }
 
+// 伪粗体：同色偏移 max(1, scale) px 叠画，额外占用的宽度。
+int16_t boldExtra(bool bold, int16_t scale) {
+  return bold ? std::max<int16_t>(1, scale) : 0;
+}
+
+int16_t styleW(const char* s, const TextStyle& st) {
+  return static_cast<int16_t>(textW(s, st.scale) + boldExtra(st.bold, st.scale));
+}
+
+// 在高度 h 的带内垂直居中某字号文字的 y（文字顶部）。
+int16_t centerY(int16_t top, int16_t h, int16_t scale) {
+  return static_cast<int16_t>(top + (h - fontH(scale)) / 2);
+}
+
 void textGray(PortraitCanvas& c, int16_t x, int16_t y, const char* s, int16_t scale,
               uint8_t gray, bool bold = false) {
+  FontManager::instance().drawTextGray(c, x, y, s, scale, gray);
   if (bold) {
-    // 粗体 = 同位置叠加一次偏移 1px 的绘制（灰度文字用同色叠加）
-    FontManager::instance().drawTextGray(c, x, y, s, scale, gray);
-    FontManager::instance().drawTextGray(c, x + 1, y, s, scale, gray);
-  } else {
-    FontManager::instance().drawTextGray(c, x, y, s, scale, gray);
+    FontManager::instance().drawTextGray(c, static_cast<int16_t>(x + boldExtra(true, scale)), y,
+                                         s, scale, gray);
   }
 }
 
-void textRightGray(PortraitCanvas& c, int16_t x, int16_t y, int16_t w, const char* s,
-                   int16_t scale, uint8_t gray, bool bold = false) {
-  int16_t tw = textW(s, scale);
-  int16_t ox = w - tw;
-  if (ox < 0) ox = 0;
-  textGray(c, static_cast<int16_t>(x + ox), y, s, scale, gray, bold);
+void text(PortraitCanvas& c, int16_t x, int16_t y, const char* s, const TextStyle& st) {
+  textGray(c, x, y, s, st.scale, st.gray, st.bold);
+}
+
+int16_t textFit(PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW, const char* s,
+                const TextStyle& st) {
+  return drawTextFit(c, x, y, maxW, s, st.scale, st.bold, st.gray);
+}
+
+// 右缘对齐于 right（文字不超过 maxW；超宽省略号）。
+void textRight(PortraitCanvas& c, int16_t right, int16_t y, int16_t maxW, const char* s,
+               const TextStyle& st) {
+  const int16_t tw = std::min(styleW(s, st), maxW);
+  textFit(c, static_cast<int16_t>(right - tw), y, maxW, s, st);
+}
+
+// 在 [x, x+w) 内水平居中。
+void textCentered(PortraitCanvas& c, int16_t x, int16_t w, int16_t y, const char* s,
+                  const TextStyle& st) {
+  const int16_t tw = std::min(styleW(s, st), w);
+  textFit(c, static_cast<int16_t>(x + (w - tw) / 2), y, w, s, st);
+}
+
+// 1px 灰阶水平线（fillRoundRectGray r=0 即实心灰矩形）。
+void hline(PortraitCanvas& c, int16_t x, int16_t y, int16_t w, uint8_t gray) {
+  c.fillRoundRectGray(x, y, w, 1, 0, gray);
+}
+
+// 1-bpp 图标按灰阶绘制（drawIcon 只支持黑/白）。
+void drawIconGray(PortraitCanvas& c, int16_t x, int16_t y, const uint8_t* icon, int16_t w,
+                  int16_t h, uint8_t gray) {
+  const int16_t stride = static_cast<int16_t>((w + 7) / 8);
+  for (int16_t yy = 0; yy < h; yy++) {
+    for (int16_t xx = 0; xx < w; xx++) {
+      if (icon[yy * stride + xx / 8] & (0x80 >> (xx % 8))) {
+        c.drawPixelGray(static_cast<int16_t>(x + xx), static_cast<int16_t>(y + yy), gray);
+      }
+    }
+  }
 }
 
 // UTF-8 字符字节数（按首字节判别；畸形字节按 1 处理，绝不越界读）。
@@ -67,20 +119,179 @@ const char* stateLabel(uint8_t st) {
   }
 }
 
-// 页面标题（内容区顶部）。
-void drawPageTitle(PortraitCanvas& c, Str title) {
-  textGray(c, geom::kContentX + 8, geom::kContentTop + 28, tr(title), 2, 0, true);
+// 页面标题（标题带 kTitleY..+kTitleH 内垂直居中）。
+void drawTitleText(PortraitCanvas& c, const char* title, int16_t maxW) {
+  textFit(c, geom::kInnerX, centerY(geom::kTitleY, geom::kTitleH, style::kTitle.scale),
+          maxW, title, style::kTitle);
 }
 
-//  severity 芯片（圆角灰底 + 短标签/图标字）。
-void drawSevChip(PortraitCanvas& c, int16_t x, int16_t y, int16_t size, uint8_t sev) {
+void drawPageTitle(PortraitCanvas& c, Str title) {
+  drawTitleText(c, tr(title), geom::kInnerW);
+}
+
+// severity 芯片（kSevChip 方形圆角灰底 + 正文粗体短标签），S1/S2 共用。
+void drawSevChip(PortraitCanvas& c, int16_t x, int16_t y, uint8_t sev) {
+  const int16_t size = geom::kSevChip;
   c.fillRoundRectGray(x, y, size, size, 8, severityFillGray(sev));
-  const int16_t s = size >= 48 ? 2 : 1;
-  const int16_t tw = textW(sevShort(sev), s);
-  const int16_t th = fontH(s);
-  textGray(c, static_cast<int16_t>(x + (size - tw) / 2),
-           static_cast<int16_t>(y + (size - th) / 2), sevShort(sev), s,
-           severityTextGray(sev), true);
+  TextStyle st = style::kBodyStrong;
+  if (fontH(st.scale) > size - 8) st.scale = 1;
+  st.gray = severityTextGray(sev);
+  const int16_t tw = styleW(sevShort(sev), st);
+  text(c, static_cast<int16_t>(x + (size - tw) / 2), centerY(y, size, st.scale), sevShort(sev),
+       st);
+}
+
+// ── 状态栏图标（按字高缩放的矢量近似）────────────────────────────────────────
+
+// 扫描线填充多边形（偶奇规则，采样像素中心）；span(x0, x1, y) 画 [x0, x1] 闭区间。
+template <typename Span>
+void scanPolygon(const float* px, const float* py, int n, int16_t y0, int16_t y1, Span&& span) {
+  float xs[16];
+  for (int16_t yy = y0; yy < y1; yy++) {
+    const float yc = static_cast<float>(yy) + 0.5f;
+    int k = 0;
+    for (int i = 0; i < n && k < 16; i++) {
+      const int j = (i + 1) % n;
+      const float ya = py[i];
+      const float yb = py[j];
+      if ((ya <= yc && yb > yc) || (yb <= yc && ya > yc)) {
+        xs[k++] = px[i] + (yc - ya) * (px[j] - px[i]) / (yb - ya);
+      }
+    }
+    std::sort(xs, xs + k);
+    for (int i = 0; i + 1 < k; i += 2) {
+      const int16_t a = static_cast<int16_t>(xs[i] + 0.5f);
+      const int16_t b = static_cast<int16_t>(xs[i + 1] - 0.5f);
+      if (b >= a) span(a, b, yy);
+    }
+  }
+}
+
+// 闪电：单位方框内 7 点多边形（右上起笔 → 左下折 → 中段横移 → 底尖 → 回折）。
+constexpr float kBoltX[7] = {0.62f, 0.02f, 0.44f, 0.26f, 0.98f, 0.56f, 0.90f};
+constexpr float kBoltY[7] = {0.00f, 0.58f, 0.58f, 1.00f, 0.40f, 0.40f, 0.00f};
+
+int16_t batteryIconWidth(int16_t h) { return static_cast<int16_t>(h * 2 + 3); }
+
+// 电池图标：h 高、2h 宽、2px 描边 + 3px 正极凸点；内芯按百分比填充；
+// bolt=true 时内部画闪电（填充上为白、空白处为黑）。返回总宽。
+int16_t drawBatteryIcon(PortraitCanvas& c, int16_t x, int16_t y, int16_t h, uint8_t percent,
+                        bool bolt) {
+  const int16_t bw = static_cast<int16_t>(h * 2);
+  c.drawRect(x, y, bw, h, 0);
+  c.drawRect(static_cast<int16_t>(x + 1), static_cast<int16_t>(y + 1),
+             static_cast<int16_t>(bw - 2), static_cast<int16_t>(h - 2), 0);
+  const int16_t nubH = std::max<int16_t>(4, static_cast<int16_t>(h * 3 / 7));
+  c.fillRect(static_cast<int16_t>(x + bw), static_cast<int16_t>(y + (h - nubH) / 2), 3, nubH, 0);
+
+  const int16_t ix = static_cast<int16_t>(x + 4);
+  const int16_t iy = static_cast<int16_t>(y + 4);
+  const int16_t iw = static_cast<int16_t>(bw - 8);
+  const int16_t ih = static_cast<int16_t>(h - 8);
+  const int pct = std::min<int>(percent, 100);
+  int16_t fillW = static_cast<int16_t>((iw * pct + 50) / 100);
+  if (pct > 0 && fillW < 1) fillW = 1;
+  if (fillW > 0 && ih > 0) c.fillRect(ix, iy, fillW, ih, 0);
+
+  if (bolt) {
+    // 闪电占据描边内的整个高度（含 2px 留白），宽 ≈ 高
+    const int16_t boltH = static_cast<int16_t>(h - 4);
+    const int16_t boltW = static_cast<int16_t>(boltH + 1);
+    const float bx = static_cast<float>(x + (bw - boltW) / 2);
+    const float by = static_cast<float>(y + 2);
+    float px[7];
+    float py[7];
+    for (int i = 0; i < 7; i++) {
+      px[i] = bx + kBoltX[i] * static_cast<float>(boltW);
+      py[i] = by + kBoltY[i] * static_cast<float>(boltH);
+    }
+    const int16_t fillEnd = static_cast<int16_t>(ix + fillW);
+    scanPolygon(px, py, 7, static_cast<int16_t>(y + 2), static_cast<int16_t>(y + 2 + boltH),
+                [&](int16_t a, int16_t b, int16_t yy) {
+                  const bool rowInFill = yy >= iy && yy < iy + ih;
+                  for (int16_t xx = a; xx <= b; xx++) {
+                    const bool onFill = rowInFill && xx >= ix && xx < fillEnd;
+                    c.drawPixel(xx, yy, onFill ? 1 : 0);
+                  }
+                });
+  }
+  return batteryIconWidth(h);
+}
+
+int16_t wifiIconWidth(int16_t h) { return static_cast<int16_t>(h * 13 / 10 + 1); }
+
+// WiFi 扇形：底部中心为原点，±45° 内一个圆点 + 两道弧。
+bool wifiBandHit(float dx, float dy, float h) {
+  if (dy <= 0.0f) return false;
+  const float r2 = dx * dx + dy * dy;
+  const float dot = 0.20f * h;
+  if (r2 <= dot * dot) return true;
+  const float ax = dx < 0.0f ? -dx : dx;
+  if (ax > dy) return false;  // ±45° 扇区外
+  const float a0 = 0.40f * h, a1 = 0.60f * h;
+  const float b0 = 0.76f * h, b1 = 0.97f * h;
+  return (r2 >= a0 * a0 && r2 <= a1 * a1) || (r2 >= b0 * b0 && r2 <= b1 * b1);
+}
+
+// state：0 未连接 1 连接中 2 已连接 3 失败 4 离线（eego::net::WifiState）。
+// 已连接=实心；连接中=空心描边；其他=空心 + 斜杠。返回宽度。
+int16_t drawWifiIcon(PortraitCanvas& c, int16_t x, int16_t y, int16_t h, int state) {
+  const int16_t w = wifiIconWidth(h);
+  const float ox = static_cast<float>(w) / 2.0f;
+  const float oy = static_cast<float>(h) - 0.5f;
+  const float fh = static_cast<float>(h);
+  const bool solid = (state == 2);
+  auto hit = [&](int16_t xx, int16_t yy) {
+    if (xx < 0 || yy < 0 || xx >= w || yy >= h) return false;
+    return wifiBandHit(static_cast<float>(xx) + 0.5f - ox, oy - (static_cast<float>(yy) + 0.5f),
+                       fh);
+  };
+  for (int16_t yy = 0; yy < h; yy++) {
+    for (int16_t xx = 0; xx < w; xx++) {
+      if (!hit(xx, yy)) continue;
+      const bool edge = !hit(static_cast<int16_t>(xx - 1), yy) ||
+                        !hit(static_cast<int16_t>(xx + 1), yy) ||
+                        !hit(xx, static_cast<int16_t>(yy - 1)) ||
+                        !hit(xx, static_cast<int16_t>(yy + 1));
+      if (solid || edge) {
+        c.drawPixel(static_cast<int16_t>(x + xx), static_cast<int16_t>(y + yy), 0);
+      }
+    }
+  }
+  if (state != 1 && !solid) {
+    // 斜杠：白色描边隔开扇形后再画 2px 黑线
+    const int16_t x1 = static_cast<int16_t>(x + w - 1);
+    const int16_t y1 = static_cast<int16_t>(y + h - 1);
+    c.drawLine(static_cast<int16_t>(x - 1), y, static_cast<int16_t>(x1 - 1), y1, 1);
+    c.drawLine(static_cast<int16_t>(x + 2), y, static_cast<int16_t>(x1 + 2), y1, 1);
+    c.drawLine(x, y, x1, y1, 0);
+    c.drawLine(static_cast<int16_t>(x + 1), y, static_cast<int16_t>(x1 + 1), y1, 0);
+  }
+  return w;
+}
+
+// 状态/帮助页的「分节标题 + 标签/值」列表（S3 与帮助页共用同一排版）。
+int16_t drawKvList(PortraitCanvas& c, const std::vector<std::pair<std::string, std::string>>& rows,
+                   int16_t y) {
+  const int16_t lh = lineHeight(style::kSmall.scale);
+  const int16_t fh = fontH(style::kSmall.scale);
+  for (const auto& row : rows) {
+    if (y + fh > geom::kContentBottom) break;
+    if (row.second.empty()) {
+      // 分节标题 + 深灰下划线
+      textFit(c, geom::kInnerX, y, geom::kInnerW, row.first.c_str(), style::kCaptionStrong);
+      hline(c, geom::kInnerX, static_cast<int16_t>(y + fh + 3), geom::kInnerW, kRuleGray);
+      y = static_cast<int16_t>(y + fh + 10);
+    } else {
+      textFit(c, geom::kInnerX, y, static_cast<int16_t>(kKvLabelW - 8), row.first.c_str(),
+              style::kCaption);
+      textFit(c, static_cast<int16_t>(geom::kInnerX + kKvLabelW), y,
+              static_cast<int16_t>(geom::kInnerW - kKvLabelW), row.second.c_str(),
+              style::kSmall);
+      y = static_cast<int16_t>(y + lh);
+    }
+  }
+  return y;
 }
 
 }  // namespace
@@ -107,20 +318,25 @@ void sanitizeClamped(std::string& s, size_t maxChars) {
   s.swap(out);
 }
 
+int16_t lineHeight(int16_t scale) {
+  return static_cast<int16_t>(fontH(scale) + 4 * scale);
+}
+
 int16_t drawTextFit(PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW,
                     const char* text, int16_t scale, bool bold, uint8_t gray) {
   if (text == nullptr || *text == '\0' || maxW <= 0) return 0;
+  const int16_t extra = boldExtra(bold, scale);
   std::string s(text);
-  if (textW(s.c_str(), scale) <= maxW) {
+  if (textW(s.c_str(), scale) + extra <= maxW) {
     textGray(c, x, y, s.c_str(), scale, gray, bold);
-    return textW(s.c_str(), scale);
+    return static_cast<int16_t>(textW(s.c_str(), scale) + extra);
   }
   // 逐个字符回退直到 "..." 放得下（n≤120，O(n²) 可接受）
   while (!s.empty()) {
     std::string t = s + "...";
-    if (textW(t.c_str(), scale) <= maxW) {
+    if (textW(t.c_str(), scale) + extra <= maxW) {
       textGray(c, x, y, t.c_str(), scale, gray, bold);
-      return textW(t.c_str(), scale);
+      return static_cast<int16_t>(textW(t.c_str(), scale) + extra);
     }
     // 去最后一个 UTF-8 字符
     size_t cut = s.size() - 1;
@@ -128,13 +344,14 @@ int16_t drawTextFit(PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW,
     s.erase(cut);
   }
   textGray(c, x, y, "...", scale, gray, bold);
-  return textW("...", scale);
+  return static_cast<int16_t>(textW("...", scale) + extra);
 }
 
 int16_t drawTextWrapped(PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW,
                         const char* text, int16_t scale, int16_t lineH, int16_t maxLines,
-                        uint8_t gray) {
+                        uint8_t gray, bool bold) {
   if (text == nullptr || *text == '\0' || maxLines <= 0) return 0;
+  const int16_t fitW = static_cast<int16_t>(maxW - boldExtra(bold, scale));
   std::string s(text);
   int16_t line = 0;
   size_t pos = 0;
@@ -146,7 +363,7 @@ int16_t drawTextWrapped(PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW,
       const unsigned char b = static_cast<unsigned char>(s[end]);
       const size_t len = utf8CharLen(b);
       std::string probe = s.substr(pos, end - pos + len);
-      if (textW(probe.c_str(), scale) > maxW) break;
+      if (textW(probe.c_str(), scale) > fitW) break;
       if (b == ' ') lastSpace = end;
       end += len;
     }
@@ -160,14 +377,14 @@ int16_t drawTextWrapped(PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW,
     }
     if (lastLine && more) {
       // 末行截断加省略号
-      while (!cur.empty() && textW((cur + "...").c_str(), scale) > maxW) {
+      while (!cur.empty() && textW((cur + "...").c_str(), scale) > fitW) {
         size_t cut = cur.size() - 1;
         while (cut > 0 && (static_cast<unsigned char>(cur[cut]) & 0xC0) == 0x80) cut--;
         cur.erase(cut);
       }
       cur += "...";
     }
-    textGray(c, x, static_cast<int16_t>(y + line * lineH), cur.c_str(), scale, gray);
+    textGray(c, x, static_cast<int16_t>(y + line * lineH), cur.c_str(), scale, gray, bold);
     line++;
     pos = end;
     if (!lastLine && pos >= s.size()) break;
@@ -187,88 +404,116 @@ uint8_t severityTextGray(uint8_t severity) {
   return severity == 0 ? 0 : 15;  // 浅灰底配黑字，其余白字
 }
 
-void drawPowerStatusIcon(PortraitCanvas& c, int16_t x, int16_t y, bool mains, bool charging) {
-  if (mains) {
-    c.fillRect(x + 7, y, 4, 1, 0);
-    c.fillRect(x + 5, static_cast<int16_t>(y + 1), 6, 2, 0);
-    c.fillRect(x + 3, static_cast<int16_t>(y + 3), 8, 2, 0);
-    c.fillRect(x + 2, static_cast<int16_t>(y + 5), 10, 2, 0);
-    c.fillRect(x + 5, static_cast<int16_t>(y + 7), 5, 2, 0);
-    c.fillRect(x + 4, static_cast<int16_t>(y + 9), 4, 3, 0);
-    c.fillRect(x + 3, static_cast<int16_t>(y + 12), 3, 3, 0);
-    c.fillRect(x + 2, static_cast<int16_t>(y + 15), 2, 3, 0);
-  } else {
-    c.drawRect(x, static_cast<int16_t>(y + 4), 14, 16, 0);
-    c.fillRect(x + 14, y + 9, 2, 6, 0);
-    if (charging) c.fillRect(x + 2, y + 6, 10, 12, 0);
-  }
-}
-
 // ── 状态栏 ──────────────────────────────────────────────────────────────────
+//
+// 左：时间；右（自右向左）：电量% · 6px · 电池 · 12px · WiFi（未连接时其左侧附状态文字）；
+// 中：配网/AP 徽章与静音计数，放不下则依次省略。全部在 kStatusBarH 内垂直居中。
 
 void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
   const int16_t x = geom::kContentX;
   const int16_t y = geom::kContentY;
   const int16_t w = geom::kContentW;
+  const int16_t barH = static_cast<int16_t>(geom::kStatusBarH - 1);  // 末行为分隔线
   c.fillRect(x, y, w, geom::kStatusBarH, 1);  // 白底
-  c.drawLine(x, static_cast<int16_t>(y + geom::kStatusBarH - 1),
-             static_cast<int16_t>(x + w - 1), static_cast<int16_t>(y + geom::kStatusBarH - 1),
-             0);
+  c.drawLine(x, static_cast<int16_t>(y + barH), static_cast<int16_t>(x + w - 1),
+             static_cast<int16_t>(y + barH), 0);
 
-  // 左：时间（RTC 有效时 MM-DD HH:MM，否则 --:--）
-  textGray(c, x + 8, static_cast<int16_t>(y + 6), m.timeText, 2, 0, true);
+  TextStyle body = style::kBody;
+  if (fontH(body.scale) > barH - 4) body.scale = 1;
+  TextStyle strong = body;
+  strong.bold = true;
+  TextStyle muted = body;
+  muted.gray = 6;
+  const int16_t ty = centerY(y, barH, body.scale);
+  // 图标高 ≈ 状态文字大写/数字字高（行高的 ~45%）
+  const int16_t capH = std::max<int16_t>(12, static_cast<int16_t>(fontH(body.scale) * 9 / 20));
 
-  // 中：WiFi 状态居中；电源模式以小图标显示在电量旁，避免遮挡时间
-  const char* wifi = tr(Str::WifiDisconnected);
-  switch (m.wifiState) {
-    case 1: wifi = tr(Str::WifiConnecting); break;
-    case 2: wifi = tr(Str::WifiConnected); break;
-    case 3: wifi = tr(Str::WifiFailed); break;
-    case 4: wifi = tr(Str::WifiOffline); break;
-    default: break;
+  // 左：时间
+  const int16_t leftEnd = static_cast<int16_t>(
+      geom::kInnerX + drawTextFit(c, geom::kInnerX, ty, static_cast<int16_t>(w / 2 - geom::kPadX),
+                                  m.timeText, strong.scale, strong.bold, strong.gray));
+
+  // 右：电量% → 电池 → WiFi
+  int16_t rx = geom::kInnerRight;
+  const bool hasBattery = m.batMv > 0;  // 0 mV = 无电池读数（常供电）
+  if (hasBattery) {
+    char bat[8];
+    snprintf(bat, sizeof(bat), "%u%%", static_cast<unsigned>(std::min<int>(m.batPercent, 100)));
+    rx = static_cast<int16_t>(rx - styleW(bat, body));
+    text(c, rx, ty, bat, body);
+    rx = static_cast<int16_t>(rx - 6);
   }
-  const int16_t wifiW = textW(wifi, 2);
-  const int16_t minCx = x + 130;
-  const int16_t maxCx = static_cast<int16_t>(x + w - 130 - wifiW);
-  int16_t cx = static_cast<int16_t>(x + (w - wifiW) / 2);
-  if (maxCx < minCx) {
-    cx = minCx;
-  } else {
-    if (cx < minCx) cx = minCx;
-    if (cx > maxCx) cx = maxCx;
+  const int16_t batH = static_cast<int16_t>(capH & ~1);
+  rx = static_cast<int16_t>(rx - batteryIconWidth(batH));
+  // 无电池（纯外接供电）= 满格 + 闪电；充电 = 实际电量 + 闪电
+  drawBatteryIcon(c, rx, static_cast<int16_t>(y + (barH - batH) / 2), batH,
+                  hasBattery ? m.batPercent : 100, m.charging || !hasBattery);
+  rx = static_cast<int16_t>(rx - 12);
+
+  const int16_t wifiH = static_cast<int16_t>(capH + 2);
+  rx = static_cast<int16_t>(rx - wifiIconWidth(wifiH));
+  drawWifiIcon(c, rx, static_cast<int16_t>(y + (barH - wifiH) / 2), wifiH, m.wifiState);
+  if (m.wifiState != 2) {
+    const char* wifi = tr(Str::WifiDisconnected);
+    switch (m.wifiState) {
+      case 1: wifi = tr(Str::WifiConnecting); break;
+      case 3: wifi = tr(Str::WifiFailed); break;
+      case 4: wifi = tr(Str::WifiOffline); break;
+      default: break;
+    }
+    const int16_t avail = static_cast<int16_t>(rx - 6 - (leftEnd + 12));
+    const int16_t maxW = std::min<int16_t>(avail, 160);
+    if (maxW >= styleW("...", muted) + textW("W", muted.scale)) {
+      const int16_t lw = std::min(styleW(wifi, muted), maxW);
+      rx = static_cast<int16_t>(rx - 6 - lw);
+      textFit(c, rx, ty, lw, wifi, muted);
+    }
   }
-  const int16_t wifiMaxW = static_cast<int16_t>(x + w - 124 - cx);
-  if (wifiMaxW > 40) {
-    cx = static_cast<int16_t>(cx + drawTextFit(c, cx, static_cast<int16_t>(y + 6), wifiMaxW,
-                                               wifi, 2, true, 6) +
-                              10);
-  }
-  if ((m.portalOpen || m.apFallback) && cx < x + w - 200) {
-    const char* badge = m.portalOpen ? tr(Str::PortalOpen) : tr(Str::ApFallback);
-    textGray(c, cx, static_cast<int16_t>(y + 6), badge, 1, 0, true);
-    cx = static_cast<int16_t>(cx + textW(badge, 1) + 10);
-  }
-  if (m.mutedCount > 0 && cx < x + w - 110) {
-    char mute[16];
+
+  // 中：徽章（配网窗口/AP 回退为黑底白字胶囊，静音为灰字）；放不下则省略
+  const int16_t mx0 = static_cast<int16_t>(leftEnd + 12);
+  const int16_t mx1 = static_cast<int16_t>(rx - 12);
+  const char* portal = m.portalOpen ? tr(Str::PortalOpen)
+                                    : (m.apFallback ? tr(Str::ApFallback) : nullptr);
+  char mute[24] = "";
+  if (m.mutedCount > 0) {
     snprintf(mute, sizeof(mute), "%s%u", tr(Str::Mute), static_cast<unsigned>(m.mutedCount));
-    textGray(c, cx, static_cast<int16_t>(y + 6), mute, 1, 6);
+  }
+  const int16_t pillPad = 8;
+  const int16_t portalW =
+      portal != nullptr ? static_cast<int16_t>(styleW(portal, strong) + 2 * pillPad) : 0;
+  const int16_t muteW = mute[0] != '\0' ? styleW(mute, muted) : 0;
+  const int16_t span = static_cast<int16_t>(mx1 - mx0);
+  bool showPortal = portalW > 0;
+  bool showMute = muteW > 0;
+  auto total = [&]() {
+    return static_cast<int16_t>((showPortal ? portalW : 0) + (showMute ? muteW : 0) +
+                                (showPortal && showMute ? 10 : 0));
+  };
+  if (total() > span) showMute = false;
+  if (total() > span) showPortal = false;
+  if (total() > 0) {
+    int16_t bx = static_cast<int16_t>(mx0 + (span - total()) / 2);
+    if (showPortal) {
+      const int16_t pillH = std::min<int16_t>(static_cast<int16_t>(fontH(body.scale) + 4),
+                                              static_cast<int16_t>(barH - 4));
+      const int16_t py = static_cast<int16_t>(y + (barH - pillH) / 2);
+      c.fillRoundRectGray(bx, py, portalW, pillH, static_cast<int16_t>(pillH / 2), 0);
+      TextStyle onDark = strong;
+      onDark.gray = 15;
+      text(c, static_cast<int16_t>(bx + pillPad), ty, portal, onDark);
+      bx = static_cast<int16_t>(bx + portalW + 10);
+    }
+    if (showMute) text(c, bx, ty, mute, muted);
   }
 
-  // 右：供电图标 + 电池百分比
-  drawPowerStatusIcon(c, static_cast<int16_t>(x + w - 112), static_cast<int16_t>(y + 8),
-                      m.mains, m.charging);
-  char bat[24];
-  snprintf(bat, sizeof(bat), "%u%%%s", static_cast<unsigned>(m.batPercent),
-           m.charging ? "+" : "");
-  textRightGray(c, static_cast<int16_t>(x + w - 88), static_cast<int16_t>(y + 6), 80, bat, 2,
-                0, true);
-
-  // 横幅（操作结果/二次确认）：内容区顶部 28px 浅灰条
+  // 横幅（操作结果/二次确认）：内容区顶部 kBannerH 浅灰条（标题在其下方）
   if (m.banner[0] != '\0') {
-    c.fillRect(x, geom::kContentTop, w, 28, 1);
-    c.fillRoundRectGray(x, geom::kContentTop, w, 28, 4, 11);
-    textGray(c, static_cast<int16_t>(x + 10), static_cast<int16_t>(geom::kContentTop + 7),
-             m.banner, 1, 0, true);
+    c.fillRect(x, geom::kContentTop, w, geom::kBannerH, 1);
+    c.fillRoundRectGray(x, geom::kContentTop, w, geom::kBannerH, 4, 11);
+    textFit(c, static_cast<int16_t>(x + geom::kRowPadX),
+            centerY(geom::kContentTop, geom::kBannerH, style::kCaptionStrong.scale),
+            static_cast<int16_t>(w - 2 * geom::kRowPadX), m.banner, style::kCaptionStrong);
   }
 }
 
@@ -276,29 +521,40 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
 
 void drawSoftKeys(PortraitCanvas& c, const SoftKeyModel* keys, size_t n, size_t focused) {
   if (keys == nullptr || n == 0) return;
-  const int16_t gap = 8;
+  const int16_t gap = geom::kSoftKeyGap;
   const int16_t totalW = geom::kContentW;
-  const int16_t kw = static_cast<int16_t>((totalW - gap * (n - 1)) / n);
+  const int16_t kw = static_cast<int16_t>((totalW - gap * static_cast<int16_t>(n - 1)) /
+                                          static_cast<int16_t>(n));
+  const int16_t inner = static_cast<int16_t>(kw - 12);
+  // 整栏统一字号：取所有键都放得下（含选中粗体偏移）的最大倍数，最大 3x
+  int16_t scale = 3;
+  for (; scale > 1; scale--) {
+    if (fontH(scale) > geom::kSoftKeyH - 8) continue;
+    bool fits = true;
+    for (size_t i = 0; i < n && fits; i++) {
+      const char* label = keys[i].label != nullptr ? keys[i].label : "";
+      if (textW(label, scale) + boldExtra(true, scale) > inner) fits = false;
+    }
+    if (fits) break;
+  }
+  const int16_t ty = centerY(geom::kSoftKeyY, geom::kSoftKeyH, scale);
   for (size_t i = 0; i < n; i++) {
-    const int16_t x = static_cast<int16_t>(geom::kContentX + i * (kw + gap));
+    const int16_t x = static_cast<int16_t>(geom::kContentX + static_cast<int16_t>(i) * (kw + gap));
     const bool sel = (i == focused);
-    int16_t scale = 3;
-    if (textW(keys[i].label, 3) > kw - 12 || fontH(3) > geom::kSoftKeyH - 8) scale = 2;
-    if (textW(keys[i].label, scale) > kw - 12 || fontH(scale) > geom::kSoftKeyH - 8) scale = 1;
-    const int16_t tw = textW(keys[i].label, scale);
+    const char* label = keys[i].label != nullptr ? keys[i].label : "";
+    const int16_t tw = static_cast<int16_t>(textW(label, scale) + boldExtra(sel, scale));
     const int16_t tx = static_cast<int16_t>(x + (kw - tw) / 2);
-    const int16_t ty = static_cast<int16_t>(geom::kSoftKeyY + (geom::kSoftKeyH - fontH(scale)) / 2);
     const int16_t textX = tx < x + 6 ? static_cast<int16_t>(x + 6) : tx;
     if (!keys[i].enabled) {
       // 禁用：浅灰底 + 中灰字（不可用 BW 描边，白边在白底上不可见）
       c.fillRoundRectGray(x, geom::kSoftKeyY, kw, geom::kSoftKeyH, 8, 12);
-      drawTextFit(c, textX, ty, kw - 12, keys[i].label, scale, false, 6);
+      drawTextFit(c, textX, ty, inner, label, scale, false, 6);
     } else if (sel) {
       c.fillRoundRectGray(x, geom::kSoftKeyY, kw, geom::kSoftKeyH, 8, 0);
-      drawTextFit(c, textX, ty, kw - 12, keys[i].label, scale, true, 15);
+      drawTextFit(c, textX, ty, inner, label, scale, true, 15);
     } else {
       c.drawRoundRect(x, geom::kSoftKeyY, kw, geom::kSoftKeyH, 8, 0);
-      drawTextFit(c, textX, ty, kw - 12, keys[i].label, scale, false, 0);
+      drawTextFit(c, textX, ty, inner, label, scale, false, 0);
     }
   }
 }
@@ -311,12 +567,13 @@ void drawS0(PortraitCanvas& c, const S0Model& m) {
   const int16_t w = geom::kContentW;
 
   if (m.empty) {
-    // 空态：浅灰圆环 + 居中提示
-    c.drawCircle(static_cast<int16_t>(x + w / 2), 300, 60, 0);
-    c.drawCircle(static_cast<int16_t>(x + w / 2), 300, 44, 0);
-    const char* msg = tr(Str::NoAlerts);
-    const int16_t tw = textW(msg, 3);
-    textGray(c, static_cast<int16_t>(x + (w - tw) / 2), 390, msg, 3, 0, true);
+    // 空态：双圆环 + 居中提示（正文区垂直居中略偏上）
+    const int16_t cx = static_cast<int16_t>(x + w / 2);
+    const int16_t cy = static_cast<int16_t>((geom::kBodyTop + geom::kContentBottom) / 2 - 48);
+    c.drawCircle(cx, cy, 60, 0);
+    c.drawCircle(cx, cy, 44, 0);
+    textCentered(c, geom::kInnerX, geom::kInnerW, static_cast<int16_t>(cy + 60 + 24),
+                 tr(Str::NoAlerts), style::kHeadline);
   } else {
     struct Card {
       size_t count;
@@ -326,34 +583,44 @@ void drawS0(PortraitCanvas& c, const S0Model& m) {
     const Card cards[3] = {{m.critical, Str::SevCritical, 2},
                            {m.warning, Str::SevWarning, 1},
                            {m.info, Str::SevInfo, 0}};
-    int16_t y = static_cast<int16_t>(geom::kContentTop + 64);
+    int16_t y = geom::kOverviewCardsTop;
     for (const Card& card : cards) {
-      c.fillRoundRectGray(x, y, w, 130, 12, severityFillGray(card.sev));
-      textGray(c, static_cast<int16_t>(x + 28), static_cast<int16_t>(y + 34),
-               tr(card.label), 3, severityTextGray(card.sev), true);
+      c.fillRoundRectGray(x, y, w, geom::kCardH, 12, severityFillGray(card.sev));
+      const uint8_t ink = severityTextGray(card.sev);
+      TextStyle num = style::kDisplay;
+      num.gray = ink;
+      if (fontH(num.scale) > geom::kCardH - 8) num.scale = 4;
       char cnt[16];
       snprintf(cnt, sizeof(cnt), "%u", static_cast<unsigned>(card.count));
-      textRightGray(c, static_cast<int16_t>(x + w - 228), static_cast<int16_t>(y + 22), 200,
-                    cnt, 6, severityTextGray(card.sev), true);
-      y = static_cast<int16_t>(y + 130 + 10);
+      const int16_t right = static_cast<int16_t>(x + w - geom::kCardPadX);
+      const int16_t numW = styleW(cnt, num);
+      textRight(c, right, centerY(y, geom::kCardH, num.scale), numW, cnt, num);
+      TextStyle label = style::kHeadline;
+      label.gray = ink;
+      textFit(c, static_cast<int16_t>(x + geom::kCardPadX), centerY(y, geom::kCardH, label.scale),
+              static_cast<int16_t>(w - 2 * geom::kCardPadX - numW - 16), tr(card.label), label);
+      y = static_cast<int16_t>(y + geom::kCardH + geom::kCardGap);
     }
     char line[96];
     snprintf(line, sizeof(line), "%s %u · %s %u · %s %u", tr(Str::ActiveTotal),
              static_cast<unsigned>(m.activeTotal), tr(Str::AckedCount),
              static_cast<unsigned>(m.acked), tr(Str::MutedCount),
              static_cast<unsigned>(m.muted));
-    textGray(c, static_cast<int16_t>(x + 8), static_cast<int16_t>(y + 12), line, 1, 0, true);
+    y = static_cast<int16_t>(geom::kOverviewCardsBottom + 12);
+    textFit(c, geom::kInnerX, y, geom::kInnerW, line, style::kCaptionStrong);
     snprintf(line, sizeof(line), "%s %u/%u", tr(Str::SourcesHealthy),
              static_cast<unsigned>(m.sourcesOk), static_cast<unsigned>(m.sourcesTotal));
-    textGray(c, static_cast<int16_t>(x + 8), static_cast<int16_t>(y + 40), line, 1, 6);
+    textFit(c, geom::kInnerX, static_cast<int16_t>(y + lineHeight(style::kCaption.scale)),
+            geom::kInnerW, line, style::kCaption);
   }
 
-  // 更新时间（空态/非空态都画在底部）
+  // 更新时间（空态/非空态都画在正文区底部）
   if (m.updatedText[0] != '\0') {
     char upd[48];
     snprintf(upd, sizeof(upd), "%s %s", tr(Str::UpdatedAt), m.updatedText);
-    textGray(c, static_cast<int16_t>(x + 8), static_cast<int16_t>(geom::kContentBottom - 22),
-             upd, 1, 6);
+    textFit(c, geom::kInnerX,
+            static_cast<int16_t>(geom::kContentBottom - fontH(style::kCaption.scale) - 4),
+            geom::kInnerW, upd, style::kCaption);
   }
 }
 
@@ -362,105 +629,131 @@ void drawS0(PortraitCanvas& c, const S0Model& m) {
 void drawS1(PortraitCanvas& c, const S1Model& m) {
   const int16_t x = geom::kContentX;
   const int16_t w = geom::kContentW;
-  char head[48];
-  snprintf(head, sizeof(head), tr(Str::AlertsCountFmt), static_cast<unsigned>(m.total));
-  textGray(c, static_cast<int16_t>(x + 8), static_cast<int16_t>(geom::kContentTop + 28), head,
-           2, 0, true);
   char pg[32];
   snprintf(pg, sizeof(pg), tr(Str::PageFmt), static_cast<unsigned>(m.page + 1),
            static_cast<unsigned>(m.pageCount));
-  textRightGray(c, static_cast<int16_t>(x + w - 168), static_cast<int16_t>(geom::kContentTop + 34),
-                160, pg, 1, 6);
+  const int16_t pgW = std::min<int16_t>(styleW(pg, style::kCaption), 160);
+  textRight(c, geom::kInnerRight, centerY(geom::kTitleY, geom::kTitleH, style::kCaption.scale),
+            pgW, pg, style::kCaption);
+  char head[48];
+  snprintf(head, sizeof(head), tr(Str::AlertsCountFmt), static_cast<unsigned>(m.total));
+  drawTitleText(c, head, static_cast<int16_t>(geom::kInnerW - pgW - 16));
 
   if (m.rows.empty()) {
-    const int16_t tw = textW(tr(Str::EmptyList), 2);
-    textGray(c, static_cast<int16_t>(x + (w - tw) / 2), 320, tr(Str::EmptyList), 2, 6, true);
+    textCentered(c, geom::kInnerX, geom::kInnerW,
+                 centerY(geom::kBodyTop, static_cast<int16_t>(geom::kContentBottom - geom::kBodyTop),
+                         style::kBodyMuted.scale),
+                 tr(Str::EmptyList), style::kBodyMuted);
     return;
   }
 
-  int16_t y = static_cast<int16_t>(geom::kContentTop + 60);
+  const int16_t boxX = static_cast<int16_t>(x + 2);
+  const int16_t boxW = static_cast<int16_t>(w - 4);
+  const int16_t boxH = static_cast<int16_t>(geom::kRowH - 4);
+  const int16_t titleH = fontH(style::kBodyStrong.scale);
+  const int16_t subH = fontH(style::kCaption.scale);
+  const int16_t blockGap = 6;
+  const int16_t blockH = static_cast<int16_t>(titleH + blockGap + subH);
+  const int16_t textX = static_cast<int16_t>(boxX + geom::kRowPadX + geom::kSevChip + 16);
+  const int16_t right = static_cast<int16_t>(boxX + boxW - geom::kRowPadX);
+
   for (size_t i = 0; i < m.rows.size() && i < static_cast<size_t>(geom::kRowsPerPage); i++) {
     const S1RowModel& row = m.rows[i];
     const bool sel = (i == m.selected);
+    const int16_t y = static_cast<int16_t>(geom::kTableRowTop + static_cast<int16_t>(i) * geom::kRowH);
     if (sel) {
-      c.fillRoundRectGray(static_cast<int16_t>(x + 2), static_cast<int16_t>(y - 4),
-                          static_cast<int16_t>(w - 4), static_cast<int16_t>(geom::kRowH - 6),
-                          8, 11);
-      c.drawRoundRect(static_cast<int16_t>(x + 2), static_cast<int16_t>(y - 4),
-                      static_cast<int16_t>(w - 4), static_cast<int16_t>(geom::kRowH - 6), 8,
-                      0);
+      c.fillRoundRectGray(boxX, y, boxW, boxH, 8, 11);
+      c.drawRoundRect(boxX, y, boxW, boxH, 8, 0);
     }
-    drawSevChip(c, static_cast<int16_t>(x + 14), static_cast<int16_t>(y + 12), 56,
-                row.severity);
-    drawTextFit(c, static_cast<int16_t>(x + 86), static_cast<int16_t>(y + 8),
-                static_cast<int16_t>(w - 230), row.title.c_str(), 2, true, 0);
-    drawTextFit(c, static_cast<int16_t>(x + 86), static_cast<int16_t>(y + 42),
-                static_cast<int16_t>(w - 230), row.subtitle.c_str(), 1, false, 6);
-    // 右侧：状态 + 相对时间（右缘对齐内容区 -16）
-    textRightGray(c, static_cast<int16_t>(x + w - 136), static_cast<int16_t>(y + 8), 120,
-                  stateLabel(row.state), 1, row.state == 0 ? 0 : 6, row.state == 0);
-    textRightGray(c, static_cast<int16_t>(x + w - 136), static_cast<int16_t>(y + 42), 120,
-                  row.age, 1, 6);
+    drawSevChip(c, static_cast<int16_t>(boxX + geom::kRowPadX),
+                static_cast<int16_t>(y + (boxH - geom::kSevChip) / 2), row.severity);
+    const int16_t ty = static_cast<int16_t>(y + (boxH - blockH) / 2);
+    const int16_t sy = static_cast<int16_t>(ty + titleH + blockGap);
+
+    // 右列：状态（与标题行垂直居中）+ 相对时间（与副标题行对齐）
+    const TextStyle stateSt = row.state == 0 ? style::kCaptionStrong : style::kCaption;
+    const int16_t rightW = std::min<int16_t>(
+        static_cast<int16_t>(std::max(styleW(stateLabel(row.state), stateSt),
+                                      styleW(row.age, style::kCaption))),
+        140);
+    textRight(c, right, static_cast<int16_t>(ty + (titleH - subH) / 2), rightW,
+              stateLabel(row.state), stateSt);
+    textRight(c, right, sy, rightW, row.age, style::kCaption);
+
+    const int16_t textMaxW = static_cast<int16_t>(right - rightW - 16 - textX);
+    textFit(c, textX, ty, textMaxW, row.title.c_str(), style::kBodyStrong);
+    textFit(c, textX, sy, textMaxW, row.subtitle.c_str(), style::kCaption);
     if (!sel) {
-      c.drawLine(static_cast<int16_t>(x + 8), static_cast<int16_t>(y + geom::kRowH - 8),
-                 static_cast<int16_t>(x + w - 8), static_cast<int16_t>(y + geom::kRowH - 8),
-                 1);
+      hline(c, static_cast<int16_t>(boxX + geom::kRowPadX),
+            static_cast<int16_t>(y + geom::kRowH - 2),
+            static_cast<int16_t>(boxW - 2 * geom::kRowPadX), kDividerGray);
     }
-    y = static_cast<int16_t>(y + geom::kRowH);
   }
 }
 
 // ── S2 详情 ─────────────────────────────────────────────────────────────────
 
 void drawS2(PortraitCanvas& c, const S2Model& m) {
-  const int16_t x = geom::kContentX;
-  const int16_t w = geom::kContentW;
-  int16_t y = static_cast<int16_t>(geom::kContentTop + 32);
+  int16_t y = geom::kTitleY;
 
-  drawSevChip(c, static_cast<int16_t>(x + 8), y, 40, m.severity);
-  drawTextFit(c, static_cast<int16_t>(x + 60), static_cast<int16_t>(y + 8),
-                static_cast<int16_t>(w - 180), m.typeName.c_str(), 2, true, 0);
-  textRightGray(c, static_cast<int16_t>(x + w - 122), static_cast<int16_t>(y + 12), 110,
-                stateLabel(m.state), 1, 6);
-  y = static_cast<int16_t>(y + 52);
+  // 头部：严重度芯片 + 类型名（正文粗体，垂直居中于芯片）+ 右侧状态
+  drawSevChip(c, geom::kInnerX, y, m.severity);
+  const TextStyle stateSt = style::kCaption;
+  const int16_t stateW = std::min<int16_t>(styleW(stateLabel(m.state), stateSt), 140);
+  textRight(c, geom::kInnerRight, centerY(y, geom::kSevChip, stateSt.scale), stateW,
+            stateLabel(m.state), stateSt);
+  const int16_t typeX = static_cast<int16_t>(geom::kInnerX + geom::kSevChip + 12);
+  textFit(c, typeX, centerY(y, geom::kSevChip, style::kBodyStrong.scale),
+          static_cast<int16_t>(geom::kInnerRight - stateW - 16 - typeX), m.typeName.c_str(),
+          style::kBodyStrong);
+  y = static_cast<int16_t>(y + geom::kSevChip + 12);
 
-  // 标题（粗体，最多 2 行）
-  y = static_cast<int16_t>(y + drawTextWrapped(c, static_cast<int16_t>(x + 8), y,
-                                               static_cast<int16_t>(w - 16), m.title.c_str(),
-                                               2, 26, 2, 0) *
-                                26 +
-                            6);
-  // 消息（最多 5 行）
-  y = static_cast<int16_t>(y + drawTextWrapped(c, static_cast<int16_t>(x + 8), y,
-                                               static_cast<int16_t>(w - 16),
-                                               m.message.c_str(), 1, 18, 5, 0) *
-                                18 +
-                            8);
+  // 标题（正文粗体，最多 2 行）
+  const int16_t lh2 = lineHeight(style::kBodyStrong.scale);
+  const int16_t titleLines = drawTextWrapped(c, geom::kInnerX, y, geom::kInnerW, m.title.c_str(),
+                                             style::kBodyStrong.scale, lh2, 2,
+                                             style::kBodyStrong.gray, style::kBodyStrong.bold);
+  y = static_cast<int16_t>(y + titleLines * lh2 + 6);
 
-  // 元信息两列（最多 8 项；标签列宽 60px，值列紧随）
-  const int16_t colW = static_cast<int16_t>((w - 16) / 2);
+  // 消息（小字，最多 5 行，且不越过正文区底部）
+  const int16_t lh1 = lineHeight(style::kSmall.scale);
+  const int16_t fh1 = fontH(style::kSmall.scale);
+  const int16_t msgMax = std::max<int16_t>(
+      0, std::min<int16_t>(5, static_cast<int16_t>((geom::kContentBottom - y) / lh1)));
+  const int16_t msgLines = drawTextWrapped(c, geom::kInnerX, y, geom::kInnerW, m.message.c_str(),
+                                           style::kSmall.scale, lh1, msgMax, style::kSmall.gray);
+  y = static_cast<int16_t>(y + msgLines * lh1 + 8);
+
+  // 元信息两列（最多 8 项）：标签（说明字）+ 值（小字）
+  const int16_t colW = static_cast<int16_t>(geom::kInnerW / 2);
+  const int16_t metaPitch = lh1;
   size_t i = 0;
   for (; i < m.meta.size() && i < 8; i++) {
-    const int16_t cx = static_cast<int16_t>(x + 8 + (i % 2) * colW);
-    const int16_t cy = static_cast<int16_t>(y + (i / 2) * 22);
-    drawTextFit(c, cx, cy, 60, m.meta[i].first.c_str(), 1, false, 6);
-    drawTextFit(c, static_cast<int16_t>(cx + 66), cy, static_cast<int16_t>(colW - 74),
-                m.meta[i].second.c_str(), 1, false, 0);
+    const int16_t cx = static_cast<int16_t>(geom::kInnerX + static_cast<int16_t>(i % 2) * colW);
+    const int16_t cy = static_cast<int16_t>(y + static_cast<int16_t>(i / 2) * metaPitch);
+    if (cy + fh1 > geom::kContentBottom) break;
+    textFit(c, cx, cy, static_cast<int16_t>(kMetaLabelW - 6), m.meta[i].first.c_str(),
+            style::kCaption);
+    textFit(c, static_cast<int16_t>(cx + kMetaLabelW), cy,
+            static_cast<int16_t>(colW - kMetaLabelW - 8), m.meta[i].second.c_str(),
+            style::kSmall);
   }
-  if (!m.meta.empty()) {
-    y = static_cast<int16_t>(y + ((i + 1) / 2) * 22 + 6);
+  if (i > 0) {
+    y = static_cast<int16_t>(y + static_cast<int16_t>((i + 1) / 2) * metaPitch + 6);
   }
 
   // 字段表（最多 4 行，浅灰底条）
+  const int16_t stripH = static_cast<int16_t>(fh1 + 6);
   for (size_t f = 0; f < m.fields.size() && f < 4; f++) {
-    const int16_t fy = static_cast<int16_t>(y + f * 22);
-    if (fy + 20 > geom::kContentBottom) break;
-    c.fillRoundRectGray(static_cast<int16_t>(x + 8), fy, static_cast<int16_t>(w - 16), 20, 4,
-                        12);
-    drawTextFit(c, static_cast<int16_t>(x + 16), static_cast<int16_t>(fy + 3), 150,
-                m.fields[f].first.c_str(), 1, true, 6);
-    drawTextFit(c, static_cast<int16_t>(x + 172), static_cast<int16_t>(fy + 3),
-                static_cast<int16_t>(w - 190), m.fields[f].second.c_str(), 1, false, 0);
+    const int16_t fy = static_cast<int16_t>(y + static_cast<int16_t>(f) * (stripH + 2));
+    if (fy + stripH > geom::kContentBottom) break;
+    c.fillRoundRectGray(geom::kInnerX, fy, geom::kInnerW, stripH, 4, 12);
+    const int16_t ty = centerY(fy, stripH, style::kSmall.scale);
+    textFit(c, static_cast<int16_t>(geom::kInnerX + 8), ty, static_cast<int16_t>(kFieldLabelW - 8),
+            m.fields[f].first.c_str(), style::kCaption);
+    textFit(c, static_cast<int16_t>(geom::kInnerX + kFieldLabelW + 8), ty,
+            static_cast<int16_t>(geom::kInnerW - kFieldLabelW - 16), m.fields[f].second.c_str(),
+            style::kSmall);
   }
 }
 
@@ -468,110 +761,128 @@ void drawS2(PortraitCanvas& c, const S2Model& m) {
 
 void drawS3(PortraitCanvas& c, const S3Model& m) {
   drawPageTitle(c, Str::PageStatus);
-  const int16_t x = geom::kContentX;
-  const int16_t w = geom::kContentW;
-  int16_t y = static_cast<int16_t>(geom::kContentTop + 64);
-  for (const auto& row : m.rows) {
-    if (y + 20 > geom::kContentBottom) break;
-    if (row.second.empty()) {
-      // 分节标题
-      textGray(c, static_cast<int16_t>(x + 8), y, row.first.c_str(), 1, 0, true);
-      c.drawLine(static_cast<int16_t>(x + 8), static_cast<int16_t>(y + 18),
-                 static_cast<int16_t>(x + w - 8), static_cast<int16_t>(y + 18), 1);
-      y = static_cast<int16_t>(y + 26);
-    } else {
-      drawTextFit(c, static_cast<int16_t>(x + 16), y, 110, row.first.c_str(), 1, false, 6);
-      drawTextFit(c, static_cast<int16_t>(x + 132), y, static_cast<int16_t>(w - 144),
-                  row.second.c_str(), 1, false, 0);
-      y = static_cast<int16_t>(y + 22);
-    }
-  }
-  if (!m.configValid && y + 30 < geom::kContentBottom) {
-    c.fillRoundRectGray(static_cast<int16_t>(x + 8), static_cast<int16_t>(y + 4),
-                        static_cast<int16_t>(w - 16), 24, 4, 5);
-    textGray(c, static_cast<int16_t>(x + 16), static_cast<int16_t>(y + 9),
-             tr(Str::ConfigBad), 1, 15, true);
+  const int16_t y = drawKvList(c, m.rows, geom::kBodyTop);
+  const int16_t stripH = static_cast<int16_t>(fontH(style::kCaptionStrong.scale) + 8);
+  if (!m.configValid && y + 4 + stripH <= geom::kContentBottom) {
+    const int16_t sy = static_cast<int16_t>(y + 4);
+    c.fillRoundRectGray(geom::kInnerX, sy, geom::kInnerW, stripH, 4, 5);
+    TextStyle st = style::kCaptionStrong;
+    st.gray = 15;
+    textFit(c, static_cast<int16_t>(geom::kInnerX + 8), centerY(sy, stripH, st.scale),
+            static_cast<int16_t>(geom::kInnerW - 16), tr(Str::ConfigBad), st);
   }
 }
 
 void drawHelp(PortraitCanvas& c, const S3Model& m) {
   drawPageTitle(c, Str::PageHelp);
-  const int16_t x = geom::kContentX;
-  const int16_t w = geom::kContentW;
-  int16_t y = static_cast<int16_t>(geom::kContentTop + 58);
-  for (const auto& row : m.rows) {
-    if (y + 20 > geom::kContentBottom) break;
-    if (row.second.empty()) {
-      textGray(c, static_cast<int16_t>(x + 8), y, row.first.c_str(), 1, 0, true);
-      y = static_cast<int16_t>(y + 26);
-    } else {
-      drawTextFit(c, static_cast<int16_t>(x + 12), y, 142, row.first.c_str(), 1, false, 6);
-      drawTextFit(c, static_cast<int16_t>(x + 158), y, static_cast<int16_t>(w - 170),
-                  row.second.c_str(), 1, false, 0);
-      y = static_cast<int16_t>(y + 24);
-    }
-  }
+  drawKvList(c, m.rows, geom::kBodyTop);
 }
 
 // ── S4 设置 ─────────────────────────────────────────────────────────────────
 
 void drawS4(PortraitCanvas& c, const S4Model& m) {
   drawPageTitle(c, Str::PageSettings);
+  const int16_t x = geom::kContentX;
+  const int16_t w = geom::kContentW;
+  const int16_t boxX = static_cast<int16_t>(x + 2);
+  const int16_t boxW = static_cast<int16_t>(w - 4);
+  const int16_t labelX = static_cast<int16_t>(x + geom::kRowPadX);
+  const int16_t valueRight = geom::kSettingsValueX1;
+  const TextStyle labelSt = style::kBody;
+  const TextStyle valueSt = style::kBodyMuted;
+
+  for (size_t i = 0; i < m.rows.size() && i < static_cast<size_t>(geom::kSettingsRowsPerPage);
+       i++) {
+    const S4RowModel& row = m.rows[i];
+    const bool sel = (i == m.selected);
+    const int16_t ry = static_cast<int16_t>(geom::kSettingsRowTop +
+                                            static_cast<int16_t>(i) * geom::kSettingsRowPitch);
+    if (sel) {
+      c.fillRoundRectGray(boxX, ry, boxW, geom::kSettingsRowH, 8, 11);
+      c.drawRoundRect(boxX, ry, boxW, geom::kSettingsRowH, 8, 0);
+    }
+    const int16_t ty = centerY(ry, geom::kSettingsRowH, labelSt.scale);
+
+    // 标签与值同字号；值右对齐。总宽不够时标签至多让到一半，值仍放不下则退到小字号
+    // （IP/时间等不宜省略），再不够才省略。
+    const int16_t avail = static_cast<int16_t>(valueRight - labelX - 16);
+    const int16_t lW = styleW(row.label.c_str(), labelSt);
+    const int16_t vW = row.value.empty() ? 0 : styleW(row.value.c_str(), valueSt);
+    int16_t labelMax = avail;
+    if (vW > 0) labelMax = std::max<int16_t>(static_cast<int16_t>(avail / 2),
+                                             static_cast<int16_t>(avail - vW));
+    const int16_t labelUsed = std::min(lW, labelMax);
+    textFit(c, labelX, ty, labelMax, row.label.c_str(), labelSt);
+    if (vW > 0) {
+      const int16_t valueMax = static_cast<int16_t>(avail - labelUsed);
+      TextStyle vs = valueSt;
+      if (vW > valueMax && styleW(row.value.c_str(), style::kCaption) <= valueMax) {
+        vs.scale = style::kCaption.scale;
+      }
+      textRight(c, valueRight, centerY(ry, geom::kSettingsRowH, vs.scale), valueMax,
+                row.value.c_str(), vs);
+    }
+    if (row.isAction) {
+      // 动作行右侧 › 标记
+      c.drawIcon(static_cast<int16_t>(boxX + boxW - geom::kRowPadX - 16),
+                 static_cast<int16_t>(ry + (geom::kSettingsRowH - 16) / 2),
+                 eego::ICON_CHEVRON_RIGHT_16, 16, 16, 0);
+    }
+  }
+
+  // 页码指示条：‹ 第 n/N 页 ›（箭头为可点区域，边界页置灰）
+  const bool prevOn = m.page > 0;
+  const bool nextOn = m.page + 1 < m.pageCount;
+  const geom::Rect arrows[2] = {geom::kSettingsPrevArrow, geom::kSettingsNextArrow};
+  const uint8_t* icons[2] = {eego::ICON_CHEVRON_LEFT_32, eego::ICON_CHEVRON_RIGHT_32};
+  const bool on[2] = {prevOn, nextOn};
+  for (int a = 0; a < 2; a++) {
+    const geom::Rect& r = arrows[a];
+    const int16_t ix = static_cast<int16_t>(r.x + (r.w - 32) / 2);
+    const int16_t iy = static_cast<int16_t>(r.y + (r.h - 32) / 2);
+    if (on[a]) {
+      c.drawRoundRect(r.x, r.y, r.w, r.h, 8, 0);
+      c.drawIcon(ix, iy, icons[a], 32, 32, 0);
+    } else {
+      c.fillRoundRectGray(r.x, r.y, r.w, r.h, 8, 12);
+      drawIconGray(c, ix, iy, icons[a], 32, 32, 8);
+    }
+  }
   char page[32];
   snprintf(page, sizeof(page), tr(Str::SettingsPageFmt), static_cast<unsigned>(m.page + 1),
            static_cast<unsigned>(m.pageCount));
-  textRightGray(c, geom::kContentX + geom::kContentW - 160, geom::kContentTop + 34, 152,
-                page, 1, 6);
-  const int16_t x = geom::kContentX;
-  const int16_t w = geom::kContentW;
-  int16_t y = static_cast<int16_t>(geom::kContentTop + 64);
-  for (size_t i = 0; i < m.rows.size(); i++) {
-    const S4RowModel& row = m.rows[i];
-    const bool sel = (i == m.selected);
-    if (sel) {
-      c.fillRoundRectGray(static_cast<int16_t>(x + 2), static_cast<int16_t>(y - 4),
-                          static_cast<int16_t>(w - 4), 52, 8, 11);
-      c.drawRoundRect(static_cast<int16_t>(x + 2), static_cast<int16_t>(y - 4),
-                      static_cast<int16_t>(w - 4), 52, 8, 0);
-    }
-    drawTextFit(c, static_cast<int16_t>(x + 16), static_cast<int16_t>(y + 12),
-                static_cast<int16_t>(w / 2), row.label.c_str(), 2, true, 0);
-    drawTextFit(c, static_cast<int16_t>(x + w / 2 + 40), static_cast<int16_t>(y + 14),
-                static_cast<int16_t>(w / 2 - 96), row.value.c_str(), 1, false,
-                row.isAction ? 0 : 6);
-    if (!row.isAction) {
-      // 开关/查看行右侧 chevron
-      c.drawIcon(static_cast<int16_t>(x + w - 36), static_cast<int16_t>(y + 16),
-                 eego::ICON_CHEVRON_RIGHT_16, 16, 16, 0);
-    }
-    y = static_cast<int16_t>(y + 56);
-    if (y + 48 > geom::kContentBottom) break;
-  }
+  const int16_t px0 = static_cast<int16_t>(geom::kSettingsPrevArrow.right() + 8);
+  const int16_t pw = static_cast<int16_t>(geom::kSettingsNextArrow.x - 8 - px0);
+  textCentered(c, px0, pw, centerY(geom::kSettingsPagerY, geom::kSettingsPagerH, style::kBody.scale),
+               page, style::kBody);
 }
 
 // ── 配网页 ──────────────────────────────────────────────────────────────────
 
 void drawProvision(PortraitCanvas& c, const ProvisionModel& m) {
-  const int16_t x = geom::kContentX;
-  const int16_t w = geom::kContentW;
   if (m.succeeded) {
-    const char* msg = tr(Str::ProvDone);
-    const int16_t tw = textW(msg, 2);
-    textGray(c, static_cast<int16_t>(x + (w - tw) / 2), 340, msg, 2, 0, true);
+    textCentered(c, geom::kInnerX, geom::kInnerW,
+                 centerY(geom::kBodyTop, static_cast<int16_t>(geom::kContentBottom - geom::kBodyTop),
+                         style::kTitle.scale),
+                 tr(Str::ProvDone), style::kTitle);
     return;
   }
-  textGray(c, static_cast<int16_t>(x + 24), 150, tr(Str::ProvTitle), 3, 0, true);
-  c.drawLine(static_cast<int16_t>(x + 24), 200, static_cast<int16_t>(x + w - 24), 200, 0);
+  drawPageTitle(c, Str::ProvTitle);
+  c.drawLine(geom::kInnerX, static_cast<int16_t>(geom::kBodyTop - 2),
+             static_cast<int16_t>(geom::kInnerRight - 1), static_cast<int16_t>(geom::kBodyTop - 2),
+             0);
 
-  int16_t y = 240;
+  const int16_t lh = lineHeight(style::kBody.scale);
+  int16_t y = static_cast<int16_t>(geom::kBodyTop + 16);
   const Str steps[3] = {Str::ProvStep1, Str::ProvStep2, Str::ProvStep3};
   for (Str s : steps) {
-    drawTextWrapped(c, static_cast<int16_t>(x + 24), y, static_cast<int16_t>(w - 48),
-                    tr(s), 2, 30, 2, 0);
-    y = static_cast<int16_t>(y + 76);
+    const int16_t n = drawTextWrapped(c, geom::kInnerX, y, geom::kInnerW, tr(s),
+                                      style::kBody.scale, lh, 2, style::kBody.gray);
+    y = static_cast<int16_t>(y + std::max<int16_t>(n, 1) * lh + 16);
   }
-  textGray(c, static_cast<int16_t>(x + 24), static_cast<int16_t>(y + 20),
-           m.windowText, 2, 6, true);
+  TextStyle win = style::kBodyStrong;
+  win.gray = 6;
+  textFit(c, geom::kInnerX, static_cast<int16_t>(y + 8), geom::kInnerW, m.windowText, win);
 }
 
 }  // namespace panel

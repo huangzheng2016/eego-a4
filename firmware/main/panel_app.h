@@ -78,6 +78,10 @@ class PanelApp {
   // 输入事件（app_task 上下文；app_main 泵自 touch.poll / ButtonManager）。
   void handleTouch(const eego::TouchEvent& ev);
   void handleButton(const eego::ButtonEvent& ev);
+  // 记录 app_task 从阻塞操作（渲染/命令处理/空闲等待）恢复的时刻。输入陈旧度
+  // 按 now - max(事件时间, 恢复时刻) 计：阻塞期间由触控/按键任务排队的手势
+  // 不因 app_task 忙而被当作陈旧丢弃。
+  void noteInputResume();
 
   // 跨任务通知（必须短平快；可在 net_task/httpd/sys_evt 上下文调用）。
   void notifyNetEvent(int wifiState, bool sourceHealthChanged);
@@ -122,11 +126,36 @@ class PanelApp {
   std::string pageContext() const;
   void activateFocused();         // 电源键短按
   void activateSoftKey(size_t idx);
-  void activateSettingRow(size_t row);  // S4 全局行号，按 8 行分页显示
-  void resolveTouchHit(int16_t x, int16_t y, int& hit_idx, bool& hit_row) const;
-  std::string controlForHit(int hit_idx, bool hit_row) const;
+
+  // ---- S4 设置（数据驱动：focus_ = visibleSettings() 下标，按 geom::kSettingsRowsPerPage 分页）----
+  std::vector<SettingId> visibleSettings() const;
+  static std::vector<SettingId> visibleSettingsFor(bool frontlight);
+  // 上次排版时前光三行是否可见：硬件覆盖变化时据此把 focus_ 按 SettingId 重映射。
+  bool frontlightRowsVisible_ = false;
+  void activateSettingRow(SettingId id);               // 动作行执行 / 取值行前进一档（循环）
+  // 取值行 ±1 档：触控左右半默认两端钳制；wrap=true（Power/点标签循环前进）到端回绕。
+  bool adjustSettingRow(SettingId id, int dir, bool coarse = false, bool wrap = false);
+  static bool settingAdjustable(SettingId id);
+  size_t settingsPage() const;
+  bool pageEdge(int delta) const;  // Table/Settings 当前子页沿 delta 方向已到边界
+
+  // ---- 触控命中 ----
+  struct TouchHit {
+    enum class Kind : uint8_t { None, SoftKey, Row, PagePrev, PageNext };
+    Kind kind = Kind::None;
+    int index = -1;          // SoftKey: 软键下标；Row: 全局行下标（S4 = visibleSettings 下标）
+    bool valueLeft = false;  // Row 且落在值列左半
+    bool valueRight = false; // Row 且落在值列右半
+  };
+  TouchHit resolveTouchHit(int16_t x, int16_t y) const;
+  std::string controlForHit(const TouchHit& hit) const;
   std::string focusedControl() const;
   std::string touchControl(int16_t x, int16_t y) const;
+  void onTouchSwipe(eego::TouchEventType type, int64_t now_us);
+  void onTouchHold(int16_t x, int16_t y);
+
+  // ---- 双击门控：仅当前页存在 up.double/down.double 有效绑定时开启 ----
+  void syncDoublePress(bool force);
 
   // ---- 动作（NetStack / DeviceSettings / recovery）----
   void doAck(const std::string& id);
@@ -164,7 +193,22 @@ class PanelApp {
   void onModeChange(bool mains);
   void batteryFsm(int64_t nowMs);
   // durationMs < 0 使用电池轮询周期；计划睡眠传入明确的窗口剩余时长。
+  // 非阻塞：只登记休眠请求；serviceSleep() 轮询网络静默后才真正入睡。
   void enterSleep(int64_t nowMs, int64_t durationMs = -1);
+  void serviceSleep(int64_t nowMs);
+  void deferSleep(int64_t nowMs);
+  void finishSleep(int64_t nowMs, int64_t sleepMs);
+
+  // 非阻塞网络静默等待：按退避间隔发短超时 waitIdle 探测（单次 ≤ ~200ms），
+  // 预算耗尽返回 -1；静默返回 1；尚未确定返回 0。
+  struct NetIdleWait {
+    bool active = false;
+    int64_t deadlineMs = 0;
+    int64_t nextProbeMs = 0;
+    int64_t intervalMs = 0;
+  };
+  static void startNetIdleWait(NetIdleWait& w, int64_t nowMs, int64_t budgetMs);
+  static int pollNetIdle(NetIdleWait& w, int64_t nowMs);
 
   // ---- 渲染 ----
   void markDirty(bool forceFull = false) {
@@ -224,6 +268,13 @@ class PanelApp {
   bool suppressTouchTap_ = false;
   bool suppressTouchHold_ = false;
   bool suppressFrontShort_ = false;
+  // 陈旧输入按整段手势丢弃：起始事件（Press/FrontPress/按键 Press）的判定
+  // 沿用到同一手势的后续事件，避免丢了 Press 却执行其 Tap。
+  int64_t inputResumeUs_ = 0;
+  bool touchGestureStale_ = false;
+  bool frontGestureStale_ = false;
+  bool buttonGestureStale_[3] = {false, false, false};
+  bool inputEventStale(int64_t timestampUs, int64_t nowUs) const;
   std::string banner_;
   int64_t bannerDeadlineMs_ = 0;
   std::string blePop_;
@@ -259,6 +310,26 @@ class PanelApp {
   int64_t netStatusCacheMs_ = 0;
 
   size_t muteRuleCount_ = 0;
+
+  // 渲染触发缓存
+  int64_t renderedClockKey_ = -2;   // 已渲染状态栏的分钟键（-1 = 时间不可用）
+  int64_t lastClockCheckMs_ = 0;
+  int64_t lastBleProvRenderMs_ = 0;
+  bool dashboardWasAvailable_ = false;
+
+  // 双击门控缓存
+  std::string doublePressContext_;
+  uint32_t doublePressRevision_ = 0;
+  int64_t lastDoublePressSyncMs_ = -100000;
+  bool doublePressSynced_ = false;
+
+  // 非阻塞网络静默等待（电池轮询收尾 / 休眠前）
+  NetIdleWait pollIdleWait_;
+  NetIdleWait sleepIdleWait_;
+  bool sleepPending_ = false;
+  bool sleepScheduled_ = false;      // 计划睡眠（duration 明确）
+  int64_t sleepRequestedMs_ = 0;
+  int64_t sleepDurationMs_ = -1;
 
   // 电源模式状态
   bool mains_ = true;

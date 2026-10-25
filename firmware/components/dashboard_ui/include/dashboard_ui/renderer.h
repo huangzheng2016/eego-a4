@@ -18,6 +18,9 @@ struct RenderOptions {
   size_t page_index = 0;
   VariableValues variables;
   bool force_full = false;
+  // Content area / gutters used to place panels; must match the layout the
+  // caller hit-tests against (e.g. excluding a reserved status line).
+  LayoutConfig layout_config;
 };
 
 struct RenderResult {

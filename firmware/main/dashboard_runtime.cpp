@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "admin/dashboard_config.h"
 #include "alert_core/snapshot.h"
 #include "alert_core/types.h"
 #include "dashboard_core/config.h"
@@ -50,7 +51,9 @@ constexpr size_t kMaxPrefsBytes = 8192;
 constexpr size_t kMaxSamples = 8192;
 constexpr size_t kMaxEvents = 1024;
 constexpr int64_t kRenderThrottleMs = 250;
-constexpr int64_t kStatusPeriodMs = 30000;
+constexpr int64_t kStatusPeriodMs = 30000;       // 时钟来源（SNTP/RTC）查询周期
+constexpr int64_t kStatusCheckMs = 1000;         // 状态行文本变化检查周期（仅文本变化才重绘）
+constexpr int64_t kStoreCheckMs = 2000;          // DashboardStore 已提交修订号检查周期
 constexpr int64_t kCarouselPeriodMs = 15000;
 constexpr int64_t kBatteryCycleMs = 130000;
 
@@ -119,11 +122,24 @@ bool parseConfig(const std::string& text, dash::Dashboard& dashboard,
             json_error.message;
     return false;
   }
+  // Defensive: configurations written before the screen layout rule may still
+  // be on the card (e.g. the admin store could not persist its repair). Repair
+  // them exactly like the admin store does before strict validation.
+  const size_t repaired = dash::repairLegacyStoredLayout(root);
+  if (repaired > 0) {
+    ESP_LOGW(kTag, "dashboard layout: repaired %u legacy panel(s) before validation",
+             static_cast<unsigned>(repaired));
+  }
   const dash::JsonValue* schema = root.find("schema");
   const bool bundle = schema != nullptr && schema->type() == dash::JsonValue::Type::String &&
                       schema->stringValue() == "eego.dashboard-bundle/1";
   if (!bundle) {
-    const dash::ParseResult parsed = dash::parseDashboard(text);
+    if (repaired > 0 && text.size() > dash::Limits{}.max_json_bytes) {
+      error = "configuration exceeds max_json_bytes";
+      return false;
+    }
+    const dash::ParseResult parsed =
+        repaired > 0 ? dash::dashboardFromJson(root) : dash::parseDashboard(text);
     if (!parsed.ok()) {
       error = firstParseError(parsed);
       return false;
@@ -295,6 +311,14 @@ struct DashboardRuntime::Impl {
   int64_t next_tick_ms = 0;
   int64_t last_render_ms = -10000;
   int64_t last_status_ms = -100000;
+  int64_t last_clock_query_ms = -100000;
+  const char* clock_label = "NOCLK";
+  std::string drawn_status_text;
+  // web 端 ApplyDashboard / 删除 → DashboardStore 修订号变化 → reload()/卸载
+  int64_t last_store_check_ms = -100000;
+  uint64_t store_revision = 0;
+  bool store_configured = false;
+  bool store_seen = false;
   int64_t last_rule_eval_ms = -100000;
   int64_t last_carousel_ms = 0;
   uint64_t alert_sequence = 0;
@@ -358,11 +382,20 @@ struct DashboardRuntime::Impl {
       for (const dash::PanelSpec& panel : candidate.panels) {
         if (panel.id != id) continue;
         if (owner != nullptr) *owner = &candidate;
-        if (subpage != nullptr) *subpage = panel.grid.y / ui::kRowsPerPage;
+        if (subpage != nullptr) *subpage = ui::panelScreenIndex(panel);
         return &panel;
       }
     }
     return nullptr;
+  }
+
+  // 面板布局区 = 普通 UI 安全区减去底部状态行（渲染与命中测试共用同一配置）。
+  static ui::LayoutConfig layoutConfig() {
+    ui::LayoutConfig config;
+    config.content = ui::Rect{ui::kDashboardContent.x, ui::kDashboardContent.y,
+                              ui::kDashboardContent.w,
+                              static_cast<int16_t>(kStatusLineY - ui::kDashboardContent.y)};
+    return config;
   }
 
   void rebuildLayout() {
@@ -372,11 +405,12 @@ struct DashboardRuntime::Impl {
       focus = 0;
       return;
     }
-    layout = ui::buildPageLayout(*current, page_index);
+    const ui::LayoutConfig config = layoutConfig();
+    layout = ui::buildPageLayout(*current, page_index, config);
     if (layout.page_count == 0) page_index = 0;
     if (page_index >= layout.page_count) {
       page_index = layout.page_count - 1;
-      layout = ui::buildPageLayout(*current, page_index);
+      layout = ui::buildPageLayout(*current, page_index, config);
     }
     if (focus >= layout.panels.size()) focus = layout.panels.empty() ? 0 : layout.panels.size() - 1;
     if (const dash::PanelSpec* selected = focusedPanel();
@@ -1667,7 +1701,7 @@ struct DashboardRuntime::Impl {
   }
 
   std::string touchControl(int16_t x, int16_t y) const {
-    if (y >= 740) return {};
+    if (y >= kStatusLineY) return {};
     ui::HitTarget target;
     if (!ui::hitTest(layout, x, y, target) || target.panel == nullptr || target.action == nullptr) {
       return {};
@@ -1711,7 +1745,7 @@ struct DashboardRuntime::Impl {
 
   void touch(int16_t x, int16_t y) {
     if (!ready) return;
-    if (y >= 740) {
+    if (y >= kStatusLineY) {
       movePage(x < 276 ? -1 : 1);
       return;
     }
@@ -1842,10 +1876,52 @@ struct DashboardRuntime::Impl {
     next_tick_ms = last_tick_ms + std::max<int64_t>(wake, 50);
   }
 
+  // 已提交配置变化检测：DashboardStore 由 admin 在 app_task 中 commit/erase，
+  // 本函数同在 app_task，每 kStoreCheckMs 取一次快照比较修订号（无文件 IO）。
+  void checkStore(int64_t now) {
+    if (now - last_store_check_ms < kStoreCheckMs) return;
+    last_store_check_ms = now;
+    const auto document = eego::admin::DashboardStore::instance().snapshot();
+    if (document == nullptr) return;
+    if (!store_seen) {
+      store_seen = true;
+      store_revision = document->revision;
+      store_configured = document->configured;
+      return;
+    }
+    if (document->revision == store_revision && document->configured == store_configured) return;
+    store_revision = document->revision;
+    store_configured = document->configured;
+    if (!document->configured) {
+      if (ready) unload("dashboard deleted");
+      return;
+    }
+    if (reload()) {
+      ESP_LOGI(kTag, "dashboard reloaded after commit (store revision %llu)",
+               static_cast<unsigned long long>(store_revision));
+    } else {
+      ESP_LOGW(kTag, "dashboard reload after commit failed: %s", config_error.c_str());
+    }
+  }
+
+  void unload(const char* reason) {
+    if (pipeline != nullptr) pipeline->cancelAsync();
+    ready = false;
+    config_error = reason;
+    message.clear();
+    navigation.clear();
+    focused_event_id.clear();
+    ++page_epoch;
+    renderer.reset();
+    layout = ui::PageLayout{};
+    ESP_LOGI(kTag, "dashboard unloaded: %s", reason);
+  }
+
   void service(bool mains_mode) {
-    if (!ready) return;
     mains = mains_mode;
     const int64_t now = monotonicMs();
+    checkStore(now);
+    if (!ready) return;
     if (!message.empty() && now > message_deadline_ms) {
       message.clear();
       status_dirty = true;
@@ -1893,10 +1969,17 @@ struct DashboardRuntime::Impl {
         chartCandidates(*selected).size() > 1 && now - last_carousel_ms >= kCarouselPeriodMs) {
       cycleChart(1);
     }
-    if (now - last_status_ms >= kStatusPeriodMs) {
+    if (now - last_status_ms >= kStatusCheckMs) {
       last_status_ms = now;
-      status_dirty = true;
-      dirty = true;
+      if (now - last_clock_query_ms >= kStatusPeriodMs) {
+        last_clock_query_ms = now;
+        refreshClockLabel();
+      }
+      std::string ignored;
+      if (composeStatus(ignored) != drawn_status_text) {
+        status_dirty = true;
+        dirty = true;
+      }
     }
   }
 
@@ -1999,49 +2082,71 @@ struct DashboardRuntime::Impl {
   std::string banner_event_id;
   std::string banner_signature;
 
-  void drawStatus() {
-    banner_event_id.clear();
-    deps.canvas->fillRect(28, 742, 496, 22, 1);
-    std::string text;
-    if (!message.empty()) {
-      text = message;
-    } else if (const dash::Event* event = bannerEvent()) {
-      banner_event_id = dashboardEventIdentity(*event);
-      text = std::string(dash::severityName(event->severity)) + " " + event->title;
+  // 底部状态行：位于普通 UI 安全区（28..740）内的最后 kStatusLineH 像素。
+  // 布局区（rebuildLayout 的 LayoutConfig.content）与触控阈值须同步让出这段高度。
+  static constexpr int16_t kStatusLineH = 22;
+  static constexpr int16_t kStatusLineY = 28 + 712 - kStatusLineH;  // 718
+
+  // 时钟来源标签（SNTP/RTC/NOCLK）：queryStatus 会经 net_task 命令队列，
+  // 仅在 service() 中按 kStatusPeriodMs 刷新缓存，绘制时不再阻塞查询。
+  void refreshClockLabel() {
+    if (!TimeSource::valid()) {
+      clock_label = "NOCLK";
+      return;
+    }
+    eego::net::NetStatusSnapshot net_status;
+    if (deps.net != nullptr && deps.net->queryStatus(net_status, 50)) {
+      clock_label = net_status.time.sntp_synced ? "SNTP" : "RTC";
+    } else if (std::string_view(clock_label) == "NOCLK") {
+      clock_label = "RTC";
+    }
+  }
+
+  std::string composeStatus(std::string& banner_id) {
+    banner_id.clear();
+    if (!message.empty()) return message;
+    if (const dash::Event* event = bannerEvent()) {
+      banner_id = dashboardEventIdentity(*event);
+      std::string text = std::string(dash::severityName(event->severity)) + " " + event->title;
       if (!linkedForEvent(*event).empty()) text += "  [TREND]";
-    } else {
-      const std::vector<const dash::Page*> pages = visiblePages();
-      size_t number = 0;
-      for (size_t i = 0; i < pages.size(); ++i) {
-        if (pages[i]->id == page_id) number = i + 1;
-      }
-      size_t cached = 0;
-      size_t offline = 0;
+      return text;
+    }
+    const std::vector<const dash::Page*> pages = visiblePages();
+    size_t number = 0;
+    for (size_t i = 0; i < pages.size(); ++i) {
+      if (pages[i]->id == page_id) number = i + 1;
+    }
+    size_t cached = 0;
+    size_t offline = 0;
+    if (pipeline != nullptr) {
       for (const dash::Source& source : config.sources) {
         dp::SourceStatus status;
         if (!pipeline->sourceStatus(source.id, status)) continue;
         if (pipeline->sourceResult(source.id) != nullptr) ++cached;
         if (status.offline || status.stale) ++offline;
       }
-      const char* clock = TimeSource::valid() ? "CLOCK" : "NOCLK";
-      if (TimeSource::valid()) {
-        eego::net::NetStatusSnapshot net_status;
-        if (deps.net != nullptr && deps.net->queryStatus(net_status, 50) &&
-            net_status.time.sntp_synced) {
-          clock = "SNTP";
-        } else {
-          clock = "RTC";
-        }
-      }
-      char status[160];
-      std::snprintf(status, sizeof(status), "P%u/%u.%u %s DATA %u/%u OFF %u  U/D NAV PWR OPEN",
-                    static_cast<unsigned>(number), static_cast<unsigned>(pages.size()),
-                    static_cast<unsigned>(page_index + 1), clock,
-                    static_cast<unsigned>(cached - std::min(cached, offline)),
-                    static_cast<unsigned>(config.sources.size()), static_cast<unsigned>(offline));
-      text = status;
     }
-    ui::drawTextFit(*deps.canvas, eego::FontManager::instance(), 30, 746, 492, text, 1, false, 0);
+    const char* clock = TimeSource::valid() ? clock_label : "NOCLK";
+    if (TimeSource::valid() && std::string_view(clock) == "NOCLK") clock = "RTC";
+    char status[160];
+    std::snprintf(status, sizeof(status), "P%u/%u.%u %s DATA %u/%u OFF %u  U/D NAV PWR OPEN",
+                  static_cast<unsigned>(number), static_cast<unsigned>(pages.size()),
+                  static_cast<unsigned>(page_index + 1), clock,
+                  static_cast<unsigned>(cached - std::min(cached, offline)),
+                  static_cast<unsigned>(config.sources.size()), static_cast<unsigned>(offline));
+    return status;
+  }
+
+  void drawStatus() {
+    deps.canvas->fillRect(28, kStatusLineY, 496, kStatusLineH, 1);
+    deps.canvas->drawLine(28, kStatusLineY, 28 + 496 - 1, kStatusLineY, 0);
+    const std::string text = composeStatus(banner_event_id);
+    drawn_status_text = text;
+    const int16_t text_h = eego::FontManager::instance().uiFontHeight();
+    const int16_t text_y = static_cast<int16_t>(
+        kStatusLineY + 1 + std::max(0, (kStatusLineH - 1 - text_h) / 2));
+    ui::drawTextFit(*deps.canvas, eego::FontManager::instance(), 28 + 12, text_y, 496 - 24, text,
+                    1, false, 0);
   }
 
   bool needsRender() const {
@@ -2056,6 +2161,7 @@ struct DashboardRuntime::Impl {
     options.page_index = page_index;
     options.variables = variables;
     options.force_full = force_full;
+    options.layout_config = layoutConfig();
     last_render = renderer.render(*deps.canvas, view, options);
     drawAlertMarkers();
     drawFocus();
@@ -2390,7 +2496,7 @@ void DashboardRuntime::activate() {
 }
 void DashboardRuntime::touch(int16_t x, int16_t y) {
   if (impl_ == nullptr || !impl_->ready) return;
-  if (y >= 740 && !impl_->banner_event_id.empty()) {
+  if (y >= Impl::kStatusLineY && !impl_->banner_event_id.empty()) {
     if (const dash::Event* event = impl_->findEvent(impl_->banner_event_id)) {
       const std::string linked = impl_->linkedForEvent(*event);
       if (!linked.empty()) {

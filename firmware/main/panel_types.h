@@ -25,6 +25,42 @@ constexpr Page dashboardStartupPage(Page current, bool dashboard_loaded) {
 
 constexpr bool dashboardUsesRuntimeStatus(Page current) { return current == Page::Dashboard; }
 
+// S4 设置行标识（显示顺序 = 枚举顺序）。可见行列表由 PanelApp::visibleSettings()
+// 按当前能力（如前光是否可用）过滤生成；行为/取值一律按 id 分发，不依赖行号。
+enum class SettingId : uint8_t {
+  Network = 0,
+  RecoveryAp,
+  WifiReset,
+  Bluetooth,
+  Language,
+  Timezone,
+  Frontlight,
+  Brightness,
+  Warmth,
+  DataRefresh,
+  PollNow,
+  EpdFull,
+  EpdNow,
+  PowerMode,
+  BatteryPoll,
+  IdleSleep,
+  SleepPlan,
+  NextWake,
+  LastWake,
+  Storage,
+  Diagnostics,
+  RunDiagnostics,
+  Security,
+  Mutes,
+  FactoryReset,
+  Version,
+  InputHelp,
+  InputReset,
+  BleObserver,
+  BleUnbind,
+  Count,
+};
+
 // 5 秒模态窗口；恢复动作只能由实体 Power 的全新持续按住完成。
 enum class ConfirmKind : uint8_t {
   None = 0,

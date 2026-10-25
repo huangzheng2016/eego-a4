@@ -7,6 +7,10 @@
 namespace eego::dashboard::ui {
 namespace {
 
+// 字号阶梯（与 panels.cpp / 设备页 TextStyle 一致）：说明 1x、正文 2x。
+constexpr int16_t kScaleCaption = 1;
+constexpr int16_t kScaleBody = 2;
+
 size_t validCharLength(std::string_view text, size_t offset) {
   const unsigned char lead = static_cast<unsigned char>(text[offset]);
   if (lead < 0x80) return 1;
@@ -301,7 +305,11 @@ void drawTextPanel(PortraitCanvas& canvas, FontManager& font, const PanelSpec& p
                          variant == "log_tail" || variant == "markdown" ||
                          (variant == "default" && panel.text.multiline);
   const bool multi_rows = multiline || variant == "key_value";
-  const int16_t scale = !multiline && variant != "key_value" && bounds.h >= 32 ? 2 : 1;
+  // 单行文字：面板高度放得下一行正文（含 4px 行距）时用正文字号，否则说明字号；
+  // 多行/键值文字统一说明字号。
+  const bool body_fits = bounds.h >= font.uiFontHeight() * kScaleBody + 4;
+  const int16_t scale =
+      !multiline && variant != "key_value" && body_fits ? kScaleBody : kScaleCaption;
   const int16_t line_height = font.uiFontHeight() * scale + 4;
   if (line_height <= 0) return;
   size_t max_lines = panel.text.max_lines;

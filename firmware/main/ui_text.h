@@ -179,8 +179,8 @@ enum class Lang : uint8_t {
   X(HelpDefaultHelpStatus, "帮助 / 状态（默认）", "HELP / STATUS (DEFAULT)") \
   X(HelpUpDown, "Up/Down 短按 / 长按", "UP/DOWN SHORT / LONG") \
   X(HelpFocusPage, "焦点 / 翻页（默认）", "FOCUS / PAGE (DEFAULT)") \
-  X(HelpSwipe, "水平滑动", "HORIZONTAL SWIPE") \
-  X(HelpPage, "翻页", "PAGE NAVIGATION") \
+  X(HelpSwipe, "滑动（左/上 · 右/下）", "SWIPE (LEFT/UP · RIGHT/DOWN)") \
+  X(HelpPage, "下一页 / 上一页；首页右滑返回", "NEXT / PREV PAGE; RIGHT ON FIRST = BACK") \
   X(HelpChord, "Up+Down 组合键", "UP+DOWN CHORD") \
   X(HelpCustomOnly, "仅自定义动作", "CUSTOM ACTION ONLY") \
   X(HelpDanger, "危险操作", "DANGEROUS ACTION") \
@@ -190,7 +190,12 @@ enum class Lang : uint8_t {
   X(HelpLocalReset, "本地恢复", "LOCAL RESET") \
   X(HelpResetHere, "设置 → 重置按键映射", "SETTINGS → RESET INPUT") \
   X(LangZh, "中文", "CHINESE") \
-  X(LangEn, "英文", "ENGLISH")
+  X(LangEn, "英文", "ENGLISH") \
+  X(PrevPage, "上一页", "PREV") \
+  X(NextPage, "下一页", "NEXT") \
+  X(PollEveryMinFmt, "每 %u 分钟", "EVERY %uMIN") \
+  X(PollEveryHourFmt, "每 %u 小时", "EVERY %uH") \
+  X(PollEveryDayFmt, "每 %u 天", "EVERY %uD")
 
 enum class Str : uint8_t {
 #define X(k, zh, en) k,

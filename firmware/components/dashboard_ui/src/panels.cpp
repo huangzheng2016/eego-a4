@@ -11,6 +11,13 @@
 namespace eego::dashboard::ui {
 namespace {
 
+// 字号阶梯（与设备页 panel_render 的 TextStyle 一致）：说明/标签 1x、正文/按钮 2x、
+// 次级数值 3x、主数值最大 6x。自动选字号时只在此阶梯内取最大可放下者。
+constexpr int16_t kScaleCaption = 1;
+constexpr int16_t kScaleBody = 2;
+constexpr int16_t kScaleHeadline = 3;
+constexpr int16_t kScaleDisplay = 6;
+
 constexpr size_t kMaxSeriesSamples = 2048;
 constexpr size_t kMaxPlotPoints = 128;
 
@@ -157,7 +164,7 @@ void centered(PortraitCanvas& canvas, FontManager& font, const Rect& bounds,
 
 void emptyState(PortraitCanvas& canvas, FontManager& font, const Rect& bounds,
                 std::string_view message = "No data") {
-  centered(canvas, font, bounds, message, 1, false, 6);
+  centered(canvas, font, bounds, message, kScaleCaption, false, 6);
 }
 
 std::string interpolatedText(const PanelSpec& panel, const VariableValues& variables) {
@@ -175,7 +182,7 @@ void drawStaticText(PortraitCanvas& canvas, FontManager& font, const PanelSpec& 
     return;
   }
   const int16_t line_height = font.uiFontHeight() + 4;
-  drawTextWrapped(canvas, font, bounds, content, 1, line_height,
+  drawTextWrapped(canvas, font, bounds, content, kScaleCaption, line_height,
                   std::min<size_t>(panel.text.max_lines, bounds.h / line_height), 0);
 }
 
@@ -195,8 +202,9 @@ void drawDefaultCard(PortraitCanvas& canvas, FontManager& font, const PanelSpec&
     show_delta = false;
     value_bounds = bounds;
   }
-  int16_t scale = std::min<int16_t>(6, std::max<int16_t>(1, value_bounds.h / font_height));
-  while (scale > 1 &&
+  int16_t scale = std::min<int16_t>(kScaleDisplay,
+                                    std::max<int16_t>(kScaleCaption, value_bounds.h / font_height));
+  while (scale > kScaleCaption &&
          (measureText(font, value, scale) > value_bounds.w || font_height * scale > value_bounds.h)) {
     --scale;
   }
@@ -209,7 +217,7 @@ void drawDefaultCard(PortraitCanvas& canvas, FontManager& font, const PanelSpec&
                                    formatValue(delta, panel.style.unit.empty() ? std::string_view(latest.unit) : std::string_view(panel.style.unit),
                                                panel.style.precision);
     drawTextFit(canvas, font, bounds.x, bounds.y + bounds.h - font_height, bounds.w,
-                delta_text, 1, false, 6);
+                delta_text, kScaleCaption, false, 6);
   }
 }
 
@@ -233,17 +241,21 @@ void drawDeltaCard(PortraitCanvas& canvas, FontManager& font, const PanelSpec& p
   const std::string change = std::string(delta >= 0 ? "+" : "") +
                              formatValue(delta, panel.style.unit.empty() ? std::string_view(latest.unit) : std::string_view(panel.style.unit),
                                          panel.style.precision);
-  const int16_t line_height = font.uiFontHeight() + 4;
+  // 当前值：卡片够高（≥ 两行正文）时用正文字号，否则说明字号；变化量占余下高度。
+  const int16_t font_height = font.uiFontHeight();
+  const int16_t current_line =
+      bounds.h >= (font_height * kScaleBody + 4) * 2 ? font_height * kScaleBody + 4
+                                                     : font_height + 4;
   Rect current_bounds = bounds;
-  current_bounds.h = std::min(line_height, bounds.h);
-  const int16_t current_scale = scaleForText(font, current, current_bounds, 2);
+  current_bounds.h = std::min(current_line, bounds.h);
+  const int16_t current_scale = scaleForText(font, current, current_bounds, kScaleBody);
   if (current_scale > 0) {
     drawTextFit(canvas, font, current_bounds.x, current_bounds.y, current_bounds.w, current,
                 current_scale, true, 0);
   }
   Rect change_bounds{bounds.x, static_cast<int16_t>(bounds.y + current_bounds.h), bounds.w,
                      static_cast<int16_t>(bounds.h - current_bounds.h)};
-  const int16_t change_scale = scaleForText(font, change, change_bounds, 3);
+  const int16_t change_scale = scaleForText(font, change, change_bounds, kScaleHeadline);
   if (change_scale > 0) {
     centered(canvas, font, change_bounds, change, change_scale, true, delta < 0 ? 6 : 0);
   }
@@ -256,7 +268,7 @@ void drawProgressCard(PortraitCanvas& canvas, FontManager& font, const PanelSpec
                                         panel.style.precision);
   Rect value_bounds = bounds;
   value_bounds.h = std::max<int16_t>(0, bounds.h - 18);
-  const int16_t value_scale = scaleForText(font, value, value_bounds, 3);
+  const int16_t value_scale = scaleForText(font, value, value_bounds, kScaleHeadline);
   if (value_scale > 0) centered(canvas, font, value_bounds, value, value_scale, true, 0);
   const int16_t bar_y = bounds.y + bounds.h - 12;
   canvas.drawRect(bounds.x, bar_y, bounds.w, 10, 0);
@@ -379,11 +391,12 @@ void drawChartSeries(PortraitCanvas& canvas, FontManager& font, const PanelSpec&
   if (legend) {
     const int16_t y = plot.y + plot.h + 3;
     drawTextFit(canvas, font, plot.x, y, plot.w / 2,
-                formatValue(maximum, panel.style.unit, panel.style.precision), 1, false, 6);
+                formatValue(maximum, panel.style.unit, panel.style.precision), kScaleCaption,
+                false, 6);
     const std::string low = formatValue(minimum, panel.style.unit, panel.style.precision);
     const int16_t width = measureText(font, low, 1);
     drawTextFit(canvas, font, plot.x + plot.w - std::min<int16_t>(plot.w / 2, width), y,
-                plot.w / 2, low, 1, false, 6);
+                plot.w / 2, low, kScaleCaption, false, 6);
   }
 }
 
@@ -464,20 +477,23 @@ void drawStatusGrid(PortraitCanvas& canvas, FontManager& font, const PanelSpec& 
     Rect name_bounds = text_bounds;
     const bool has_value = text_bounds.h >= font_height * 2 + 2;
     if (has_value) name_bounds.h -= font_height + 2;
-    const int16_t name_scale = scaleForText(font, name, name_bounds, 1);
+    const int16_t name_scale = scaleForText(font, name, name_bounds, kScaleCaption);
     if (name_scale > 0) {
       drawTextFit(canvas, font, name_bounds.x, name_bounds.y, name_bounds.w, name,
                   name_scale, false, severityText(severity));
     }
     if (has_value) {
+      // 值：名称下方剩余高度内取阶梯上最大可放下字号（≤ 正文），贴底绘制
+      const int16_t value_h = static_cast<int16_t>(text_bounds.h - font_height - 2);
       const Rect value_bounds{text_bounds.x,
-                              static_cast<int16_t>(text_bounds.bottom() - font_height),
-                              text_bounds.w, font_height};
+                              static_cast<int16_t>(text_bounds.bottom() - value_h),
+                              text_bounds.w, value_h};
       const std::string value = formatValue(sample.value, sample.unit, panel.style.precision);
-      const int16_t value_scale = scaleForText(font, value, value_bounds, 1);
+      const int16_t value_scale = scaleForText(font, value, value_bounds, kScaleBody);
       if (value_scale > 0) {
-        drawTextFit(canvas, font, value_bounds.x, value_bounds.y, value_bounds.w, value,
-                    value_scale, true, severityText(severity));
+        drawTextFit(canvas, font, value_bounds.x,
+                    static_cast<int16_t>(text_bounds.bottom() - font_height * value_scale),
+                    value_bounds.w, value, value_scale, true, severityText(severity));
       }
     }
   }
@@ -536,7 +552,7 @@ void drawTimeline(PortraitCanvas& canvas, FontManager& font, const PanelSpec& pa
     canvas.fillCircle(x, y, 3, 0);
     if (sample.timestamp_ms != 0 && bounds.h >= 36 && (i == 0 || i + 1 == count)) {
       drawTextFit(canvas, font, std::max<int>(bounds.x, x - 32), i == 0 ? y + 8 : y - 18,
-                  64, std::to_string(sample.timestamp_ms), 1, false, 6);
+                  64, std::to_string(sample.timestamp_ms), kScaleCaption, false, 6);
     }
     if (severity != Severity::Info) canvas.drawCircle(x, y, 5, 0);
   }
@@ -590,7 +606,7 @@ void drawLinkedCards(PortraitCanvas& canvas, FontManager& font, const Dashboard&
     std::string error;
     if (!card.title.empty() && interpolateVariables(card.title, variables, interpolated, error))
       label = interpolated;
-    const int16_t label_scale = scaleForText(font, label, label_bounds, 1);
+    const int16_t label_scale = scaleForText(font, label, label_bounds, kScaleCaption);
     if (label_scale > 0) {
       drawTextFit(canvas, font, label_bounds.x, label_bounds.y, label_bounds.w, label,
                   label_scale, false, 6);
@@ -732,7 +748,7 @@ void drawButtonPanel(PortraitCanvas& canvas, FontManager& font, const PanelLayou
     std::string error;
     if (interpolateVariables(label_text, variables, interpolated, error)) label_text = interpolated;
     const Rect label_bounds = inset(bounds, 2);
-    const int16_t label_scale = scaleForText(font, label_text, label_bounds, 2);
+    const int16_t label_scale = scaleForText(font, label_text, label_bounds, kScaleBody);
     if (label_scale > 0) {
       centered(canvas, font, label_bounds, label_text, label_scale, action.confirm,
                  critical ? 15 : 0);

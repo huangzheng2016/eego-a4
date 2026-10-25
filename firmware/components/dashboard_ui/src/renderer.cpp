@@ -336,7 +336,7 @@ RenderResult DashboardRenderer::render(PortraitCanvas& canvas, const Dashboard& 
     return result;
   }
 
-  result.layout = buildPageLayout(*result.page, options.page_index);
+  result.layout = buildPageLayout(*result.page, options.page_index, options.layout_config);
   const std::string view_key = result.page->id + "#" + std::to_string(options.page_index);
   const bool same_view = !options.force_full && impl_->view_key == view_key;
   std::vector<uint64_t> fingerprints;

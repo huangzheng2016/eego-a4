@@ -43,9 +43,15 @@ constexpr uint32_t kNetBitWifi = 1u << 0;
 constexpr uint32_t kNetBitSource = 1u << 1;
 constexpr uint32_t kPollWaitMs = 45000;
 constexpr uint32_t kRenderThrottleMs = 250;
-constexpr uint32_t kClockRenderMs = 30000;
-constexpr size_t kSettingsRowCount = 30;
-constexpr size_t kSettingsPageRows = 8;
+constexpr int64_t kClockCheckMs = 1000;          // 状态栏分钟变化检查周期（仅分钟变化才重绘）
+constexpr int64_t kBleProvRenderMs = 10000;      // BLE 配网倒计时最快 10s 重绘一次
+constexpr int64_t kDoublePressSyncMs = 1000;     // 绑定修订号复查周期
+constexpr uint32_t kNetIdleProbeMs = 100;        // 单次 waitIdle 探测超时（入队 + 等待各 ≤100ms）
+constexpr int64_t kNetIdleFirstIntervalMs = 1000;
+constexpr int64_t kNetIdleMaxIntervalMs = 5000;
+constexpr int64_t kPollIdleBudgetMs = 40000;     // 原 waitIdle(30000) + 重试 waitIdle(10000)
+constexpr int64_t kSleepIdleBudgetMs = 15000;    // 原 waitIdle(10000) + 重试 waitIdle(5000)
+constexpr size_t kSettingsRowsPerPage = static_cast<size_t>(geom::kSettingsRowsPerPage);
 
 constexpr uint32_t kDashboardPollWaitMs = 130000;
 
@@ -109,7 +115,9 @@ void PanelApp::begin(const Deps& deps) {
     armDashboardConfirm(request);
   };
   page_ = dashboardStartupPage(page_, dashboard_.begin(dashboardDeps));
+  dashboardWasAvailable_ = dashboard_.available();
   dashboard_.setMains(mains_);
+  syncDoublePress(true);
 
   ESP_LOGI(TAG, "panel begin: mains=%d lang=%s bat=%umV/%u%%", mains_ ? 1 : 0,
            settings_.language.c_str(), batCache_.millivolts, batCache_.percent);
@@ -131,15 +139,43 @@ void PanelApp::applySettings(uint32_t changed) {
     setLang(settings_.language == "en" ? Lang::En : Lang::Zh);
   }
   if ((changed & eego::settings::kChangedFrontlight) != 0) {
+    // 前光不可用（未探测到且无 present 覆盖）时跳过：硬件覆盖变化由 app_main
+    // 的设置订阅统一处理（setOverride + capabilities）。
     eego::FrontlightManager& frontlight = eego::FrontlightManager::instance();
-    if (!frontlight.present()) {
-      frontlight.off();
-    } else {
+    if (frontlight.frontlightAvailable()) {
       frontlight.setWarm(settings_.frontlight_warmth);
       frontlight.setBrightness(settings_.frontlight_enabled
                                    ? settings_.frontlight_brightness
                                    : 0);
     }
+  }
+  if ((changed & eego::settings::kChangedFrontlightHardware) != 0) {
+    const bool visibleNow = eego::FrontlightManager::instance().frontlightAvailable();
+    if (page_ == Page::Settings) {
+      if (visibleNow != frontlightRowsVisible_) {
+        // 前光行显隐变化：focus_ 是行下标，按 SettingId 重映射，保持焦点在同一
+        // 设置上（若该行被隐藏，落到其后第一个仍可见的行）。
+        const std::vector<SettingId> before = visibleSettingsFor(frontlightRowsVisible_);
+        const std::vector<SettingId> after = visibleSettingsFor(visibleNow);
+        if (!after.empty()) {
+          size_t next = after.size() - 1;
+          if (focus_ < before.size()) {
+            const SettingId focused = before[focus_];
+            for (size_t i = 0; i < after.size(); ++i) {
+              if (static_cast<uint8_t>(after[i]) >= static_cast<uint8_t>(focused)) {
+                next = i;
+                break;
+              }
+            }
+          }
+          focus_ = next;
+        } else {
+          focus_ = 0;
+        }
+      }
+      markDirty(true);  // 前光行显隐变化 → 设置页整页重排
+    }
+    frontlightRowsVisible_ = visibleNow;
   }
   if ((changed & eego::settings::kChangedDataRefresh) != 0) {
     const uint32_t interval_ms = settings_.data_refresh_s * 1000;
@@ -258,8 +294,11 @@ void PanelApp::service() {
   drainAdminMailbox();
   drainNetBits();
 
-  // 快照代际跟踪（无锁 acquire；渲染在 render() 统一取）
-  if (deps_.publisher != nullptr) {
+  // 快照代际跟踪（无锁 acquire；渲染在 render() 统一取）。只有展示告警的页面
+  // 才因快照变化重绘；其他页面切回时 gotoPage 会整页重绘并取最新快照。
+  if (deps_.publisher != nullptr &&
+      (page_ == Page::Overview || page_ == Page::Table || page_ == Page::Detail ||
+       page_ == Page::Status)) {
     auto snap = deps_.publisher->acquire();
     if (snap && snap->seq != snapshotSeq_) markDirty();
   }
@@ -288,6 +327,21 @@ void PanelApp::service() {
   const bool wantMains = computeMains();
   if (wantMains != mains_) onModeChange(wantMains);
   dashboard_.service(mains_);
+  // web 端应用/删除 dashboard 后 runtime 自行重载；可用性变化影响总览软键与当前页。
+  const bool dashboardAvailable = dashboard_.available();
+  if (dashboardAvailable != dashboardWasAvailable_) {
+    dashboardWasAvailable_ = dashboardAvailable;
+    if (!dashboardAvailable && page_ == Page::Dashboard) {
+      gotoPage(Page::Overview);
+    } else if (page_ == Page::Overview) {
+      if (focus_ >= softKeyCount()) focus_ = 0;
+      markDirty();
+    }
+  }
+  if (!doublePressSynced_ || now - lastDoublePressSyncMs_ >= kDoublePressSyncMs ||
+      pageContext() != doublePressContext_) {
+    syncDoublePress(false);
+  }
   eego::ble::BleManager::instance().service(mains_);
   const eego::ble::Status ble_status = eego::ble::BleManager::instance().status();
   if (ble_status.role != eego::ble::Role::Provisioning) {
@@ -304,8 +358,13 @@ void PanelApp::service() {
 
   if (now - lastScheduleCheckMs_ > 1000) {
     lastScheduleCheckMs_ = now;
-    if (ble_status.role == eego::ble::Role::Provisioning) markDirty();
-    if (!admin::ProvisionPortal::instance().apActive() &&
+    // BLE 配网倒计时（设置页 PoP 行）：最快 10s 重绘一次，避免每秒刷屏
+    if (ble_status.role == eego::ble::Role::Provisioning && page_ == Page::Settings &&
+        now - lastBleProvRenderMs_ >= kBleProvRenderMs) {
+      lastBleProvRenderMs_ = now;
+      markDirty();
+    }
+    if (!sleepPending_ && !admin::ProvisionPortal::instance().apActive() &&
         !eego::ble::BleManager::instance().sleepBlocked()) {
       uint64_t wake_at = 0;
       uint32_t remaining = 0;
@@ -315,6 +374,7 @@ void PanelApp::service() {
     }
   }
   batteryFsm(now);
+  serviceSleep(now);
 
   if (settings_.epd_full_refresh_s > 0 &&
       now - lastFullRenderMs_ >= static_cast<int64_t>(settings_.epd_full_refresh_s) * 1000) {
@@ -329,6 +389,7 @@ void PanelApp::service() {
   if (page_ == Page::Dashboard) {
     if (dashboard_.needsRender()) {
       dashboard_.render();
+      noteInputResume();
       if (forceFull_) lastFullRenderMs_ = now;
       dirty_ = false;
       forceFull_ = false;
@@ -337,7 +398,13 @@ void PanelApp::service() {
     return;
   }
 
-  if (now - lastRenderMs_ > kClockRenderMs) markDirty();
+  // 状态栏时钟：仅当显示的分钟（或时间可用性）变化时重绘
+  if (now - lastClockCheckMs_ >= kClockCheckMs) {
+    lastClockCheckMs_ = now;
+    const int64_t key =
+        TimeSource::valid() ? static_cast<int64_t>(TimeSource::now() / 60) : -1;
+    if (key != renderedClockKey_) markDirty();
+  }
 
   if (dirty_ && now - lastRenderMs_ >= kRenderThrottleMs) {
     render(now);
@@ -368,15 +435,34 @@ const char* buttonTriggerControl(eego::ButtonId id) {
 
 }  // namespace
 
+void PanelApp::noteInputResume() { inputResumeUs_ = esp_timer_get_time(); }
+
+bool PanelApp::inputEventStale(int64_t timestampUs, int64_t nowUs) const {
+  if (timestampUs <= 0 || nowUs < timestampUs) return true;
+  // 渲染等阻塞期间入队的事件：以 app_task 恢复时刻起算年龄。
+  const int64_t reference = std::max(timestampUs, inputResumeUs_);
+  return nowUs > reference && nowUs - reference > eego::kInputActionMaxAgeUs;
+}
+
 void PanelApp::handleButton(const eego::ButtonEvent& ev) {
   const int64_t now_us = esp_timer_get_time();
-  if (ev.timestamp_us <= 0 || now_us < ev.timestamp_us ||
-      now_us - ev.timestamp_us > eego::kInputActionMaxAgeUs) {
-    return;
-  }
-  lastInputMs_ = now_us / 1000;
   const size_t index = static_cast<size_t>(ev.id);
   if (index >= 3) return;
+  bool stale = false;
+  if (ev.action == eego::ButtonAction::Press) {
+    stale = inputEventStale(ev.timestamp_us, now_us);
+    buttonGestureStale_[index] = stale;
+  } else if (ev.action == eego::ButtonAction::ChordPress) {
+    const size_t up = static_cast<size_t>(eego::ButtonId::Up);
+    const size_t down = static_cast<size_t>(eego::ButtonId::Down);
+    stale = buttonGestureStale_[up] || buttonGestureStale_[down] ||
+            inputEventStale(ev.timestamp_us, now_us);
+  } else {
+    // 同一按键手势的后续事件沿用其 Press 的判定（整段保留或整段丢弃）。
+    stale = buttonGestureStale_[index] || ev.timestamp_us <= 0 || now_us < ev.timestamp_us;
+  }
+  if (stale) return;
+  lastInputMs_ = now_us / 1000;
   const ConfirmSource source = buttonSource(ev.id);
   if (ev.action == eego::ButtonAction::Press) suppressButtonLong_[index] = false;
   if (ev.action == eego::ButtonAction::LongPress && suppressButtonLong_[index]) {
@@ -388,9 +474,16 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
     suppressButtonShort_[index] = false;
     if (confirm_ != ConfirmKind::None) {
       const std::string& wanted = confirmState_.target().control;
-      const std::string control = wanted.rfind("trigger:", 0) == 0
-                                      ? buttonTriggerControl(ev.id)
-                                      : focusedControl();
+      std::string control;
+      if (wanted.rfind("trigger:", 0) == 0) {
+        control = buttonTriggerControl(ev.id);
+      } else if (ev.id == eego::ButtonId::Power) {
+        // 实体 Power 持续按住是最强确认：触控/焦点布防的控件一律可由 Power
+        // 确认，与当前焦点无关（触控点按不移动实体焦点）。
+        control = wanted;
+      } else {
+        control = focusedControl();
+      }
       if (confirmState_.beginHold(source, control, ev.timestamp_us, now_us)) return;
       clearConfirm();
     }
@@ -457,10 +550,21 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
 
 void PanelApp::handleTouch(const eego::TouchEvent& ev) {
   const int64_t now_us = esp_timer_get_time();
-  if (ev.timestamp_us <= 0 || now_us < ev.timestamp_us ||
-      now_us - ev.timestamp_us > eego::kInputActionMaxAgeUs) {
-    return;
+  const bool front = ev.type == eego::TouchEventType::FrontPress ||
+                     ev.type == eego::TouchEventType::FrontRelease ||
+                     ev.type == eego::TouchEventType::FrontShort ||
+                     ev.type == eego::TouchEventType::FrontLong ||
+                     ev.type == eego::TouchEventType::FrontDouble;
+  bool& gestureStale = front ? frontGestureStale_ : touchGestureStale_;
+  bool stale = false;
+  if (ev.type == eego::TouchEventType::Press || ev.type == eego::TouchEventType::FrontPress) {
+    stale = inputEventStale(ev.timestamp_us, now_us);
+    gestureStale = stale;
+  } else {
+    // 同一手势的后续事件（Move/Release/Tap/Hold/Swipe…）沿用起始 Press 的判定。
+    stale = gestureStale || ev.timestamp_us <= 0 || now_us < ev.timestamp_us;
   }
+  if (stale) return;
   lastInputMs_ = now_us / 1000;
   const int16_t x = static_cast<int16_t>(ev.x);
   const int16_t y = static_cast<int16_t>(ev.y);
@@ -506,6 +610,8 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
         } else {
           clearConfirm();
         }
+      } else {
+        onTouchHold(x, y);
       }
       break;
     case eego::TouchEventType::Tap:
@@ -519,9 +625,10 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
       break;
     case eego::TouchEventType::SwipeLeft:
     case eego::TouchEventType::SwipeRight:
+    case eego::TouchEventType::SwipeUp:
+    case eego::TouchEventType::SwipeDown:
       if (confirm_ != ConfirmKind::None) clearConfirm();
-      requestNavigation(NavigationKind::Page,
-                        ev.type == eego::TouchEventType::SwipeLeft ? 1 : -1, now_us);
+      onTouchSwipe(ev.type, now_us);
       break;
     case eego::TouchEventType::FrontPress:
       suppressFrontShort_ = false;
@@ -703,20 +810,27 @@ void PanelApp::movePage(int delta) {
       const size_t total = visibleRecords(visible);
       const size_t pages = std::max<size_t>(1, (total + geom::kRowsPerPage - 1) /
                                                    geom::kRowsPerPage);
-      int64_t next = (static_cast<int64_t>(tablePage_) + delta) % static_cast<int64_t>(pages);
-      if (next < 0) next += static_cast<int64_t>(pages);
+      // 与设置页一致：两端夹紧不循环（滑动/批量导航 delta 可能超过 ±1）。
+      const int64_t next = std::max<int64_t>(
+          0, std::min<int64_t>(static_cast<int64_t>(tablePage_) + delta,
+                               static_cast<int64_t>(pages) - 1));
+      if (static_cast<size_t>(next) == tablePage_) break;
       tablePage_ = static_cast<size_t>(next);
       focus_ = 0;
       markDirty(true);
       break;
     }
     case Page::Settings: {
-      const size_t pages = (kSettingsRowCount + kSettingsPageRows - 1) / kSettingsPageRows;
-      const size_t current = focus_ / kSettingsPageRows;
-      int64_t signed_next = (static_cast<int64_t>(current) + delta) % static_cast<int64_t>(pages);
-      if (signed_next < 0) signed_next += static_cast<int64_t>(pages);
-      const size_t next = static_cast<size_t>(signed_next);
-      focus_ = std::min(next * kSettingsPageRows, kSettingsRowCount - 1);
+      // 设置页不循环：与页码条两端置灰的箭头一致。
+      const size_t rows = visibleSettings().size();
+      const size_t pages = std::max<size_t>(1, (rows + kSettingsRowsPerPage - 1) /
+                                                   kSettingsRowsPerPage);
+      const int64_t current = static_cast<int64_t>(settingsPage());
+      const int64_t next = std::max<int64_t>(
+          0, std::min<int64_t>(current + delta, static_cast<int64_t>(pages) - 1));
+      if (next == current) break;
+      focus_ = std::min(static_cast<size_t>(next) * kSettingsRowsPerPage,
+                        rows == 0 ? 0 : rows - 1);
       markDirty(true);
       break;
     }
@@ -742,6 +856,64 @@ size_t wrappedIndex(size_t current, int delta, size_t count) {
   return static_cast<size_t>(next);
 }
 
+// 有序取值表单步：dir>0 下一档、dir<0 上一档；wrap=false 时两端钳制。
+// current 不在表中时取方向上最近的一档。
+template <typename T, size_t N>
+T stepChoice(const T (&list)[N], T current, int dir, bool wrap) {
+  size_t idx = N;
+  for (size_t i = 0; i < N; ++i) {
+    if (list[i] == current) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx == N) {
+    if (dir > 0) {
+      for (size_t i = 0; i < N; ++i) {
+        if (list[i] > current) return list[i];
+      }
+      return wrap ? list[0] : list[N - 1];
+    }
+    for (size_t i = N; i-- > 0;) {
+      if (list[i] < current) return list[i];
+    }
+    return wrap ? list[N - 1] : list[0];
+  }
+  if (dir > 0) return idx + 1 < N ? list[idx + 1] : (wrap ? list[0] : list[idx]);
+  if (dir < 0) return idx > 0 ? list[idx - 1] : (wrap ? list[N - 1] : list[idx]);
+  return list[idx];
+}
+
+constexpr uint8_t kBrightnessSteps[] = {10, 25, 40, 60, 80, 100};  // 含默认 60
+constexpr uint8_t kWarmthSteps[] = {0, 25, 50, 75, 100};
+constexpr uint32_t kDataRefreshSteps[] = {0, 60, 300, 900, 1800, 3600};
+constexpr uint32_t kEpdFullSteps[] = {0, 3600, 21600, 86400, 604800};
+constexpr uint32_t kBatteryPollSteps[] = {300, 900, 1800, 3600, 10800, 21600};
+constexpr uint32_t kIdleSleepSteps[] = {0, 30, 60, 90, 180, 300, 600};
+constexpr int kTimezoneMinMin = -720;
+constexpr int kTimezoneMaxMin = 840;
+
+struct SleepPlanPreset {
+  int start;
+  int end;
+};
+constexpr SleepPlanPreset kSleepPlans[] = {
+    {-1, -1}, {22 * 60, 6 * 60}, {23 * 60, 7 * 60}, {0, 6 * 60}, {12 * 60 + 30, 13 * 60 + 30}};
+constexpr size_t kSleepPlanCount = sizeof(kSleepPlans) / sizeof(kSleepPlans[0]);
+
+// "每 N 秒/分钟/小时/天"：整除时取最大单位。
+void formatEvery(uint32_t seconds, char* out, size_t cap) {
+  if (seconds >= 86400 && seconds % 86400 == 0) {
+    snprintf(out, cap, tr(Str::PollEveryDayFmt), static_cast<unsigned>(seconds / 86400));
+  } else if (seconds >= 3600 && seconds % 3600 == 0) {
+    snprintf(out, cap, tr(Str::PollEveryHourFmt), static_cast<unsigned>(seconds / 3600));
+  } else if (seconds >= 60 && seconds % 60 == 0) {
+    snprintf(out, cap, tr(Str::PollEveryMinFmt), static_cast<unsigned>(seconds / 60));
+  } else {
+    snprintf(out, cap, tr(Str::PollEveryFmt), static_cast<unsigned>(seconds));
+  }
+}
+
 }  // namespace
 
 void PanelApp::gotoPage(Page p) {
@@ -754,7 +926,8 @@ void PanelApp::gotoPage(Page p) {
   clearConfirm();
   if (p == Page::Settings) refreshMuteRuleCount();
   if (p == Page::Dashboard) dashboard_.invalidateAll();
-  markDirty(true);
+  syncDoublePress(false);
+  markDirty(true);  // 切页 → 下一帧 Full
 }
 
 void PanelApp::back() {
@@ -803,17 +976,20 @@ void PanelApp::moveFocus(int delta) {
       std::vector<const alert_core::AlertRecord*> vis;
       const size_t total = visibleRecords(vis);
       if (total == 0) break;
+      const size_t oldPage = tablePage_;
       int64_t idx = static_cast<int64_t>(tablePage_ * geom::kRowsPerPage + focus_) + delta;
       idx = std::max<int64_t>(0, std::min<int64_t>(idx, static_cast<int64_t>(total) - 1));
       tablePage_ = static_cast<size_t>(idx) / geom::kRowsPerPage;
       focus_ = static_cast<size_t>(idx) % geom::kRowsPerPage;
-      markDirty();
+      markDirty(tablePage_ != oldPage);  // 同页焦点移动走 Fast；跨子页整页重绘
       break;
     }
-    case Page::Settings:
-      focus_ = wrappedIndex(focus_, delta, kSettingsRowCount);
-      markDirty();
+    case Page::Settings: {
+      const size_t oldPage = settingsPage();
+      focus_ = wrappedIndex(focus_, delta, visibleSettings().size());
+      markDirty(settingsPage() != oldPage);
       break;
+    }
     case Page::Dashboard:
       dashboard_.moveFocus(delta, false);
       break;
@@ -840,9 +1016,11 @@ void PanelApp::activateFocused() {
       }
       break;
     }
-    case Page::Settings:
-      activateSoftKey(focus_ + 1);
+    case Page::Settings: {
+      const std::vector<SettingId> rows = visibleSettings();
+      if (focus_ < rows.size()) activateSettingRow(rows[focus_]);
       break;
+    }
     case Page::Dashboard:
       dashboard_.activate();
       break;
@@ -887,8 +1065,10 @@ void PanelApp::activateSoftKey(size_t idx) {
       else if (idx == 1) back();
       break;
     case Page::Settings:
-      if (idx == 0) back();
-      else activateSettingRow(idx - 1);
+      // [← 上一页] [返回] [下一页 →]
+      if (idx == 0) movePage(-1);
+      else if (idx == 1) back();
+      else if (idx == 2) movePage(1);
       break;
     case Page::Help:
       if (idx == 0) back();
@@ -898,55 +1078,239 @@ void PanelApp::activateSoftKey(size_t idx) {
   }
 }
 
-// ── 触控 ────────────────────────────────────────────────────────────────────
+// ── 设置行 ──────────────────────────────────────────────────────────────────
 
-void PanelApp::resolveTouchHit(int16_t x, int16_t y, int& hit_idx, bool& hit_row) const {
-  hit_idx = -1;
-  hit_row = false;
-  if (y >= geom::kSoftKeyY && y <= geom::kSoftKeyY + geom::kSoftKeyH) {
-    const size_t n = softKeyCount();
-    if (n > 0) {
-      const int16_t gap = 8;
-      const int16_t kw = static_cast<int16_t>((geom::kContentW - gap * (n - 1)) / n);
-      int idx = (x - geom::kContentX) / (kw + gap);
-      idx = std::max(0, std::min(idx, static_cast<int>(n) - 1));
-      hit_idx = idx;
+std::vector<SettingId> PanelApp::visibleSettings() const {
+  // 前光不可用（未探测到且无 present 覆盖）→ 隐藏三行前光设置。
+  return visibleSettingsFor(eego::FrontlightManager::instance().frontlightAvailable());
+}
+
+std::vector<SettingId> PanelApp::visibleSettingsFor(bool frontlight) {
+  std::vector<SettingId> rows;
+  rows.reserve(static_cast<size_t>(SettingId::Count));
+  for (uint8_t i = 0; i < static_cast<uint8_t>(SettingId::Count); ++i) {
+    const SettingId id = static_cast<SettingId>(i);
+    if (!frontlight && (id == SettingId::Frontlight || id == SettingId::Brightness ||
+                        id == SettingId::Warmth)) {
+      continue;
     }
+    rows.push_back(id);
+  }
+  return rows;
+}
+
+size_t PanelApp::settingsPage() const { return focus_ / kSettingsRowsPerPage; }
+
+bool PanelApp::pageEdge(int delta) const {
+  size_t page = 0;
+  size_t pages = 1;
+  if (page_ == Page::Table) {
+    std::vector<const alert_core::AlertRecord*> vis;
+    const size_t total = visibleRecords(vis);
+    pages = std::max<size_t>(1, (total + geom::kRowsPerPage - 1) / geom::kRowsPerPage);
+    page = tablePage_;
   } else if (page_ == Page::Settings) {
-    const int16_t rows_y = geom::kContentTop + 64;
-    if (y >= rows_y && y < rows_y + static_cast<int16_t>(kSettingsPageRows * 56)) {
-      const size_t row = static_cast<size_t>((y - rows_y) / 56);
-      const size_t global = (focus_ / kSettingsPageRows) * kSettingsPageRows + row;
-      if (global < kSettingsRowCount) {
-        hit_row = true;
-        hit_idx = static_cast<int>(global + 1);
-      }
-    }
+    const size_t rows = visibleSettings().size();
+    pages = std::max<size_t>(1, (rows + kSettingsRowsPerPage - 1) / kSettingsRowsPerPage);
+    page = settingsPage();
+  } else {
+    return false;
+  }
+  return delta < 0 ? page == 0 : page + 1 >= pages;
+}
+
+bool PanelApp::settingAdjustable(SettingId id) {
+  switch (id) {
+    case SettingId::Language:
+    case SettingId::Timezone:
+    case SettingId::Frontlight:
+    case SettingId::Brightness:
+    case SettingId::Warmth:
+    case SettingId::DataRefresh:
+    case SettingId::EpdFull:
+    case SettingId::PowerMode:
+    case SettingId::BatteryPoll:
+    case SettingId::IdleSleep:
+    case SettingId::SleepPlan:
+    case SettingId::Diagnostics:
+    case SettingId::BleObserver:
+      return true;
+    default:
+      return false;
   }
 }
 
-std::string PanelApp::controlForHit(int hit_idx, bool hit_row) const {
-  if (hit_idx < 0) return {};
-  return std::to_string(static_cast<unsigned>(page_)) + (hit_row ? ":row:" : ":key:") +
-         std::to_string(hit_idx);
+bool PanelApp::adjustSettingRow(SettingId id, int dir, bool coarse, bool wrap) {
+  if (!settingAdjustable(id) || dir == 0) return false;
+  const int step = dir > 0 ? 1 : -1;
+  eego::settings::Settings next = settings_;
+  switch (id) {
+    case SettingId::Language:
+      next.language = settings_.language == "zh" ? "en" : "zh";
+      break;
+    case SettingId::Timezone: {
+      int offset = settings_.timezone_offset_min + step * (coarse ? 360 : 60);
+      if (offset > kTimezoneMaxMin) offset = kTimezoneMinMin;
+      if (offset < kTimezoneMinMin) offset = kTimezoneMaxMin;
+      next.timezone_offset_min = offset;
+      break;
+    }
+    case SettingId::Frontlight:
+    case SettingId::Brightness:
+    case SettingId::Warmth:
+      if (!eego::FrontlightManager::instance().frontlightAvailable()) {
+        showBanner(tr(Str::FrontlightMissing), 3000);
+        return true;
+      }
+      if (id == SettingId::Frontlight) {
+        next.frontlight_enabled = !settings_.frontlight_enabled;
+      } else if (id == SettingId::Brightness) {
+        next.frontlight_brightness =
+            stepChoice(kBrightnessSteps, settings_.frontlight_brightness, step, wrap);
+      } else {
+        next.frontlight_warmth = stepChoice(kWarmthSteps, settings_.frontlight_warmth, step, wrap);
+      }
+      break;
+    case SettingId::DataRefresh:
+      next.data_refresh_s = stepChoice(kDataRefreshSteps, settings_.data_refresh_s, step, wrap);
+      break;
+    case SettingId::EpdFull:
+      next.epd_full_refresh_s =
+          stepChoice(kEpdFullSteps, settings_.epd_full_refresh_s, step, wrap);
+      break;
+    case SettingId::PowerMode: {
+      constexpr PowerMode kModes[] = {PowerMode::Auto, PowerMode::Mains, PowerMode::Battery};
+      next.power_mode = stepChoice(kModes, settings_.power_mode, step, true);
+      break;
+    }
+    case SettingId::BatteryPoll:
+      next.battery_poll_s = stepChoice(kBatteryPollSteps, settings_.battery_poll_s, step, wrap);
+      break;
+    case SettingId::IdleSleep:
+      next.idle_sleep_s = stepChoice(kIdleSleepSteps, settings_.idle_sleep_s, step, wrap);
+      break;
+    case SettingId::SleepPlan: {
+      size_t idx = kSleepPlanCount;  // 自定义计划（web 设置）视为不在预设表中
+      for (size_t i = 0; i < kSleepPlanCount; ++i) {
+        if (kSleepPlans[i].start == settings_.sleep_start_min &&
+            kSleepPlans[i].end == settings_.sleep_end_min) {
+          idx = i;
+          break;
+        }
+      }
+      size_t target = 0;
+      if (idx == kSleepPlanCount) {
+        target = step > 0 ? 0 : kSleepPlanCount - 1;
+      } else {
+        target = static_cast<size_t>((static_cast<int64_t>(idx) + step +
+                                      static_cast<int64_t>(kSleepPlanCount)) %
+                                     static_cast<int64_t>(kSleepPlanCount));
+      }
+      next.sleep_start_min = kSleepPlans[target].start;
+      next.sleep_end_min = kSleepPlans[target].end;
+      break;
+    }
+    case SettingId::Diagnostics:
+      next.diagnostics_enabled = !settings_.diagnostics_enabled;
+      break;
+    case SettingId::BleObserver:
+      if (!eego::ble::BleManager::instance().status().compiled) {
+        showBanner(tr(Str::Unavailable), 3000);
+        return true;
+      }
+      next.ble_observer_enabled = !settings_.ble_observer_enabled;
+      break;
+    default:
+      return false;
+  }
+  if (updateSettings(next) && id == SettingId::SleepPlan && next.sleep_start_min >= 0) {
+    showBanner(tr(Str::DeepSleepOffline), 5000);
+  }
+  markDirty();
+  return true;
+}
+
+// ── 触控 ────────────────────────────────────────────────────────────────────
+
+PanelApp::TouchHit PanelApp::resolveTouchHit(int16_t x, int16_t y) const {
+  TouchHit hit;
+  if (y >= geom::kSoftKeyY && y < geom::kSoftKeyY + geom::kSoftKeyH) {
+    const size_t n = softKeyCount();
+    if (n > 0) {
+      const int gap = geom::kSoftKeyGap;
+      const int kw = (geom::kContentW - gap * static_cast<int>(n - 1)) / static_cast<int>(n);
+      int idx = (x - geom::kContentX) / (kw + gap);
+      idx = std::max(0, std::min(idx, static_cast<int>(n) - 1));
+      hit.kind = TouchHit::Kind::SoftKey;
+      hit.index = idx;
+    }
+    return hit;
+  }
+  if (page_ == Page::Settings) {
+    if (geom::kSettingsPrevArrow.contains(x, y)) {
+      hit.kind = TouchHit::Kind::PagePrev;
+      return hit;
+    }
+    if (geom::kSettingsNextArrow.contains(x, y)) {
+      hit.kind = TouchHit::Kind::PageNext;
+      return hit;
+    }
+    const int top = geom::kSettingsRowTop;
+    const int pitch = geom::kSettingsRowPitch;
+    if (y >= top && y < top + pitch * static_cast<int>(kSettingsRowsPerPage)) {
+      const size_t row = static_cast<size_t>((y - top) / pitch);
+      const size_t global = settingsPage() * kSettingsRowsPerPage + row;
+      const std::vector<SettingId> rows = visibleSettings();
+      if (global < rows.size()) {
+        hit.kind = TouchHit::Kind::Row;
+        hit.index = static_cast<int>(global);
+        if (x >= geom::kSettingsValueX0 && x < geom::kContentX + geom::kContentW) {
+          const int mid = (geom::kSettingsValueX0 + geom::kSettingsValueX1) / 2;
+          hit.valueLeft = x < mid;
+          hit.valueRight = !hit.valueLeft;
+        }
+      }
+    }
+  }
+  return hit;
+}
+
+std::string PanelApp::controlForHit(const TouchHit& hit) const {
+  const std::string prefix = std::to_string(static_cast<unsigned>(page_));
+  switch (hit.kind) {
+    case TouchHit::Kind::SoftKey:
+      return prefix + ":key:" + std::to_string(hit.index);
+    case TouchHit::Kind::Row:
+      return prefix + ":row:" + std::to_string(hit.index + 1);
+    case TouchHit::Kind::PagePrev:
+      return prefix + ":pager:prev";
+    case TouchHit::Kind::PageNext:
+      return prefix + ":pager:next";
+    case TouchHit::Kind::None:
+      break;
+  }
+  return {};
 }
 
 std::string PanelApp::focusedControl() const {
   if (page_ == Page::Dashboard) return dashboard_.focusedControl();
-  if (page_ == Page::Settings) return controlForHit(static_cast<int>(focus_ + 1), true);
+  TouchHit hit;
+  hit.index = static_cast<int>(focus_);
+  if (page_ == Page::Settings) {
+    hit.kind = TouchHit::Kind::Row;
+    return controlForHit(hit);
+  }
   if (page_ == Page::Overview || page_ == Page::Detail || page_ == Page::Status ||
       page_ == Page::Help) {
-    return controlForHit(static_cast<int>(focus_), false);
+    hit.kind = TouchHit::Kind::SoftKey;
+    return controlForHit(hit);
   }
   return {};
 }
 
 std::string PanelApp::touchControl(int16_t x, int16_t y) const {
   if (page_ == Page::Dashboard) return dashboard_.touchControl(x, y);
-  int hit_idx = -1;
-  bool hit_row = false;
-  resolveTouchHit(x, y, hit_idx, hit_row);
-  return controlForHit(hit_idx, hit_row);
+  return controlForHit(resolveTouchHit(x, y));
 }
 
 void PanelApp::onTouchTap(int16_t x, int16_t y) {
@@ -954,29 +1318,44 @@ void PanelApp::onTouchTap(int16_t x, int16_t y) {
     dashboard_.touch(x, y);
     return;
   }
-  int hit_idx = -1;
-  bool hit_row = false;
-  resolveTouchHit(x, y, hit_idx, hit_row);
-  if (hit_idx >= 0 && !hit_row) {
-    if (page_ == Page::Settings) back();
-    else activateSoftKey(static_cast<size_t>(hit_idx));
-    return;
-  }
-  if (hit_row) {
-    const size_t row = static_cast<size_t>(hit_idx - 1);
-    if (row == focus_) activateSoftKey(static_cast<size_t>(hit_idx));
-    else {
-      focus_ = row;
-      markDirty();
+  const TouchHit hit = resolveTouchHit(x, y);
+  switch (hit.kind) {
+    case TouchHit::Kind::SoftKey:
+      activateSoftKey(static_cast<size_t>(hit.index));
+      return;
+    case TouchHit::Kind::PagePrev:
+      movePage(-1);
+      return;
+    case TouchHit::Kind::PageNext:
+      movePage(1);
+      return;
+    case TouchHit::Kind::Row: {
+      // 一次点按 = 聚焦 + 激活（危险动作仍经 armConfirm 布防）；点值列左/右半
+      // 对取值行做 -1/+1 调整。
+      const std::vector<SettingId> rows = visibleSettings();
+      const size_t row = static_cast<size_t>(hit.index);
+      if (row >= rows.size()) return;
+      if (focus_ != row) {
+        focus_ = row;
+        markDirty();
+      }
+      const SettingId id = rows[row];
+      if ((hit.valueLeft || hit.valueRight) && settingAdjustable(id)) {
+        adjustSettingRow(id, hit.valueLeft ? -1 : 1);
+      } else {
+        activateSettingRow(id);
+      }
+      return;
     }
-    return;
+    case TouchHit::Kind::None:
+      break;
   }
   switch (page_) {
     case Page::Overview:
-      if (y >= geom::kContentTop + 64 && y < geom::kContentTop + 474) gotoPage(Page::Table);
+      if (y >= geom::kOverviewCardsTop && y < geom::kOverviewCardsBottom) gotoPage(Page::Table);
       break;
     case Page::Table: {
-      const int16_t rows_y = geom::kContentTop + 60;
+      const int16_t rows_y = geom::kTableRowTop;
       if (y >= rows_y && y < rows_y + geom::kRowsPerPage * geom::kRowH) {
         const size_t row = static_cast<size_t>((y - rows_y) / geom::kRowH);
         std::vector<const alert_core::AlertRecord*> vis;
@@ -992,6 +1371,77 @@ void PanelApp::onTouchTap(int16_t x, int16_t y) {
     default:
       break;
   }
+}
+
+void PanelApp::onTouchHold(int16_t x, int16_t y) {
+  // 设置页长按值列：时区按 6 小时步进，其余取值行同点按（±1 档）。
+  if (page_ != Page::Settings) return;
+  const TouchHit hit = resolveTouchHit(x, y);
+  if (hit.kind != TouchHit::Kind::Row || !(hit.valueLeft || hit.valueRight)) return;
+  const std::vector<SettingId> rows = visibleSettings();
+  const size_t row = static_cast<size_t>(hit.index);
+  if (row >= rows.size() || !settingAdjustable(rows[row])) return;
+  if (focus_ != row) {
+    focus_ = row;
+    markDirty();
+  }
+  activeInputControl_ = controlForHit(hit);
+  adjustSettingRow(rows[row], hit.valueLeft ? -1 : 1, rows[row] == SettingId::Timezone);
+}
+
+void PanelApp::onTouchSwipe(eego::TouchEventType type, int64_t now_us) {
+  // 左滑/上滑 = 下一页；右滑/下滑 = 上一页。右滑在首个子页（或无子页的页面）= 返回。
+  const bool forward =
+      type == eego::TouchEventType::SwipeLeft || type == eego::TouchEventType::SwipeUp;
+  const bool swipeRight = type == eego::TouchEventType::SwipeRight;
+  switch (page_) {
+    case Page::Overview:
+      if (forward) gotoPage(Page::Table);
+      break;
+    case Page::Table:
+    case Page::Settings:
+      if (pageEdge(forward ? 1 : -1)) {
+        if (swipeRight) back();
+        break;  // 已在边界：不循环
+      }
+      requestNavigation(NavigationKind::Page, forward ? 1 : -1, now_us);
+      break;
+    case Page::Detail:
+    case Page::Status:
+    case Page::Help:
+      if (swipeRight) back();
+      break;
+    case Page::Dashboard:
+      requestNavigation(NavigationKind::Page, forward ? 1 : -1, now_us);
+      break;
+    default:
+      break;
+  }
+}
+
+void PanelApp::syncDoublePress(bool force) {
+  // 双击检测会把 Up/Down 短按延迟 kInputDoublePressUs：只在当前页确有
+  // up.double / down.double 有效绑定时开启。
+  const std::string context = pageContext();
+  const eego::admin::InputBindingSet set = eego::admin::InputBindings::instance().snapshot();
+  lastDoublePressSyncMs_ = nowMs();
+  if (!force && doublePressSynced_ && set.revision == doublePressRevision_ &&
+      context == doublePressContext_) {
+    return;
+  }
+  doublePressSynced_ = true;
+  doublePressRevision_ = set.revision;
+  doublePressContext_ = context;
+  auto bound = [&](eego::admin::InputTrigger trigger) {
+    if (page_ == Page::Provision) return false;  // 配网页不分发绑定
+    eego::admin::InputBinding binding;
+    return eego::admin::resolveInputBinding(set.bindings, context, trigger, binding) &&
+           binding.action.kind != eego::admin::InputActionKind::None;
+  };
+  eego::ButtonManager& buttons = eego::ButtonManager::instance();
+  buttons.setDoublePressEnabled(eego::ButtonId::Up, bound(eego::admin::InputTrigger::UpDouble));
+  buttons.setDoublePressEnabled(eego::ButtonId::Down,
+                                bound(eego::admin::InputTrigger::DownDouble));
 }
 
 // ── 动作 ────────────────────────────────────────────────────────────────────
@@ -1099,127 +1549,39 @@ void PanelApp::doPollNow() {
   markDirty();
 }
 
-void PanelApp::activateSettingRow(size_t row) {
-  eego::settings::Settings next = settings_;
-  switch (row) {
-    case 0: {
+void PanelApp::activateSettingRow(SettingId id) {
+  // 取值行：前进一档（循环）；动作/查看行：执行或横幅展示。
+  if (settingAdjustable(id)) {
+    adjustSettingRow(id, 1, false, true);
+    return;
+  }
+  switch (id) {
+    case SettingId::Network: {
       const eego::net::NetStatusSnapshot& status = netStatus();
       if (!status.wifi.ip.empty()) showBannerFmt(5000, "http://%s/", status.wifi.ip.c_str());
       else showBanner(tr(Str::WifiDisconnected), 3000);
       break;
     }
-    case 1: armConfirm(ConfirmKind::NetworkRecovery); break;
-    case 2: armConfirm(ConfirmKind::WifiReset); break;
-    case 3:
+    case SettingId::RecoveryAp: armConfirm(ConfirmKind::NetworkRecovery); break;
+    case SettingId::WifiReset: armConfirm(ConfirmKind::WifiReset); break;
+    case SettingId::Bluetooth:
       if (eego::ble::BleManager::instance().provisioningActive()) {
         eego::ble::BleManager::instance().cancelProvisioning();
         clearBlePop();
         bleProvisionWasActive_ = false;
         showBanner(tr(Str::BleProvFailed), 3000);
+      } else if (!eego::ble::BleManager::instance().status().compiled) {
+        showBanner(tr(Str::Unavailable), 3000);
       } else {
         armConfirm(ConfirmKind::BleProvision);
       }
       break;
-    case 4:
-      next.language = settings_.language == "zh" ? "en" : "zh";
-      updateSettings(next);
-      break;
-    case 5:
-      next.timezone_offset_min += 60;
-      if (next.timezone_offset_min > 840) next.timezone_offset_min = -720;
-      updateSettings(next);
-      break;
-    case 6:
-    case 7:
-    case 8: {
-      if (!eego::FrontlightManager::instance().present()) {
-        showBanner(tr(Str::FrontlightMissing), 3000);
-        break;
-      }
-      if (row == 6) next.frontlight_enabled = !settings_.frontlight_enabled;
-      if (row == 7) {
-        switch (settings_.frontlight_brightness) {
-          case 10: next.frontlight_brightness = 25; break;
-          case 25: next.frontlight_brightness = 50; break;
-          case 50: next.frontlight_brightness = 75; break;
-          case 75: next.frontlight_brightness = 100; break;
-          default: next.frontlight_brightness = 10; break;
-        }
-      }
-      if (row == 8) next.frontlight_warmth = (settings_.frontlight_warmth + 25) % 125;
-      updateSettings(next);
-      break;
-    }
-    case 9:
-      switch (settings_.data_refresh_s) {
-        case 0: next.data_refresh_s = 60; break;
-        case 60: next.data_refresh_s = 300; break;
-        case 300: next.data_refresh_s = 900; break;
-        default: next.data_refresh_s = 0; break;
-      }
-      updateSettings(next);
-      break;
-    case 10: doPollNow(); break;
-    case 11:
-      switch (settings_.epd_full_refresh_s) {
-        case 0: next.epd_full_refresh_s = 3600; break;
-        case 3600: next.epd_full_refresh_s = 86400; break;
-        case 86400: next.epd_full_refresh_s = 604800; break;
-        default: next.epd_full_refresh_s = 0; break;
-      }
-      updateSettings(next);
-      break;
-    case 12:
+    case SettingId::PollNow: doPollNow(); break;
+    case SettingId::EpdNow:
       markDirty(true);
       showBanner(tr(Str::FullRefreshQueued), 3000);
       break;
-    case 13:
-      switch (settings_.power_mode) {
-        case PowerMode::Auto: next.power_mode = PowerMode::Mains; break;
-        case PowerMode::Mains: next.power_mode = PowerMode::Battery; break;
-        default: next.power_mode = PowerMode::Auto; break;
-      }
-      updateSettings(next);
-      break;
-    case 14:
-      switch (settings_.battery_poll_s) {
-        case 300: next.battery_poll_s = 900; break;
-        case 900: next.battery_poll_s = 1800; break;
-        case 1800: next.battery_poll_s = 3600; break;
-        case 3600: next.battery_poll_s = 21600; break;
-        default: next.battery_poll_s = 300; break;
-      }
-      updateSettings(next);
-      break;
-    case 15:
-      switch (settings_.idle_sleep_s) {
-        case 0: next.idle_sleep_s = 30; break;
-        case 30: next.idle_sleep_s = 90; break;
-        case 90: next.idle_sleep_s = 300; break;
-        case 300: next.idle_sleep_s = 600; break;
-        default: next.idle_sleep_s = 0; break;
-      }
-      updateSettings(next);
-      break;
-    case 16:
-      if (settings_.sleep_start_min < 0) {
-        next.sleep_start_min = 22 * 60;
-        next.sleep_end_min = 6 * 60;
-      } else if (settings_.sleep_start_min == 22 * 60 && settings_.sleep_end_min == 6 * 60) {
-        next.sleep_start_min = 23 * 60;
-        next.sleep_end_min = 7 * 60;
-      } else if (settings_.sleep_start_min == 23 * 60 && settings_.sleep_end_min == 7 * 60) {
-        next.sleep_start_min = 12 * 60 + 30;
-        next.sleep_end_min = 13 * 60 + 30;
-      } else {
-        next.sleep_start_min = -1;
-        next.sleep_end_min = -1;
-      }
-      if (updateSettings(next) && next.sleep_start_min >= 0) {
-        showBanner(tr(Str::DeepSleepOffline), 5000);
-      }
-      break;
-    case 17: {
+    case SettingId::NextWake: {
       const uint64_t wake = nextWakeAt(nowMs());
       if (wake == 0) showBanner(tr(Str::NotScheduled), 3000);
       else {
@@ -1229,7 +1591,7 @@ void PanelApp::activateSettingRow(size_t row) {
       }
       break;
     }
-    case 18: {
+    case SettingId::LastWake: {
       Str text = Str::WakeOther;
       if (wakeCause_ == ESP_SLEEP_WAKEUP_TIMER) text = Str::WakeTimer;
       else if (wakeCause_ == ESP_SLEEP_WAKEUP_EXT0) text = Str::WakeButton;
@@ -1237,39 +1599,37 @@ void PanelApp::activateSettingRow(size_t row) {
       showBanner(tr(text), 3000);
       break;
     }
-    case 19:
+    case SettingId::Storage:
       showBanner(eego::SdCard::instance().ready() ? tr(Str::SdReady) : tr(Str::SdMissing), 3000);
       break;
-    case 20:
-      next.diagnostics_enabled = !settings_.diagnostics_enabled;
-      updateSettings(next);
-      break;
-    case 21:
+    case SettingId::RunDiagnostics:
       if (settings_.diagnostics_enabled) diagSmoke();
       else showBanner(tr(Str::Unavailable), 3000);
       break;
-    case 22:
+    case SettingId::Security:
       showBanner(admin::AuthManager::instance().hasPassword() ? tr(Str::SecuritySet)
                                                               : tr(Str::SecurityMissing),
                  3000);
       break;
-    case 23: armConfirm(ConfirmKind::ClearMutes); break;
-    case 24: armConfirm(ConfirmKind::FactoryReset); break;
-    case 25: {
+    case SettingId::Mutes: armConfirm(ConfirmKind::ClearMutes); break;
+    case SettingId::FactoryReset: armConfirm(ConfirmKind::FactoryReset); break;
+    case SettingId::Version: {
       const esp_app_desc_t* description = esp_app_get_description();
       showBannerFmt(5000, "%s %s", description->project_name, description->version);
       break;
     }
-    case 26:
+    case SettingId::InputHelp:
       helpReturn_ = Page::Settings;
       gotoPage(Page::Help);
       break;
-    case 27: resetInputBindings(); break;
-    case 28:
-      next.ble_observer_enabled = !settings_.ble_observer_enabled;
-      updateSettings(next);
+    case SettingId::InputReset: resetInputBindings(); break;
+    case SettingId::BleUnbind:
+      if (!eego::ble::BleManager::instance().status().compiled) {
+        showBanner(tr(Str::Unavailable), 3000);
+      } else {
+        armConfirm(ConfirmKind::BleUnbind);
+      }
       break;
-    case 29: armConfirm(ConfirmKind::BleUnbind); break;
     default: break;
   }
 }
@@ -1315,7 +1675,13 @@ void PanelApp::doStartBleProvision() {
     return;
   }
   bleProvisionWasActive_ = true;
-  focus_ = 3;
+  if (page_ == Page::Settings) {
+    const std::vector<SettingId> rows = visibleSettings();
+    for (size_t i = 0; i < rows.size(); ++i) {
+      if (rows[i] == SettingId::Bluetooth) focus_ = i;
+    }
+  }
+  lastBleProvRenderMs_ = nowMs();
   awakeDeadlineMs_ = nowMs() + 180000;
   showBanner(tr(Str::BleProvStarted), 7000);
   markDirty(true);
@@ -1374,6 +1740,7 @@ void PanelApp::resetInputBindings() {
       document != nullptr && document->configured ? &document->dashboard : nullptr;
   if (admin::InputBindings::instance().reset(false, 0, current, error, conflict)) {
     showBanner(tr(Str::InputResetDone), 3000);
+    syncDoublePress(true);
   } else {
     showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), error.c_str());
   }
@@ -1573,6 +1940,11 @@ void PanelApp::onModeChange(bool mains) {
   NetStack::instance().wifi().setPowerSave(mains);  // 常供电 modem-sleep
   eego::ble::BleManager::instance().onPowerMode(mains);
   eego::ble::BleManager::instance().setBatteryScanWindow(false);
+  pollIdleWait_.active = false;
+  if (mains && sleepPending_ && !sleepScheduled_) {
+    sleepPending_ = false;  // 常供电不再走空闲休眠
+    sleepIdleWait_.active = false;
+  }
   if (mains) {
     battPhase_ = BattPhase::Mains;
     batteryPollStarted_ = false;
@@ -1586,6 +1958,32 @@ void PanelApp::onModeChange(bool mains) {
     NetStack::instance().reconnectNow();
   }
   markDirty(true);
+}
+
+void PanelApp::startNetIdleWait(NetIdleWait& w, int64_t now, int64_t budgetMs) {
+  w.active = true;
+  w.deadlineMs = now + budgetMs;
+  w.nextProbeMs = now;
+  w.intervalMs = kNetIdleFirstIntervalMs;
+}
+
+int PanelApp::pollNetIdle(NetIdleWait& w, int64_t now) {
+  if (!w.active) return 1;
+  if (now < w.nextProbeMs) return 0;
+  // net_task 按序处理命令：WaitIdle 被执行即说明此前入队的工作全部完成。
+  // 超时的探测命令留在队列中稍后被无害消费；退避间隔把它们限制在个位数。
+  if (NetStack::instance().waitIdle(kNetIdleProbeMs)) {
+    w.active = false;
+    return 1;
+  }
+  const int64_t after = esp_timer_get_time() / 1000;
+  if (after >= w.deadlineMs) {
+    w.active = false;
+    return -1;
+  }
+  w.nextProbeMs = after + w.intervalMs;
+  w.intervalMs = std::min<int64_t>(w.intervalMs * 2, kNetIdleMaxIntervalMs);
+  return 0;
 }
 
 void PanelApp::batteryFsm(int64_t now) {
@@ -1604,22 +2002,27 @@ void PanelApp::batteryFsm(int64_t now) {
           NetStack::instance().pollNow("");
           dashboard_.pollBattery();
           batteryPollStarted_ = true;
+          pollIdleWait_.active = false;
           pollDeadlineMs_ = now + kDashboardPollWaitMs;
           markDirty(true);
         }
         return;
       }
 
-      const bool dashboard_idle = dashboard_.networkIdle();
-      if (!dashboard_idle && now <= pollDeadlineMs_) return;
-      if (!dashboard_idle) {
-        ESP_LOGW(TAG, "battery poll: dashboard still busy, serving cached data");
-      }
-      if (!NetStack::instance().waitIdle(30000)) {
-        ESP_LOGW(TAG, "battery poll: waitIdle timeout, retrying once");
-        if (!NetStack::instance().waitIdle(10000)) {
-          ESP_LOGW(TAG, "battery poll: net still not idle, serving with current data");
+      if (!pollIdleWait_.active) {
+        const bool dashboard_idle = dashboard_.networkIdle();
+        if (!dashboard_idle && now <= pollDeadlineMs_) return;
+        if (!dashboard_idle) {
+          ESP_LOGW(TAG, "battery poll: dashboard still busy, serving cached data");
         }
+        // 非阻塞等待 net_task 静默（预算 = 原 30s + 重试 10s），app_task 期间照常
+        // 处理输入与渲染。
+        startNetIdleWait(pollIdleWait_, now, kPollIdleBudgetMs);
+      }
+      const int idle = pollNetIdle(pollIdleWait_, now);
+      if (idle == 0) return;
+      if (idle < 0) {
+        ESP_LOGW(TAG, "battery poll: net still not idle, serving with current data");
       }
       battPhase_ = BattPhase::Serving;
       eego::ble::BleManager::instance().setBatteryScanWindow(true);
@@ -1641,45 +2044,86 @@ void PanelApp::batteryFsm(int64_t now) {
   }
 }
 
-void PanelApp::enterSleep(int64_t now, int64_t durationMs) {
-  ESP_LOGI(TAG, "entering deep sleep");
-  int64_t sleepMs = durationMs;
-  if (sleepMs < 0) {
-    sleepMs = cycleStartMs_ + static_cast<int64_t>(settings_.battery_poll_s) * 1000 - now;
+void PanelApp::deferSleep(int64_t now) {
+  sleepPending_ = false;
+  sleepIdleWait_.active = false;
+  battPhase_ = mains_ ? BattPhase::Mains : BattPhase::Serving;
+  awakeDeadlineMs_ = now + 30000;
+  lastScheduleCheckMs_ = now + 30000;
+  if (eego::FrontlightManager::instance().frontlightAvailable()) {
+    applySettings(eego::settings::kChangedFrontlight);
   }
-  if (sleepMs < 10000) sleepMs = 10000;
+  markDirty();
+}
 
+void PanelApp::enterSleep(int64_t now, int64_t durationMs) {
+  if (sleepPending_) return;  // 已在等待网络静默
+  ESP_LOGI(TAG, "sleep requested");
   if (!dashboard_.networkIdle()) {
     ESP_LOGW(TAG, "battery: dashboard work pending, sleep deferred");
-    battPhase_ = mains_ ? BattPhase::Mains : BattPhase::Serving;
-    awakeDeadlineMs_ = now + 30000;
-    lastScheduleCheckMs_ = now + 30000;
-    applySettings(eego::settings::kChangedFrontlight);
-    markDirty();
+    deferSleep(now);
     return;
   }
-
-  // 1. 网络静默（显式处理超时：重试一轮；仍超时则中止本次休眠回 Serving，
+  // 1. 网络静默（非阻塞；预算 = 原 10s + 重试 5s；超时则中止本次休眠回 Serving，
   //    30s 后重试——绝不带在途 HTTP 传输断电 WiFi）
-  if (!NetStack::instance().waitIdle(10000) &&
-      !NetStack::instance().waitIdle(5000)) {
-    ESP_LOGW(TAG, "net not idle after retries, sleep aborted this round");
-    battPhase_ = mains_ ? BattPhase::Mains : BattPhase::Serving;
-    awakeDeadlineMs_ = now + 30000;
-    lastScheduleCheckMs_ = now + 30000;
-    applySettings(eego::settings::kChangedFrontlight);
-    markDirty();
+  sleepPending_ = true;
+  sleepScheduled_ = durationMs >= 0;
+  sleepRequestedMs_ = now;
+  sleepDurationMs_ = durationMs;
+  startNetIdleWait(sleepIdleWait_, now, kSleepIdleBudgetMs);
+  serviceSleep(now);
+}
+
+void PanelApp::serviceSleep(int64_t now) {
+  if (!sleepPending_) return;
+  // 电池交互窗口内（硬上限前）有新输入 → 取消本次空闲休眠，回 Serving 续期。
+  if (!sleepScheduled_ && lastInputMs_ > sleepRequestedMs_ &&
+      now < cycleStartMs_ + 600000) {
+    ESP_LOGI(TAG, "sleep cancelled by input");
+    sleepPending_ = false;
+    sleepIdleWait_.active = false;
+    if (battPhase_ == BattPhase::Serving && settings_.idle_sleep_s > 0) {
+      awakeDeadlineMs_ = now + static_cast<int64_t>(settings_.idle_sleep_s) * 1000;
+    }
     return;
   }
+  if (admin::ProvisionPortal::instance().apActive() ||
+      eego::ble::BleManager::instance().provisioningActive()) {
+    ESP_LOGW(TAG, "recovery/provisioning became active, sleep deferred");
+    deferSleep(now);
+    return;
+  }
+  const int idle = pollNetIdle(sleepIdleWait_, now);
+  if (idle == 0) return;
+  if (idle < 0) {
+    ESP_LOGW(TAG, "net not idle after retries, sleep aborted this round");
+    deferSleep(now);
+    return;
+  }
+  if (!dashboard_.networkIdle()) {
+    ESP_LOGW(TAG, "battery: dashboard work started while waiting, sleep deferred");
+    deferSleep(now);
+    return;
+  }
+  int64_t sleepMs = sleepDurationMs_;
+  if (sleepMs < 0) {
+    sleepMs = cycleStartMs_ + static_cast<int64_t>(settings_.battery_poll_s) * 1000 - now;
+  } else {
+    sleepMs -= now - sleepRequestedMs_;  // 计划睡眠：扣除等待静默耗时
+  }
+  sleepPending_ = false;
+  finishSleep(now, sleepMs);
+}
+
+void PanelApp::finishSleep(int64_t now, int64_t sleepMs) {
+  (void)now;
+  if (sleepMs < 10000) sleepMs = 10000;
   if (eego::ble::BleManager::instance().beforeSleep() != ESP_OK) {
     ESP_LOGW(TAG, "BLE stop failed; sleep aborted this round");
-    battPhase_ = mains_ ? BattPhase::Mains : BattPhase::Serving;
-    awakeDeadlineMs_ = now + 30000;
-    lastScheduleCheckMs_ = now + 30000;
-    applySettings(eego::settings::kChangedFrontlight);
-    markDirty();
+    deferSleep(nowMs());
     return;
   }
+  ESP_LOGI(TAG, "entering deep sleep");
   eego::FrontlightManager::instance().off();
   NetStack::instance().wifi().powerOff();
 
@@ -1687,16 +2131,29 @@ void PanelApp::enterSleep(int64_t now, int64_t durationMs) {
     eego::PortraitCanvas& c = *deps_.canvas;
     c.clear();
     c.useUiContentRect();
-    eego::FontManager::instance().drawTextGray(c, 76, 320, tr(Str::Sleeping), 2, 0);
-    eego::FontManager::instance().drawTextGray(c, 76, 360, tr(Str::WakeHint), 1, 6);
     char wake[48];
     const uint64_t wakeTs = nowUnix() + static_cast<uint64_t>(sleepMs / 1000);
     struct tm tm_buf;
     localTm(settings_, wakeTs, tm_buf);
     snprintf(wake, sizeof(wake), "%02d-%02d %02d:%02d", tm_buf.tm_mon + 1, tm_buf.tm_mday,
              tm_buf.tm_hour, tm_buf.tm_min);
-    eego::FontManager::instance().drawTextGray(c, 76, 396, wake, 1, 6);
-    eego::FontManager::instance().drawTextGray(c, 76, 420, tr(Str::DeepSleepOffline), 1, 6);
+    // 标题 + 三行说明，整体在内容区垂直居中，左对齐于 kInnerX。
+    const int16_t titleLh = lineHeight(style::kTitle.scale);
+    const int16_t captionLh = lineHeight(style::kCaption.scale);
+    const int16_t blockH = static_cast<int16_t>(titleLh + 8 + 3 * captionLh);
+    int16_t y = static_cast<int16_t>((geom::kContentTop + geom::kContentBottom - blockH) / 2);
+    drawTextFit(c, geom::kInnerX, y, geom::kInnerW, tr(Str::Sleeping), style::kTitle.scale,
+                style::kTitle.bold, style::kTitle.gray);
+    y = static_cast<int16_t>(y + titleLh + 8);
+    drawTextFit(c, geom::kInnerX, y, geom::kInnerW, tr(Str::WakeHint), style::kCaption.scale,
+                style::kCaption.bold, style::kCaption.gray);
+    y = static_cast<int16_t>(y + captionLh);
+    drawTextFit(c, geom::kInnerX, y, geom::kInnerW, wake, style::kCaption.scale,
+                style::kCaption.bold, style::kCaption.gray);
+    y = static_cast<int16_t>(y + captionLh);
+    drawTextFit(c, geom::kInnerX, y, geom::kInnerW, tr(Str::DeepSleepOffline),
+                style::kCaption.scale, style::kCaption.bold, style::kCaption.gray);
+    c.requestFullRefresh();
     c.display(eego::RefreshMode::Full);
     c.waitRefreshComplete();
     if (deps_.display != nullptr) deps_.display->deepSleep();
@@ -1830,7 +2287,7 @@ size_t PanelApp::softKeyCount() const {
       return rec != nullptr && !dashboard_.linkedPanelForAlert(*rec).empty() ? 5 : 4;
     }
     case Page::Status: return 2;
-    case Page::Settings:
+    case Page::Settings: return 3;
     case Page::Help: return 1;
     default: return 0;
   }
@@ -1869,6 +2326,10 @@ void PanelApp::softKeys(SoftKeyModel* out, size_t cap) const {
       out[1] = {tr(Str::Back), true};
       break;
     case Page::Settings:
+      out[0] = {tr(Str::PrevPage), !pageEdge(-1)};
+      out[1] = {tr(Str::Back), true};
+      out[2] = {tr(Str::NextPage), !pageEdge(1)};
+      break;
     case Page::Help:
       out[0] = {tr(Str::Back), true};
       break;
@@ -1882,6 +2343,7 @@ void PanelApp::softKeys(SoftKeyModel* out, size_t cap) const {
 void PanelApp::render(int64_t now) {
   if (page_ == Page::Dashboard) {
     dashboard_.render();
+    noteInputResume();
     forceFull_ = false;
     dirty_ = false;
     lastRenderMs_ = now;
@@ -1966,6 +2428,7 @@ void PanelApp::render(int64_t now) {
 
   c.display(forceFull_ ? eego::RefreshMode::Full : eego::RefreshMode::Fast);
   c.waitRefreshComplete();
+  noteInputResume();
   if (forceFull_) lastFullRenderMs_ = now;
   forceFull_ = false;
   dirty_ = false;
@@ -1974,8 +2437,11 @@ void PanelApp::render(int64_t now) {
 
 void PanelApp::buildStatusBar(StatusBarModel& m) {
   // UTC 时间源不变；状态栏按 DeviceSettings 的显示时区偏移。
+  renderedClockKey_ = -1;
+  lastClockCheckMs_ = nowMs();
   if (TimeSource::valid()) {
     const uint64_t now = TimeSource::now();
+    renderedClockKey_ = static_cast<int64_t>(now / 60);
     struct tm tm_buf;
     localTm(settings_, now, tm_buf);
     snprintf(m.timeText, sizeof(m.timeText), "%02d-%02d %02d:%02d", tm_buf.tm_mon + 1,
@@ -2239,131 +2705,228 @@ void PanelApp::buildHelp(S3Model& m) {
 }
 
 void PanelApp::buildS4(S4Model& m) {
-  auto add = [&m](Str label, const std::string& value, bool isAction) {
+  const std::vector<SettingId> ids = visibleSettings();
+  if (ids.empty()) return;
+  if (focus_ >= ids.size()) focus_ = ids.size() - 1;
+  m.pageCount = (ids.size() + kSettingsRowsPerPage - 1) / kSettingsRowsPerPage;
+  m.page = settingsPage();
+  m.selected = focus_ % kSettingsRowsPerPage;
+  const size_t begin = m.page * kSettingsRowsPerPage;
+  const size_t end = std::min(begin + kSettingsRowsPerPage, ids.size());
+
+  // 只为当前页构建行（避免对不可见行做 net/BLE 查询）
+  char buf[96];
+  const eego::ble::Status ble_runtime = eego::ble::BleManager::instance().status();
+  for (size_t i = begin; i < end; i++) {
     S4RowModel row;
+    std::string value;
+    Str label = Str::None;
+    bool isAction = false;
+    switch (ids[i]) {
+      case SettingId::Network: {
+        const eego::net::NetStatusSnapshot& status = netStatus();
+        label = Str::SetNetwork;
+        value = status.wifi.ip.empty() ? tr(Str::WifiDisconnected) : status.wifi.ip;
+        break;
+      }
+      case SettingId::RecoveryAp:
+        label = Str::SetRecoveryAp;
+        isAction = true;
+        if (admin::ProvisionPortal::instance().apActive()) {
+          snprintf(buf, sizeof(buf), "%us",
+                   static_cast<unsigned>(
+                       admin::ProvisionPortal::instance().windowRemainingMs() / 1000));
+          value = buf;
+        } else {
+          value = tr(Str::Off);
+        }
+        break;
+      case SettingId::WifiReset:
+        label = Str::SetWifiReset;
+        isAction = true;
+        break;
+      case SettingId::Bluetooth:
+        label = Str::SetBluetooth;
+        if (!ble_runtime.compiled) {
+          value = tr(Str::Unavailable);
+        } else if (ble_runtime.role == eego::ble::Role::Provisioning) {
+          snprintf(buf, sizeof(buf), "%s  %us", blePop_.c_str(),
+                   static_cast<unsigned>(ble_runtime.provisioning_remaining_s));
+          value = buf;
+          isAction = true;
+        } else {
+          value = tr(Str::Off);
+          isAction = true;
+        }
+        break;
+      case SettingId::Language:
+        label = Str::SetLanguage;
+        value = settings_.language == "zh" ? tr(Str::LangZh) : tr(Str::LangEn);
+        break;
+      case SettingId::Timezone: {
+        label = Str::SetTimezone;
+        const int offset = settings_.timezone_offset_min;
+        snprintf(buf, sizeof(buf), "UTC%c%02d:%02d", offset < 0 ? '-' : '+', abs(offset) / 60,
+                 abs(offset) % 60);
+        value = buf;
+        break;
+      }
+      case SettingId::Frontlight:
+        label = Str::SetFrontlight;
+        value = settings_.frontlight_enabled ? tr(Str::On) : tr(Str::Off);
+        break;
+      case SettingId::Brightness:
+        label = Str::SetBrightness;
+        snprintf(buf, sizeof(buf), "%u%%",
+                 static_cast<unsigned>(settings_.frontlight_brightness));
+        value = buf;
+        break;
+      case SettingId::Warmth:
+        label = Str::SetWarmth;
+        snprintf(buf, sizeof(buf), "%u%%", static_cast<unsigned>(settings_.frontlight_warmth));
+        value = buf;
+        break;
+      case SettingId::DataRefresh:
+        label = Str::SetDataRefresh;
+        if (settings_.data_refresh_s == 0) {
+          value = tr(Str::SourceSchedules);
+        } else {
+          formatEvery(settings_.data_refresh_s, buf, sizeof(buf));
+          value = buf;
+        }
+        break;
+      case SettingId::PollNow:
+        label = Str::SetPollNow;
+        isAction = true;
+        break;
+      case SettingId::EpdFull:
+        label = Str::SetEpdFull;
+        if (settings_.epd_full_refresh_s == 0) {
+          value = tr(Str::ManualOnly);
+        } else {
+          formatEvery(settings_.epd_full_refresh_s, buf, sizeof(buf));
+          value = buf;
+        }
+        break;
+      case SettingId::EpdNow:
+        label = Str::SetEpdNow;
+        isAction = true;
+        break;
+      case SettingId::PowerMode:
+        label = Str::SetPowerMode;
+        value = tr(settings_.power_mode == PowerMode::Mains     ? Str::ModeMains
+                   : settings_.power_mode == PowerMode::Battery ? Str::ModeBattery
+                                                                : Str::ModeAuto);
+        break;
+      case SettingId::BatteryPoll:
+        label = Str::SetBatteryPoll;
+        formatEvery(settings_.battery_poll_s, buf, sizeof(buf));
+        value = buf;
+        break;
+      case SettingId::IdleSleep:
+        label = Str::SetIdleSleep;
+        if (settings_.idle_sleep_s == 0) {
+          value = tr(Str::Off);
+        } else {
+          formatEvery(settings_.idle_sleep_s, buf, sizeof(buf));
+          value = buf;
+        }
+        break;
+      case SettingId::SleepPlan:
+        label = Str::SetSleepPlan;
+        if (settings_.sleep_start_min < 0) {
+          value = tr(Str::NotScheduled);
+        } else {
+          snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d", settings_.sleep_start_min / 60,
+                   settings_.sleep_start_min % 60, settings_.sleep_end_min / 60,
+                   settings_.sleep_end_min % 60);
+          value = buf;
+        }
+        break;
+      case SettingId::NextWake: {
+        label = Str::SetNextWake;
+        const uint64_t wake = nextWakeAt(nowMs());
+        if (wake == 0) {
+          value = tr(Str::NotScheduled);
+        } else {
+          formatTs(wake, buf, sizeof(buf));
+          value = buf;
+        }
+        break;
+      }
+      case SettingId::LastWake: {
+        label = Str::SetLastWake;
+        Str wake_reason = Str::WakeOther;
+        if (wakeCause_ == ESP_SLEEP_WAKEUP_TIMER) wake_reason = Str::WakeTimer;
+        else if (wakeCause_ == ESP_SLEEP_WAKEUP_EXT0) wake_reason = Str::WakeButton;
+        else if (wakeCause_ == ESP_SLEEP_WAKEUP_UNDEFINED) wake_reason = Str::WakeReset;
+        value = tr(wake_reason);
+        break;
+      }
+      case SettingId::Storage:
+        label = Str::SetStorage;
+        value = eego::SdCard::instance().ready() ? tr(Str::SdReady) : tr(Str::SdMissing);
+        break;
+      case SettingId::Diagnostics:
+        label = Str::SetDiagnostics;
+        value = settings_.diagnostics_enabled ? tr(Str::On) : tr(Str::Off);
+        break;
+      case SettingId::RunDiagnostics:
+        label = Str::SetRunDiagnostics;
+        value = settings_.diagnostics_enabled ? "" : tr(Str::Unavailable);
+        isAction = true;
+        break;
+      case SettingId::Security:
+        label = Str::SetSecurity;
+        value = admin::AuthManager::instance().hasPassword() ? tr(Str::SecuritySet)
+                                                             : tr(Str::SecurityMissing);
+        break;
+      case SettingId::Mutes:
+        label = Str::SetMutes;
+        snprintf(buf, sizeof(buf), tr(Str::MutesFmt), static_cast<unsigned>(muteRuleCount_));
+        value = buf;
+        isAction = true;
+        break;
+      case SettingId::FactoryReset:
+        label = Str::SetFactoryReset;
+        isAction = true;
+        break;
+      case SettingId::Version:
+        label = Str::Version;
+        value = esp_app_get_description()->version;
+        break;
+      case SettingId::InputHelp:
+        label = Str::SetInputHelp;
+        break;
+      case SettingId::InputReset:
+        label = Str::SetInputReset;
+        isAction = true;
+        break;
+      case SettingId::BleObserver:
+        label = Str::SetBleObserver;
+        if (!ble_runtime.compiled) {
+          value = tr(Str::Unavailable);
+        } else if (ble_runtime.role == eego::ble::Role::Observer) {
+          snprintf(buf, sizeof(buf), "%s %us", tr(Str::On),
+                   static_cast<unsigned>(ble_runtime.observer_remaining_s));
+          value = buf;
+        } else {
+          value = settings_.ble_observer_enabled ? tr(Str::On) : tr(Str::Off);
+        }
+        break;
+      case SettingId::BleUnbind:
+        label = Str::SetBleUnbind;
+        if (!ble_runtime.compiled) value = tr(Str::Unavailable);
+        else isAction = true;
+        break;
+      case SettingId::Count:
+        break;
+    }
     row.label = tr(label);
-    row.value = value;
+    row.value = std::move(value);
     row.isAction = isAction;
     m.rows.push_back(std::move(row));
-  };
-  char buf[96];
-  const eego::net::NetStatusSnapshot& status = netStatus();
-  add(Str::SetNetwork, status.wifi.ip.empty() ? tr(Str::WifiDisconnected) : status.wifi.ip, false);
-  if (admin::ProvisionPortal::instance().apActive()) {
-    snprintf(buf, sizeof(buf), "%us",
-             static_cast<unsigned>(admin::ProvisionPortal::instance().windowRemainingMs() / 1000));
-    add(Str::SetRecoveryAp, buf, true);
-  } else {
-    add(Str::SetRecoveryAp, tr(Str::Off), true);
   }
-  add(Str::SetWifiReset, "", true);
-  const eego::ble::Status ble_runtime = eego::ble::BleManager::instance().status();
-  if (!ble_runtime.compiled) {
-    add(Str::SetBluetooth, tr(Str::Unavailable), false);
-  } else if (ble_runtime.role == eego::ble::Role::Provisioning) {
-    snprintf(buf, sizeof(buf), "%s  %us", blePop_.c_str(),
-             static_cast<unsigned>(ble_runtime.provisioning_remaining_s));
-    add(Str::SetBluetooth, buf, true);
-  } else {
-    add(Str::SetBluetooth, tr(Str::Off), true);
-  }
-  add(Str::SetLanguage, settings_.language == "zh" ? tr(Str::LangZh) : tr(Str::LangEn), false);
-  const int offset = settings_.timezone_offset_min;
-  snprintf(buf, sizeof(buf), "UTC%c%02d:%02d", offset < 0 ? '-' : '+', abs(offset) / 60,
-           abs(offset) % 60);
-  add(Str::SetTimezone, buf, false);
-  const bool frontlight = eego::FrontlightManager::instance().present();
-  add(Str::SetFrontlight,
-      !frontlight ? tr(Str::FrontlightMissing)
-                  : (settings_.frontlight_enabled ? tr(Str::On) : tr(Str::Off)),
-      false);
-  snprintf(buf, sizeof(buf), "%u%%", static_cast<unsigned>(settings_.frontlight_brightness));
-  add(Str::SetBrightness, frontlight ? buf : tr(Str::FrontlightMissing), false);
-  snprintf(buf, sizeof(buf), "%u%%", static_cast<unsigned>(settings_.frontlight_warmth));
-  add(Str::SetWarmth, frontlight ? buf : tr(Str::FrontlightMissing), false);
-  if (settings_.data_refresh_s == 0) {
-    add(Str::SetDataRefresh, tr(Str::SourceSchedules), false);
-  } else {
-    snprintf(buf, sizeof(buf), tr(Str::PollEveryFmt),
-             static_cast<unsigned>(settings_.data_refresh_s));
-    add(Str::SetDataRefresh, buf, false);
-  }
-  add(Str::SetPollNow, "", true);
-  if (settings_.epd_full_refresh_s == 0) {
-    add(Str::SetEpdFull, tr(Str::ManualOnly), false);
-  } else {
-    snprintf(buf, sizeof(buf), tr(Str::PollEveryFmt),
-             static_cast<unsigned>(settings_.epd_full_refresh_s));
-    add(Str::SetEpdFull, buf, false);
-  }
-  add(Str::SetEpdNow, "", true);
-  const char* power = tr(Str::ModeAuto);
-  if (settings_.power_mode == PowerMode::Mains) power = tr(Str::ModeMains);
-  if (settings_.power_mode == PowerMode::Battery) power = tr(Str::ModeBattery);
-  add(Str::SetPowerMode, power, false);
-  snprintf(buf, sizeof(buf), tr(Str::PollEveryFmt), static_cast<unsigned>(settings_.battery_poll_s));
-  add(Str::SetBatteryPoll, buf, false);
-  if (settings_.idle_sleep_s == 0) {
-    add(Str::SetIdleSleep, tr(Str::Off), false);
-  } else {
-    snprintf(buf, sizeof(buf), tr(Str::PollEveryFmt), static_cast<unsigned>(settings_.idle_sleep_s));
-    add(Str::SetIdleSleep, buf, false);
-  }
-  if (settings_.sleep_start_min < 0) {
-    add(Str::SetSleepPlan, tr(Str::NotScheduled), false);
-  } else {
-    snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d", settings_.sleep_start_min / 60,
-             settings_.sleep_start_min % 60, settings_.sleep_end_min / 60,
-             settings_.sleep_end_min % 60);
-    add(Str::SetSleepPlan, buf, false);
-  }
-  const uint64_t wake = nextWakeAt(nowMs());
-  if (wake == 0) {
-    add(Str::SetNextWake, tr(Str::NotScheduled), false);
-  } else {
-    formatTs(wake, buf, sizeof(buf));
-    add(Str::SetNextWake, buf, false);
-  }
-  Str wake_reason = Str::WakeOther;
-  if (wakeCause_ == ESP_SLEEP_WAKEUP_TIMER) wake_reason = Str::WakeTimer;
-  else if (wakeCause_ == ESP_SLEEP_WAKEUP_EXT0) wake_reason = Str::WakeButton;
-  else if (wakeCause_ == ESP_SLEEP_WAKEUP_UNDEFINED) wake_reason = Str::WakeReset;
-  add(Str::SetLastWake, tr(wake_reason), false);
-  add(Str::SetStorage, eego::SdCard::instance().ready() ? tr(Str::SdReady) : tr(Str::SdMissing),
-      false);
-  add(Str::SetDiagnostics, settings_.diagnostics_enabled ? tr(Str::On) : tr(Str::Off), false);
-  add(Str::SetRunDiagnostics, settings_.diagnostics_enabled ? "" : tr(Str::Unavailable), true);
-  add(Str::SetSecurity, admin::AuthManager::instance().hasPassword() ? tr(Str::SecuritySet)
-                                                                     : tr(Str::SecurityMissing),
-      false);
-  snprintf(buf, sizeof(buf), tr(Str::MutesFmt), static_cast<unsigned>(muteRuleCount_));
-  add(Str::SetMutes, buf, true);
-  add(Str::SetFactoryReset, "", true);
-  add(Str::Version, esp_app_get_description()->version, false);
-  add(Str::SetInputHelp, "", false);
-  add(Str::SetInputReset, "", true);
-  if (!ble_runtime.compiled) {
-    add(Str::SetBleObserver, tr(Str::Unavailable), false);
-    add(Str::SetBleUnbind, tr(Str::Unavailable), false);
-  } else {
-    if (ble_runtime.role == eego::ble::Role::Observer) {
-      snprintf(buf, sizeof(buf), "%s %us", tr(Str::On),
-               static_cast<unsigned>(ble_runtime.observer_remaining_s));
-      add(Str::SetBleObserver, buf, false);
-    } else {
-      add(Str::SetBleObserver, settings_.ble_observer_enabled ? tr(Str::On) : tr(Str::Off), false);
-    }
-    add(Str::SetBleUnbind, "", true);
-  }
-
-  m.pageCount = (m.rows.size() + kSettingsPageRows - 1) / kSettingsPageRows;
-  m.page = focus_ / kSettingsPageRows;
-  m.selected = focus_ % kSettingsPageRows;
-  const size_t begin = m.page * kSettingsPageRows;
-  const size_t end = std::min(begin + kSettingsPageRows, m.rows.size());
-  std::vector<S4RowModel> visible;
-  for (size_t i = begin; i < end; i++) visible.push_back(std::move(m.rows[i]));
-  m.rows = std::move(visible);
 }
 
 }  // namespace panel
