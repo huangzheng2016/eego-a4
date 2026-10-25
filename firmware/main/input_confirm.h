@@ -26,18 +26,24 @@ enum class ConfirmRecordRule : uint8_t { Mute, Clear };
 bool confirmRecordTargetCurrent(const ConfirmTarget& target, ConfirmRecordRule rule,
                                 const alert_core::AlertSnapshot* snapshot);
 
-class FreshHoldConfirm {
+// 危险确认状态机：arm() 布防后，同一控件的一次“全新”短按确认。
+//   beginPress()   —— 按下必须晚于布防、命中同一控件（physical_power_only 只认 Power）；
+//   noteRelease()  —— 记录同一来源的抬起时刻；
+//   completePress()—— 短按动作（ShortPress/Tap/FrontShort）到达时判定：已抬起、
+//                     按住时长 < 长按阈值、未过期。长按、其他输入由调用方 cancel()。
+class FreshPressConfirm {
  public:
   void arm(const ConfirmTarget& target, int64_t now_us);
   void cancel();
 
-  bool beginHold(ConfirmSource source, const std::string& control, int64_t press_us,
-                 int64_t now_us);
-  bool completeHold(ConfirmSource source, int64_t event_us, int64_t now_us) const;
+  bool beginPress(ConfirmSource source, const std::string& control, int64_t press_us,
+                  int64_t now_us);
+  void noteRelease(ConfirmSource source, int64_t release_us);
+  bool completePress(ConfirmSource source, int64_t now_us) const;
   bool expired(int64_t now_us) const;
 
   bool armed() const { return armed_; }
-  bool holding() const { return holding_; }
+  bool pressing() const { return pressing_; }
   ConfirmSource source() const { return source_; }
   const ConfirmTarget& target() const { return target_; }
 
@@ -46,9 +52,11 @@ class FreshHoldConfirm {
   ConfirmSource source_ = ConfirmSource::None;
   int64_t armed_us_ = 0;
   int64_t deadline_us_ = 0;
-  int64_t hold_start_us_ = 0;
+  int64_t press_us_ = 0;
+  int64_t release_us_ = 0;
   bool armed_ = false;
-  bool holding_ = false;
+  bool pressing_ = false;
+  bool released_ = false;
 };
 
 }  // namespace panel

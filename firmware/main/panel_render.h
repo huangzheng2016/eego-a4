@@ -106,15 +106,10 @@ constexpr int16_t kSettingsRowPitch = 58;
 constexpr int16_t kSettingsRowH = 54;
 constexpr int16_t kSettingsValueX0 = kContentX + kContentW / 2;           // 276
 constexpr int16_t kSettingsValueX1 = kContentX + kContentW - kRowPadX - 16 - 8;  // 484（chevron 左侧）
-// 页码指示条（内容区底部）：‹ 页码 ›，左右箭头为可点区域。
+// 页码指示条（内容区底部）：居中「第 n/N 页」，纯显示（翻页由软键 上一页/下一页）。
 constexpr int16_t kSettingsPagerY =
     kSettingsRowTop + kSettingsRowsPerPage * kSettingsRowPitch + 4;      // 620
 constexpr int16_t kSettingsPagerH = 48;
-constexpr int16_t kSettingsArrowW = 88;
-constexpr Rect kSettingsPrevArrow{kContentX + kContentW / 2 - 92 - kSettingsArrowW,
-                                  kSettingsPagerY, kSettingsArrowW, kSettingsPagerH};  // x 96..184
-constexpr Rect kSettingsNextArrow{kContentX + kContentW / 2 + 92, kSettingsPagerY,
-                                  kSettingsArrowW, kSettingsPagerH};     // x 368..456
 static_assert(kSettingsPagerY + kSettingsPagerH <= kContentBottom,
               "S4 rows + pager must end above the soft-key bar");
 }  // namespace geom

@@ -611,33 +611,26 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
       if (wanted.rfind("trigger:", 0) == 0) {
         control = buttonTriggerControl(ev.id);
       } else if (ev.id == eego::ButtonId::Power) {
-        // 实体 Power 持续按住是最强确认：触控/焦点布防的控件一律可由 Power
+        // 实体 Power 再按一次是最强确认：触控/焦点布防的控件一律可由 Power
         // 确认，与当前焦点无关（触控点按不移动实体焦点）。
         control = wanted;
       } else {
         control = focusedControl();
       }
-      if (confirmState_.beginHold(source, control, ev.timestamp_us, now_us)) return;
+      if (confirmState_.beginPress(source, control, ev.timestamp_us, now_us)) return;
       clearConfirm();
     }
     return;
   }
   if (ev.action == eego::ButtonAction::Release) {
-    if (confirm_ != ConfirmKind::None && confirmState_.holding() &&
-        confirmState_.source() == source) {
-      suppressButtonShort_[index] = true;
-      clearConfirm();
-    }
+    if (confirm_ != ConfirmKind::None) confirmState_.noteRelease(source, ev.timestamp_us);
     return;
   }
   if (ev.action == eego::ButtonAction::LongPress) {
     if (confirm_ != ConfirmKind::None) {
+      // 布防期间长按一律取消（不确认、也不执行长按动作）。
       suppressButtonShort_[index] = true;
-      if (confirmState_.completeHold(source, ev.timestamp_us, now_us)) {
-        executeArmedConfirm();
-      } else {
-        clearConfirm();
-      }
+      clearConfirm();
       return;
     }
     if (ev.id == eego::ButtonId::Power) {
@@ -655,7 +648,15 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
       suppressButtonShort_[index] = false;
       return;
     }
-    if (confirm_ != ConfirmKind::None) clearConfirm();
+    if (confirm_ != ConfirmKind::None) {
+      if (confirmState_.pressing() && confirmState_.completePress(source, now_us)) {
+        // 确认按键只执行布防动作，不再触发其本身的短按动作。
+        executeArmedConfirm();
+        suppressButtonShort_[index] = false;
+        return;
+      }
+      clearConfirm();
+    }
     if (ev.id == eego::ButtonId::Power) {
       activeInputControl_ = focusedControl();
       activateFocused();
@@ -715,18 +716,16 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
     case eego::TouchEventType::Press:
       suppressTouchTap_ = false;
       if (confirm_ != ConfirmKind::None) {
-        if (confirmState_.beginHold(ConfirmSource::Touch, touchControl(x, y),
-                                    ev.timestamp_us, now_us)) {
+        if (confirmState_.beginPress(ConfirmSource::Touch, touchControl(x, y),
+                                     ev.timestamp_us, now_us)) {
           return;
         }
         clearConfirm();
       }
       break;
     case eego::TouchEventType::Release:
-      if (confirm_ != ConfirmKind::None && confirmState_.holding() &&
-          confirmState_.source() == ConfirmSource::Touch) {
-        suppressTouchTap_ = true;
-        clearConfirm();
+      if (confirm_ != ConfirmKind::None) {
+        confirmState_.noteRelease(ConfirmSource::Touch, ev.timestamp_us);
       }
       break;
     case eego::TouchEventType::Move:
@@ -738,12 +737,9 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
       break;
     case eego::TouchEventType::Hold:
       if (confirm_ != ConfirmKind::None) {
+        // 布防期间长按取消，不确认。
         suppressTouchTap_ = true;
-        if (confirmState_.completeHold(ConfirmSource::Touch, ev.timestamp_us, now_us)) {
-          executeArmedConfirm();
-        } else {
-          clearConfirm();
-        }
+        clearConfirm();
       } else {
         onTouchHold(x, y);
       }
@@ -753,7 +749,16 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
         suppressTouchTap_ = false;
         return;
       }
-      if (confirm_ != ConfirmKind::None) clearConfirm();
+      if (confirm_ != ConfirmKind::None) {
+        if (confirmState_.pressing() &&
+            confirmState_.completePress(ConfirmSource::Touch, now_us)) {
+          // 再点一次同一软键/行即确认；该次点按不再执行其本身动作。
+          executeArmedConfirm();
+          suppressTouchTap_ = false;
+          return;
+        }
+        clearConfirm();
+      }
       activeInputControl_ = touchControl(x, y);
       onTouchTap(x, y);
       break;
@@ -770,17 +775,15 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
         const std::string control = confirmState_.target().control == "trigger:front"
                                         ? "trigger:front"
                                         : "";
-        if (confirmState_.beginHold(ConfirmSource::Front, control, ev.timestamp_us, now_us)) {
+        if (confirmState_.beginPress(ConfirmSource::Front, control, ev.timestamp_us, now_us)) {
           return;
         }
         clearConfirm();
       }
       break;
     case eego::TouchEventType::FrontRelease:
-      if (confirm_ != ConfirmKind::None && confirmState_.holding() &&
-          confirmState_.source() == ConfirmSource::Front) {
-        suppressFrontShort_ = true;
-        clearConfirm();
+      if (confirm_ != ConfirmKind::None) {
+        confirmState_.noteRelease(ConfirmSource::Front, ev.timestamp_us);
       }
       break;
     case eego::TouchEventType::FrontShort:
@@ -788,17 +791,22 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
         suppressFrontShort_ = false;
         return;
       }
-      if (confirm_ != ConfirmKind::None) clearConfirm();
+      if (confirm_ != ConfirmKind::None) {
+        if (confirmState_.pressing() &&
+            confirmState_.completePress(ConfirmSource::Front, now_us)) {
+          executeArmedConfirm();
+          suppressFrontShort_ = false;
+          return;
+        }
+        clearConfirm();
+      }
       activeInputControl_ = "front.home";
       goHome();
       break;
     case eego::TouchEventType::FrontLong:
       if (confirm_ != ConfirmKind::None) {
-        if (confirmState_.completeHold(ConfirmSource::Front, ev.timestamp_us, now_us)) {
-          executeArmedConfirm();
-        } else {
-          clearConfirm();
-        }
+        suppressFrontShort_ = true;
+        clearConfirm();
       } else {
         dispatchTrigger(eego::admin::InputTrigger::FrontLong, now_us);
       }
@@ -1400,14 +1408,6 @@ PanelApp::TouchHit PanelApp::resolveTouchHit(int16_t x, int16_t y) const {
     return hit;
   }
   if (page_ == Page::Settings) {
-    if (geom::kSettingsPrevArrow.contains(x, y)) {
-      hit.kind = TouchHit::Kind::PagePrev;
-      return hit;
-    }
-    if (geom::kSettingsNextArrow.contains(x, y)) {
-      hit.kind = TouchHit::Kind::PageNext;
-      return hit;
-    }
     const int top = geom::kSettingsRowTop;
     const int pitch = geom::kSettingsRowPitch;
     if (y >= top && y < top + pitch * static_cast<int>(kSettingsRowsPerPage)) {
@@ -1435,10 +1435,6 @@ std::string PanelApp::controlForHit(const TouchHit& hit) const {
       return prefix + ":key:" + std::to_string(hit.index);
     case TouchHit::Kind::Row:
       return prefix + ":row:" + std::to_string(hit.index + 1);
-    case TouchHit::Kind::PagePrev:
-      return prefix + ":pager:prev";
-    case TouchHit::Kind::PageNext:
-      return prefix + ":pager:next";
     case TouchHit::Kind::None:
       break;
   }
@@ -1475,12 +1471,6 @@ void PanelApp::onTouchTap(int16_t x, int16_t y) {
   switch (hit.kind) {
     case TouchHit::Kind::SoftKey:
       activateSoftKey(static_cast<size_t>(hit.index));
-      return;
-    case TouchHit::Kind::PagePrev:
-      moveFocus(-1);  // 设置页页码条：上一子页
-      return;
-    case TouchHit::Kind::PageNext:
-      moveFocus(1);
       return;
     case TouchHit::Kind::Row: {
       // 一次点按 = 聚焦 + 激活（危险动作仍经 armConfirm 布防）；点值列左/右半
@@ -2010,7 +2000,7 @@ void PanelApp::armConfirm(ConfirmKind kind) {
   }
   confirm_ = kind;
   confirmState_.arm(target, esp_timer_get_time());
-  showBanner(requiresPhysicalConfirm(kind) ? tr(Str::ConfirmPhysicalHold) : tr(Str::ConfirmHold),
+  showBanner(requiresPhysicalConfirm(kind) ? tr(Str::ConfirmPhysicalPress) : tr(Str::ConfirmPress),
              static_cast<uint32_t>(kConfirmWindowUs / 1000));
 }
 
@@ -2046,12 +2036,12 @@ void PanelApp::armDashboardConfirm(const DashboardConfirmRequest& request) {
   confirmDashboard_ = std::move(prepared);
   confirm_ = ConfirmKind::DashboardAction;
   confirmState_.arm(target, esp_timer_get_time());
-  showBanner(tr(Str::ConfirmHold), static_cast<uint32_t>(kConfirmWindowUs / 1000));
+  showBanner(tr(Str::ConfirmPress), static_cast<uint32_t>(kConfirmWindowUs / 1000));
 }
 
 void PanelApp::clearConfirm() {
   if (confirm_ == ConfirmKind::None) return;
-  if (confirmState_.holding()) {
+  if (confirmState_.pressing()) {
     switch (confirmState_.source()) {
       case ConfirmSource::Up:
         suppressButtonShort_[0] = suppressButtonLong_[0] = true;
@@ -2074,7 +2064,7 @@ void PanelApp::clearConfirm() {
   confirm_ = ConfirmKind::None;
   confirmState_.cancel();
   confirmDashboard_ = DashboardConfirmRequest{};
-  if (banner_ == tr(Str::ConfirmHold) || banner_ == tr(Str::ConfirmPhysicalHold)) banner_.clear();
+  if (banner_ == tr(Str::ConfirmPress) || banner_ == tr(Str::ConfirmPhysicalPress)) banner_.clear();
   if (page_ == Page::Dashboard) dashboard_.showStatusMessage("", 1);
   markDirty();
 }
@@ -3124,7 +3114,7 @@ void PanelApp::buildHelp(KvModel& m) {
   add(Str::HelpFrontGestures, Str::HelpSettingsStatus);
   add(Str::HelpSwipe, Str::HelpPage);
   add(Str::HelpTapAlert, Str::HelpOpenDetail);
-  add(Str::HelpDanger, Str::HelpFreshHold);
+  add(Str::HelpDanger, Str::HelpFreshPress);
   add(Str::HelpCustomBindings, Str::HelpWebBindings);
 }
 

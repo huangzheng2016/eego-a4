@@ -78,19 +78,6 @@ void hline(PortraitCanvas& c, int16_t x, int16_t y, int16_t w, uint8_t gray) {
   c.fillRoundRectGray(x, y, w, 1, 0, gray);
 }
 
-// 1-bpp 图标按灰阶绘制（drawIcon 只支持黑/白）。
-void drawIconGray(PortraitCanvas& c, int16_t x, int16_t y, const uint8_t* icon, int16_t w,
-                  int16_t h, uint8_t gray) {
-  const int16_t stride = static_cast<int16_t>((w + 7) / 8);
-  for (int16_t yy = 0; yy < h; yy++) {
-    for (int16_t xx = 0; xx < w; xx++) {
-      if (icon[yy * stride + xx / 8] & (0x80 >> (xx % 8))) {
-        c.drawPixelGray(static_cast<int16_t>(x + xx), static_cast<int16_t>(y + yy), gray);
-      }
-    }
-  }
-}
-
 // UTF-8 字符字节数（按首字节判别；畸形字节按 1 处理，绝不越界读）。
 size_t utf8CharLen(unsigned char lead) {
   if (lead < 0x80) return 1;
@@ -716,31 +703,13 @@ void drawS4(PortraitCanvas& c, const S4Model& m) {
     }
   }
 
-  // 页码指示条：‹ 第 n/N 页 ›（箭头为可点区域，边界页置灰）
-  const bool prevOn = m.page > 0;
-  const bool nextOn = m.page + 1 < m.pageCount;
-  const geom::Rect arrows[2] = {geom::kSettingsPrevArrow, geom::kSettingsNextArrow};
-  const uint8_t* icons[2] = {eego::ICON_CHEVRON_LEFT_32, eego::ICON_CHEVRON_RIGHT_32};
-  const bool on[2] = {prevOn, nextOn};
-  for (int a = 0; a < 2; a++) {
-    const geom::Rect& r = arrows[a];
-    const int16_t ix = static_cast<int16_t>(r.x + (r.w - 32) / 2);
-    const int16_t iy = static_cast<int16_t>(r.y + (r.h - 32) / 2);
-    if (on[a]) {
-      c.drawRoundRect(r.x, r.y, r.w, r.h, 8, 0);
-      c.drawIcon(ix, iy, icons[a], 32, 32, 0);
-    } else {
-      c.fillRoundRectGray(r.x, r.y, r.w, r.h, 8, 12);
-      drawIconGray(c, ix, iy, icons[a], 32, 32, 8);
-    }
-  }
+  // 页码指示条：居中「第 n/N 页」（纯显示；翻页走软键 上一页/下一页）
   char page[32];
   snprintf(page, sizeof(page), tr(Str::SettingsPageFmt), static_cast<unsigned>(m.page + 1),
            static_cast<unsigned>(m.pageCount));
-  const int16_t px0 = static_cast<int16_t>(geom::kSettingsPrevArrow.right() + 8);
-  const int16_t pw = static_cast<int16_t>(geom::kSettingsNextArrow.x - 8 - px0);
-  textCentered(c, px0, pw, centerY(geom::kSettingsPagerY, geom::kSettingsPagerH, style::kBody.scale),
-               page, style::kBody);
+  textCentered(c, geom::kContentX, geom::kContentW,
+               centerY(geom::kSettingsPagerY, geom::kSettingsPagerH, style::kBody.scale), page,
+               style::kBody);
 }
 
 // ── 引导页（未配置 dashboard 的主页）────────────────────────────────────────

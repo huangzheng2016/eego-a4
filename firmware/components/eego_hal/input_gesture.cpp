@@ -271,7 +271,7 @@ std::vector<TouchEvent> TouchGestureFsm::sample(TouchContact contact, uint16_t x
         absolute(static_cast<int>(y) - static_cast<int>(start_y_)) > kTouchSlopPx) {
       moved_ = true;
     }
-    // 只在越过 slop 后发 Move：slop 内的抖动不应取消按住确认（hold-to-confirm）
+    // 只在越过 slop 后发 Move：slop 内的抖动不应取消点按或长按
     if (moved_) out.push_back({TouchEventType::Move, x, y, now_us});
   }
   expireHold(now_us, out);

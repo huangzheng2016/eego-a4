@@ -68,8 +68,8 @@ struct MuteRule;
 
 namespace panel {
 
-// 危险确认契约：布防后必须由同一控件重新持续按住；网络恢复、WiFi 重置、
-// 恢复出厂、BLE 配网与解绑只接受实体 Power fresh hold。其他输入、目标/快照变化取消。
+// 危险确认契约：布防后 5 秒内由同一控件全新的一次短按确认（长按取消）；网络恢复、
+// WiFi 重置、恢复出厂、BLE 配网与解绑只接受实体 Power 再按一次。其他输入、目标/快照变化取消。
 
 class PanelApp {
  public:
@@ -169,7 +169,7 @@ class PanelApp {
 
   // ---- 触控命中 ----
   struct TouchHit {
-    enum class Kind : uint8_t { None, SoftKey, Row, PagePrev, PageNext };
+    enum class Kind : uint8_t { None, SoftKey, Row };
     Kind kind = Kind::None;
     int index = -1;          // SoftKey: 软键下标；Row: 全局行下标（S4 = visibleSettings 下标）
     bool valueLeft = false;  // Row 且落在值列左半
@@ -316,7 +316,7 @@ class PanelApp {
 
   // 确认与横幅
   ConfirmKind confirm_ = ConfirmKind::None;
-  FreshHoldConfirm confirmState_;
+  FreshPressConfirm confirmState_;
   DashboardConfirmRequest confirmDashboard_;
   std::string activeInputControl_;
   bool suppressButtonShort_[3] = {false, false, false};

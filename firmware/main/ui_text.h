@@ -59,7 +59,7 @@ enum class Lang : uint8_t {
   X(LblType, "类型", "TYPE") \
   X(Never, "从未", "NEVER") \
   X(None, "无", "NONE") \
-  X(ConfirmHold, "按住同一按钮 0.7 秒确认", "HOLD SAME BUTTON 0.7S TO CONFIRM") \
+  X(ConfirmPress, "再按一次确认", "PRESS AGAIN TO CONFIRM") \
   X(DoneAck, "已确认", "ACKNOWLEDGED") \
   X(DoneClear, "已删除", "DELETED") \
   X(DoneMute, "已静音", "MUTED") \
@@ -181,7 +181,7 @@ enum class Lang : uint8_t {
   X(ManualOnly, "仅手动", "MANUAL ONLY") \
   X(NotScheduled, "未排程", "NOT SCHEDULED") \
   X(DeepSleepOffline, "暂停期间不联网、不更新", "NO NETWORK OR UPDATES WHILE PAUSED") \
-  X(ConfirmPhysicalHold, "按住实体电源键 0.7 秒确认", "HOLD POWER BUTTON 0.7S TO CONFIRM") \
+  X(ConfirmPhysicalPress, "再按一次电源键确认", "PRESS POWER AGAIN TO CONFIRM") \
   X(RecoveryApStarted, "恢复热点：EEGO-A4-Setup / 192.168.4.1", "AP: EEGO-A4-Setup / 192.168.4.1") \
   X(WifiResetDone, "WiFi 已重置，恢复热点已开启", "WIFI RESET; RECOVERY AP OPEN") \
   X(FactoryResetDone, "恢复完成，即将重启", "RESET COMPLETE; REBOOTING") \
@@ -215,7 +215,7 @@ enum class Lang : uint8_t {
   X(HelpTapAlert, "点按告警", "TAP AN ALERT") \
   X(HelpOpenDetail, "告警详情：确认 / 静音", "ALERT DETAIL: ACK / MUTE") \
   X(HelpDanger, "危险操作", "DANGEROUS ACTION") \
-  X(HelpFreshHold, "按住同一按钮 0.7 秒", "HOLD SAME BUTTON 0.7S") \
+  X(HelpFreshPress, "再按一次确认", "PRESS AGAIN TO CONFIRM") \
   X(HelpCustomBindings, "自定义按键", "CUSTOM BINDINGS") \
   X(HelpWebBindings, "网页端设置；设置 → 重置按键映射", "WEB ADMIN; SETTINGS → RESET INPUT") \
   X(LangZh, "中文", "CHINESE") \

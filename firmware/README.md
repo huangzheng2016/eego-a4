@@ -210,7 +210,7 @@ DELETE /api/v1/sources/credentials   {"key":"weather"}
   `help` 或 `*`；动作只能是白名单 builtin（`page_previous/page_next/focus_previous/
   focus_next/home/settings/status/help/refresh`）或已注册 panel action。
   Power、前置键短按（主页）、确认和恢复流程不可重映射。
-- 危险操作第一次激活只布防；5 秒内必须从同一控件重新按住至少 700 ms。
+- 危险操作第一次激活只布防；5 秒内在同一控件上再按一次（全新短按）确认，长按或其他输入取消。
   网络恢复、工厂恢复和 BLE 配网/解绑只接受实体 Power。
 - 首次管理密码必须在 AP 门户设置。之后的本地 BLE 配网使用限时窗口、随机 PoP
   和 Security 1；被动 BLE observer 默认关闭。Bluetooth Classic、持续手机 GATT

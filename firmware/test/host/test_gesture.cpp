@@ -121,7 +121,7 @@ TEST(gesture, hold_and_no_tap_after_hold) {
   run.up();
   CHECK_EQ(run.count(TouchEventType::Tap), 0);
   CHECK(!run.any(kSwipes));
-  // Jitter inside slop does not prevent hold-to-confirm.
+  // Jitter inside slop does not cancel a tap or long press.
   TouchRun jitter;
   jitter.at(TouchContact::Screen, 200, 200);
   jitter.at(TouchContact::Screen, 210, 190, 400);

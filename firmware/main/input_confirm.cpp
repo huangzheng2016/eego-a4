@@ -3,45 +3,54 @@
 
 namespace panel {
 
-void FreshHoldConfirm::arm(const ConfirmTarget& target, int64_t now_us) {
+void FreshPressConfirm::arm(const ConfirmTarget& target, int64_t now_us) {
   target_ = target;
   source_ = ConfirmSource::None;
   armed_us_ = now_us;
   deadline_us_ = now_us + kConfirmWindowUs;
-  hold_start_us_ = 0;
+  press_us_ = release_us_ = 0;
   armed_ = true;
-  holding_ = false;
+  pressing_ = false;
+  released_ = false;
 }
 
-void FreshHoldConfirm::cancel() {
+void FreshPressConfirm::cancel() {
   target_ = ConfirmTarget{};
   source_ = ConfirmSource::None;
-  armed_us_ = deadline_us_ = hold_start_us_ = 0;
+  armed_us_ = deadline_us_ = press_us_ = release_us_ = 0;
   armed_ = false;
-  holding_ = false;
+  pressing_ = false;
+  released_ = false;
 }
 
-bool FreshHoldConfirm::expired(int64_t now_us) const {
+bool FreshPressConfirm::expired(int64_t now_us) const {
   return armed_ && now_us > deadline_us_;
 }
 
-bool FreshHoldConfirm::beginHold(ConfirmSource source, const std::string& control,
-                                 int64_t press_us, int64_t now_us) {
-  if (!armed_ || holding_ || expired(now_us) || press_us <= armed_us_ ||
-      control.empty() || control != target_.control) {
+bool FreshPressConfirm::beginPress(ConfirmSource source, const std::string& control,
+                                   int64_t press_us, int64_t now_us) {
+  if (!armed_ || pressing_ || source == ConfirmSource::None || expired(now_us) ||
+      press_us <= armed_us_ || control.empty() || control != target_.control) {
     return false;
   }
   if (target_.physical_power_only && source != ConfirmSource::Power) return false;
   source_ = source;
-  hold_start_us_ = press_us;
-  holding_ = true;
+  press_us_ = press_us;
+  release_us_ = 0;
+  pressing_ = true;
+  released_ = false;
   return true;
 }
 
-bool FreshHoldConfirm::completeHold(ConfirmSource source, int64_t event_us,
-                                    int64_t now_us) const {
-  return armed_ && holding_ && source_ == source && !expired(now_us) &&
-         event_us >= hold_start_us_ + eego::kInputLongPressUs;
+void FreshPressConfirm::noteRelease(ConfirmSource source, int64_t release_us) {
+  if (!armed_ || !pressing_ || released_ || source != source_) return;
+  release_us_ = release_us;
+  released_ = true;
+}
+
+bool FreshPressConfirm::completePress(ConfirmSource source, int64_t now_us) const {
+  return armed_ && pressing_ && released_ && source_ == source && !expired(now_us) &&
+         release_us_ >= press_us_ && release_us_ - press_us_ < eego::kInputLongPressUs;
 }
 
 bool confirmRecordTargetCurrent(const ConfirmTarget& target, ConfirmRecordRule rule,

@@ -2,7 +2,7 @@
 #pragma once
 
 // panel_types —— 面板应用共享枚举（纯类型，无 ESP-IDF 依赖）。
-// 危险动作首次激活只布防；同一控件的一次全新持续按住才执行，其他输入取消。
+// 危险动作首次激活只布防；同一控件全新的一次短按才执行，其他输入取消。
 
 #include <cstdint>
 
@@ -69,7 +69,7 @@ enum class SettingId : uint8_t {
   Count,
 };
 
-// 5 秒模态窗口；恢复动作只能由实体 Power 的全新持续按住完成。
+// 5 秒模态窗口；恢复动作只能由实体 Power 再按一次完成。
 enum class ConfirmKind : uint8_t {
   None = 0,
   Mute,
