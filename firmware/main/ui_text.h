@@ -28,10 +28,10 @@ enum class Lang : uint8_t {
   X(Refresh, "刷新", "REFRESH") \
   X(Open, "打开", "OPEN") \
   X(List, "列表", "LIST") \
-  X(AckAll, "全部确认", "ACK ALL") \
-  X(Ack, "确认", "ACK") \
+  X(AckAll, "全部已读", "READ ALL") \
+  X(Ack, "标记已读", "MARK READ") \
   X(Mute, "静音", "MUTE") \
-  X(Clear, "清除", "CLEAR") \
+  X(Clear, "删除", "DELETE") \
   X(SettingsKey, "设置", "SETTINGS") \
   X(On, "开", "ON") \
   X(Off, "关", "OFF") \
@@ -41,16 +41,16 @@ enum class Lang : uint8_t {
   X(SevWarning, "警告", "WARNING") \
   X(SevInfo, "提示", "INFO") \
   X(ActiveTotal, "活动告警", "ACTIVE") \
-  X(AckedCount, "已确认", "ACKED") \
+  X(AckedCount, "已读", "READ") \
   X(MutedCount, "已静音", "MUTED") \
   X(NoAlerts, "无活动告警", "NO ACTIVE ALERTS") \
-  X(SourcesHealthy, "源正常", "SOURCES OK") \
-  X(UpdatedAt, "更新", "UPDATED") \
+  X(SourcesHealthy, "数据源正常", "SOURCES OK") \
+  X(UpdatedAt, "更新时间", "UPDATED") \
   X(AlertsCountFmt, "告警 %u 条", "ALERTS %u") \
   X(PageFmt, "第 %u/%u 页", "PAGE %u/%u") \
   X(EmptyList, "无告警记录", "NO ALERTS") \
   X(StateActive, "活动", "ACT") \
-  X(StateAcked, "已确认", "ACK") \
+  X(StateAcked, "已读", "READ") \
   X(StateCleared, "已清除", "CLR") \
   X(StateExpired, "已过期", "EXP") \
   X(LblSource, "来源", "SOURCE") \
@@ -59,27 +59,27 @@ enum class Lang : uint8_t {
   X(LblLastSeen, "最近", "LAST") \
   X(LblOccurrences, "次数", "COUNT") \
   X(LblExpires, "过期", "EXPIRES") \
-  X(LblAckBy, "确认人", "ACK BY") \
+  X(LblAckBy, "操作人", "ACK BY") \
   X(LblFields, "字段", "FIELDS") \
   X(LblMessage, "详情", "MESSAGE") \
   X(LblType, "类型", "TYPE") \
   X(Never, "从未", "NEVER") \
   X(None, "无", "NONE") \
-  X(ConfirmHold, "重新按住同一控件确认", "HOLD SAME CONTROL TO CONFIRM") \
-  X(DoneAck, "已确认", "ACKNOWLEDGED") \
-  X(DoneClear, "已清除", "CLEARED") \
+  X(ConfirmHold, "按住同一按钮 0.7 秒确认", "HOLD SAME BUTTON 0.7S TO CONFIRM") \
+  X(DoneAck, "已标记已读", "MARKED READ") \
+  X(DoneClear, "已删除", "DELETED") \
   X(DoneMute, "已静音", "MUTED") \
   X(ActionFailed, "操作失败", "ACTION FAILED") \
-  X(ModeMains, "常供电", "MAINS") \
-  X(ModeBattery, "电池", "BATTERY") \
+  X(ModeMains, "持续供电", "MAINS") \
+  X(ModeBattery, "电池供电", "BATTERY") \
   X(ModeAuto, "自动", "AUTO") \
   X(Charging, "充电中", "CHARGING") \
   X(BatteryFmt, "电池 %u%% %umV", "BAT %u%% %umV") \
-  X(WifiDisconnected, "未连接", "DISCONNECTED") \
-  X(WifiConnecting, "连接中", "CONNECTING") \
-  X(WifiConnected, "已连接", "CONNECTED") \
-  X(WifiFailed, "连接失败", "FAILED") \
-  X(WifiOffline, "离线", "OFFLINE") \
+  X(WifiDisconnected, "WiFi 未连接", "DISCONNECTED") \
+  X(WifiConnecting, "WiFi 连接中", "CONNECTING") \
+  X(WifiConnected, "WiFi 已连接", "CONNECTED") \
+  X(WifiFailed, "WiFi 连接失败", "FAILED") \
+  X(WifiOffline, "WiFi 离线", "OFFLINE") \
   X(Sources, "告警源", "SOURCES") \
   X(NoSources, "无源", "NO SOURCES") \
   X(NextDueIn, "下次", "NEXT") \
@@ -96,15 +96,15 @@ enum class Lang : uint8_t {
   X(PortalOpen, "配网窗口开", "PORTAL OPEN") \
   X(ApFallback, "兜底AP", "AP FALLBACK") \
   X(SetLanguage, "语言", "LANGUAGE") \
-  X(SetPowerMode, "电源模式", "POWER MODE") \
-  X(SetBatteryPoll, "电池轮询", "BATTERY POLL") \
+  X(SetPowerMode, "供电模式", "POWER MODE") \
+  X(SetBatteryPoll, "电池刷新周期", "BATTERY POLL") \
   X(SetFrontlight, "前光", "FRONTLIGHT") \
   X(SetMutes, "静音列表", "MUTED LIST") \
-  X(SetPollNow, "立即轮询", "POLL NOW") \
+  X(SetPollNow, "立即刷新数据", "REFRESH NOW") \
   X(SetAdmin, "管理后台", "ADMIN") \
   X(MutesFmt, "静音 %u 条", "MUTED %u") \
-  X(ClearMutes, "清除全部静音", "CLEAR MUTES") \
-  X(PollNowStarted, "已触发轮询", "POLL TRIGGERED") \
+  X(ClearMutes, "取消全部静音", "CLEAR MUTES") \
+  X(PollNowStarted, "已开始刷新数据", "REFRESH STARTED") \
   X(FrontlightMissing, "无前光", "NO FRONTLIGHT") \
   X(PollEveryFmt, "每 %u 秒", "EVERY %us") \
   X(ProvTitle, "首次配网", "SETUP") \
@@ -116,65 +116,65 @@ enum class Lang : uint8_t {
   X(ProvDone, "配网成功，即将重启", "PROVISIONED, REBOOTING") \
   X(ProvClosed, "配网窗口已关闭", "PORTAL CLOSED") \
   X(Busy, "忙，请稍后重试", "BUSY; TRY AGAIN") \
-  X(Sleeping, "电池模式：休眠中", "BATTERY: SLEEPING") \
+  X(Sleeping, "电池供电：休眠中", "BATTERY: SLEEPING") \
   X(WakeHint, "按电源键唤醒", "PRESS POWER TO WAKE") \
-  X(Polling, "轮询中...", "POLLING...") \
+  X(Polling, "正在刷新...", "REFRESHING...") \
   X(AgeNow, "刚刚", "NOW") \
   X(AgeMinFmt, "%u 分钟前", "%um ago") \
   X(AgeHourFmt, "%u 小时前", "%uh ago") \
   X(AgeDayFmt, "%u 天前", "%ud ago") \
-  X(SetNetwork, "网络", "NETWORK") \
-  X(SetRecoveryAp, "网络恢复 AP", "RECOVERY AP") \
+  X(SetNetwork, "网络设置", "NETWORK") \
+  X(SetRecoveryAp, "开启配网热点", "RECOVERY AP") \
   X(SetWifiReset, "仅重置 WiFi", "WIFI-ONLY RESET") \
-  X(SetBluetooth, "BLE 配网 / PoP", "BLE SETUP / POP") \
-  X(SetBleObserver, "BLE 传感扫描", "BLE SENSOR SCAN") \
-  X(SetBleUnbind, "BLE 解绑 / 清 bond", "BLE CLEAR BONDS") \
-  X(BleProvStarted, "手机 BLE 配网；输入本机 PoP", "USE BLE APP; ENTER LOCAL POP") \
+  X(SetBluetooth, "BLE 配网", "BLE SETUP") \
+  X(SetBleObserver, "BLE 广播监听", "BLE SENSOR SCAN") \
+  X(SetBleUnbind, "清除 BLE 配对", "BLE CLEAR BONDS") \
+  X(BleProvStarted, "手机打开 BLE 配网，输入本机 PoP", "USE BLE APP; ENTER LOCAL POP") \
   X(BleProvSuccess, "BLE 配网成功", "BLE PROVISIONING SUCCEEDED") \
   X(BleProvFailed, "BLE 配网失败或已取消", "BLE PROVISIONING FAILED/CLOSED") \
-  X(BleUnbindDone, "BLE bond 已清除", "BLE BONDS CLEARED") \
-  X(SetTimezone, "时区", "TIMEZONE") \
+  X(BleUnbindDone, "BLE 配对已清除", "BLE BONDS CLEARED") \
+  X(SetTimezone, "时区（小时）", "TIMEZONE") \
   X(SetBrightness, "前光亮度", "BRIGHTNESS") \
   X(SetWarmth, "前光色温", "WARMTH") \
-  X(SetDataRefresh, "数据刷新", "DATA REFRESH") \
-  X(SetEpdFull, "EPD 全刷周期", "EPD FULL INTERVAL") \
-  X(SetEpdNow, "立即 EPD 全刷", "EPD FULL NOW") \
-  X(SetIdleSleep, "无操作休眠", "IDLE SLEEP") \
-  X(SetSleepPlan, "睡眠计划", "SLEEP SCHEDULE") \
-  X(SetNextWake, "下一唤醒", "NEXT WAKE") \
-  X(SetLastWake, "上次唤醒原因", "LAST WAKE") \
-  X(SetStorage, "存储状态", "STORAGE") \
+  X(SetDataRefresh, "数据刷新周期", "DATA REFRESH") \
+  X(SetEpdFull, "墨水屏全刷周期", "EPD FULL INTERVAL") \
+  X(SetEpdNow, "立即全屏刷新", "EPD FULL NOW") \
+  X(SetIdleSleep, "自动休眠", "IDLE SLEEP") \
+  X(SetSleepPlan, "定时休眠", "SLEEP SCHEDULE") \
+  X(SetNextWake, "下次唤醒时间", "NEXT WAKE") \
+  X(SetLastWake, "唤醒方式", "LAST WAKE") \
+  X(SetStorage, "SD 卡状态", "STORAGE") \
   X(SetDiagnostics, "串口诊断", "SERIAL DIAGNOSTICS") \
-  X(SetRunDiagnostics, "运行诊断", "RUN DIAGNOSTICS") \
-  X(SetSecurity, "安全状态", "SECURITY") \
+  X(SetRunDiagnostics, "硬件自检", "RUN DIAGNOSTICS") \
+  X(SetSecurity, "管理密码", "SECURITY") \
   X(SetFactoryReset, "恢复出厂设置", "FACTORY RESET") \
   X(Unavailable, "不可用", "UNAVAILABLE") \
   X(SourceSchedules, "跟随源", "SOURCE SCHEDULES") \
   X(ManualOnly, "仅手动", "MANUAL ONLY") \
   X(NotScheduled, "未排程", "NOT SCHEDULED") \
-  X(DeepSleepOffline, "深睡时 HTTP/BLE 不可达", "NO HTTP/BLE IN DEEP SLEEP") \
-  X(ConfirmPhysicalHold, "重新按住实体电源键确认", "HOLD POWER BUTTON TO CONFIRM") \
-  X(RecoveryApStarted, "恢复 AP：EEGO-A4-Setup / 192.168.4.1", "AP: EEGO-A4-Setup / 192.168.4.1") \
-  X(WifiResetDone, "WiFi 已重置，恢复 AP 已开启", "WIFI RESET; RECOVERY AP OPEN") \
+  X(DeepSleepOffline, "深睡时无法联网", "NO HTTP/BLE IN DEEP SLEEP") \
+  X(ConfirmPhysicalHold, "按住实体电源键 0.7 秒确认", "HOLD POWER BUTTON 0.7S TO CONFIRM") \
+  X(RecoveryApStarted, "恢复热点：EEGO-A4-Setup / 192.168.4.1", "AP: EEGO-A4-Setup / 192.168.4.1") \
+  X(WifiResetDone, "WiFi 已重置，恢复热点已开启", "WIFI RESET; RECOVERY AP OPEN") \
   X(FactoryResetDone, "恢复完成，即将重启", "RESET COMPLETE; REBOOTING") \
   X(FullRefreshQueued, "已请求全屏刷新", "FULL REFRESH QUEUED") \
   X(WakeTimer, "定时器", "TIMER") \
   X(WakeButton, "电源键", "POWER BUTTON") \
   X(WakeReset, "复位/上电", "RESET/POWER ON") \
   X(WakeOther, "其他", "OTHER") \
-  X(SecuritySet, "已设管理密码", "PASSWORD SET") \
-  X(SecurityMissing, "未设管理密码", "NO PASSWORD") \
-  X(SdReady, "SD 就绪", "SD READY") \
-  X(SdMissing, "SD 不可用", "SD UNAVAILABLE") \
+  X(SecuritySet, "已设置管理密码", "PASSWORD SET") \
+  X(SecurityMissing, "未设置管理密码", "NO PASSWORD") \
+  X(SdReady, "SD 卡正常", "SD READY") \
+  X(SdMissing, "SD 卡不可用", "SD UNAVAILABLE") \
   X(SettingsPageFmt, "第 %u/%u 页", "PAGE %u/%u") \
   X(PageHelp, "输入帮助", "INPUT HELP") \
-  X(InputResetDone, "输入映射已恢复默认", "INPUT DEFAULTS RESTORED") \
+  X(InputResetDone, "按键映射已恢复默认", "INPUT DEFAULTS RESTORED") \
   X(SetInputHelp, "输入帮助", "INPUT HELP") \
-  X(SetInputReset, "重置输入映射", "RESET INPUT MAPPINGS") \
+  X(SetInputReset, "重置按键映射", "RESET INPUT MAPPINGS") \
   X(HelpPower, "Power 短按 / 长按", "POWER SHORT / LONG") \
-  X(HelpActivateBack, "激活 / 返回（固定）", "ACTIVATE / BACK (FIXED)") \
+  X(HelpActivateBack, "确认 / 返回（固定）", "ACTIVATE / BACK (FIXED)") \
   X(HelpFrontHome, "Front 短按", "FRONT SHORT") \
-  X(HelpHome, "主页逃逸（固定）", "HOME ESCAPE (FIXED)") \
+  X(HelpHome, "返回主页（固定）", "HOME ESCAPE (FIXED)") \
   X(HelpFrontGestures, "Front 长按 / 双击", "FRONT LONG / DOUBLE") \
   X(HelpDefaultHelpStatus, "帮助 / 状态（默认）", "HELP / STATUS (DEFAULT)") \
   X(HelpUpDown, "Up/Down 短按 / 长按", "UP/DOWN SHORT / LONG") \
@@ -183,12 +183,12 @@ enum class Lang : uint8_t {
   X(HelpPage, "翻页", "PAGE NAVIGATION") \
   X(HelpChord, "Up+Down 组合键", "UP+DOWN CHORD") \
   X(HelpCustomOnly, "仅自定义动作", "CUSTOM ACTION ONLY") \
-  X(HelpDanger, "危险动作", "DANGEROUS ACTION") \
-  X(HelpFreshHold, "重新按住同一控件 700ms", "FRESH HOLD SAME CONTROL 700ms") \
-  X(HelpCustomBindings, "自定义绑定", "CUSTOM BINDINGS") \
-  X(HelpOverrideOrder, "页面覆盖优先；默认安全", "PAGE FIRST; SAFE DEFAULTS") \
+  X(HelpDanger, "危险操作", "DANGEROUS ACTION") \
+  X(HelpFreshHold, "按住同一按钮 0.7 秒", "HOLD SAME BUTTON 0.7S") \
+  X(HelpCustomBindings, "自定义按键", "CUSTOM BINDINGS") \
+  X(HelpOverrideOrder, "页面设置优先；默认安全", "PAGE FIRST; SAFE DEFAULTS") \
   X(HelpLocalReset, "本地恢复", "LOCAL RESET") \
-  X(HelpResetHere, "设置 → 重置输入映射", "SETTINGS → RESET INPUT") \
+  X(HelpResetHere, "设置 → 重置按键映射", "SETTINGS → RESET INPUT") \
   X(LangZh, "中文", "CHINESE") \
   X(LangEn, "英文", "ENGLISH")
 
