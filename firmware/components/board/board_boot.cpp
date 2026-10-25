@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // board_boot.cpp — EEGO A4 板级启动事实实现
 //
-// 顺序即合同，调整前请先读 board_boot.h 头部与 docs/ARCHITECTURE.md：
+// 顺序即合同，调整前请先读 board_boot.h 头部与 docs/DRIVER_GUIDE.md：
 // "SD 必须先于显示初始化"（两条独立 SPI 总线各自持有所有权）。
 #include "board/board_boot.h"
 
