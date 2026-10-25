@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: firmware host tests
+
+on:
+  push:
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware-host-tests.yml"
+  pull_request:
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware-host-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Static firmware validation
+        run: python3 firmware/tools/validate_firmware.py
+
+      - name: Preset library validation
+        run: python3 firmware/tools/preset_tool.py validate-library
+
+      - name: Configure host tests
+        run: cmake -S firmware/test/host -B build/host-tests -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build host tests
+        run: cmake --build build/host-tests -j "$(nproc)"
+
+      - name: Run host tests
+        run: ctest --test-dir build/host-tests --output-on-failure
