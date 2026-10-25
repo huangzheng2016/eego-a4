@@ -6,9 +6,10 @@ import { useDraft } from '../../state/draft';
 import { panelErrors, locateError } from '../../model/errors';
 import { metricsForSource } from '../../model/metrics';
 import { allPanelIds, uniqueId, findPanel } from '../../model/bundle';
-import { canPlace, columnsOf, findFreeSpot, MAX_COLUMNS, ROWS_PER_SCREEN } from '../../model/grid';
-import { ACTION_KINDS, CHART_KINDS, IMAGE_FITS, PANEL_KINDS, SEVERITIES, VARIANTS, type Action, type Bundle, type Panel, type PanelKind } from '../../model/types';
-import { Button, Checkbox, Icon, NumberInput, Select, TextArea, TextInput, type Option } from '../../ui';
+import { canPlace, columnsOf, findFreeSpot, fitsScreen, MAX_COLUMNS, ROWS_PER_SCREEN } from '../../model/grid';
+import { applyPlacement, defaultSize, resolvePlacement } from '../../model/layout';
+import { ACTION_KINDS, CHART_KINDS, IMAGE_FITS, PANEL_KINDS, SEVERITIES, VARIANTS, type Action, type Bundle, type GridRect, type Panel, type PanelKind } from '../../model/types';
+import { Button, Checkbox, Icon, NumberInput, Select, Switch, TextArea, TextInput, type Option } from '../../ui';
 import { useToast } from '../../state/toast';
 import { navigate } from '../../state/router';
 
@@ -27,13 +28,12 @@ export function normalizeForKind(p: Panel, kind: PanelKind): Panel {
   return next;
 }
 
-export function newPanel(b: Bundle, pageId: string, kind: PanelKind, title: string): Panel | null {
+export function newPanel(b: Bundle, pageId: string, kind: PanelKind, title: string, at?: GridRect): Panel | null {
   const page = b.dashboard.pages.find((p) => p.id === pageId);
   if (!page) return null;
   const cols = columnsOf(page);
-  const w = kind === 'chart' || kind === 'table' ? cols : Math.max(1, Math.round(cols / 2));
-  const h = kind === 'chart' || kind === 'table' ? 4 : kind === 'button' ? 2 : 3;
-  const spot = findFreeSpot(page, w, h) ?? findFreeSpot(page, Math.max(1, Math.round(cols / 4)), 2);
+  const size = defaultSize(kind, cols);
+  const spot = at ?? findFreeSpot(page, size.w, size.h) ?? findFreeSpot(page, Math.max(1, Math.round(cols / 4)), 1);
   if (!spot) return null;
   return normalizeForKind({ id: uniqueId(kind, allPanelIds(b.dashboard)), kind, grid: spot, title, visible: true, refresh_ms: 60000, style: { variant: 'default', precision: 1 } }, kind);
 }
@@ -47,7 +47,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-export function PanelInspector({ panelId }: { panelId: string }) {
+export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: string; onDelete: (id: string) => void; onDuplicate: (id: string) => void }) {
   const { t } = useI18n();
   const label = useEnumLabel();
   const toast = useToast();
@@ -74,11 +74,14 @@ export function PanelInspector({ panelId }: { panelId: string }) {
   const setGrid = (k: 'x' | 'y' | 'w' | 'h', v: number | undefined) => {
     if (v === undefined) return;
     const g = { ...p.grid, [k]: Math.max(k === 'w' || k === 'h' ? 1 : 0, Math.round(v)) };
-    if (!canPlace(page, g, p.id) && p.visible !== false) {
-      toast('warn', t('editor.blocked'));
-      return;
-    }
-    set((x) => (x.grid = g), 'grid');
+    if (p.visible === false) return set((x) => (x.grid = g), 'grid');
+    if (g.x + g.w > columns || !fitsScreen(g)) return toast('warn', t('editor.blocked'));
+    const placement = resolvePlacement(page, p.id, g);
+    if (!placement.ok) return toast('warn', t('editor.blocked'));
+    d.update((b) => {
+      const pg = b.dashboard.pages.find((x) => x.id === page.id);
+      if (pg) applyPlacement(pg, placement);
+    }, key('grid'));
   };
 
   const actionTargets = (a: Action): Option[] | null => {
@@ -92,39 +95,24 @@ export function PanelInspector({ panelId }: { panelId: string }) {
 
   return (
     <div className="col">
-      <div className="row">
-        <h3 className="grow">{t('panel.inspector')}</h3>
-        <Button
-          size="sm"
-          icon
-          title={t('panel.duplicate')}
-          onClick={() => {
-            d.update((b) => {
-              const pg = b.dashboard.pages.find((x) => x.id === page.id)!;
-              const spot = findFreeSpot(pg, p.grid.w, p.grid.h);
-              if (!spot) return;
-              const copy = { ...structuredClone(p), id: uniqueId(p.id, allPanelIds(b.dashboard)), grid: spot };
-              pg.panels.push(copy);
-            });
-          }}
-        >
-          <Icon name="copy" />
+      <div className="row nowrap">
+        <span className="page-icon" style={{ width: 34, height: 34, borderRadius: 9 }}>
+          <Icon name={`k-${p.kind}`} size={18} />
+        </span>
+        <div className="grow">
+          <h3 className="truncate">{p.title || p.id}</h3>
+          <div className="dim">
+            {label('kind', p.kind)} · {t('editor.size', { w: p.grid.w, h: p.grid.h })}
+          </div>
+        </div>
+        <Button size="sm" icon variant="ghost" title={`${t('panel.duplicate')} (Ctrl+D)`} onClick={() => onDuplicate(p.id)}>
+          <Icon name="copy" size={16} />
         </Button>
-        <Button
-          size="sm"
-          icon
-          variant="danger"
-          title={t('panel.delete')}
-          onClick={() => {
-            d.update((b) => {
-              const pg = b.dashboard.pages.find((x) => x.id === page.id)!;
-              pg.panels = pg.panels.filter((x) => x.id !== p.id);
-              for (const x of pg.panels) if (x.linked_panel_ids) x.linked_panel_ids = x.linked_panel_ids.filter((id) => id !== p.id);
-            });
-            d.setPanelId(null);
-          }}
-        >
-          <Icon name="trash" />
+        <Button size="sm" icon variant="ghost" title={`${t('panel.delete')} (Delete)`} onClick={() => onDelete(p.id)}>
+          <Icon name="trash" size={16} />
+        </Button>
+        <Button size="sm" icon variant="ghost" title={t('common.close')} onClick={() => d.setPanelId(null)}>
+          <Icon name="x" size={16} />
         </Button>
       </div>
       {errs._ && <div className="notice danger">{errs._}</div>}
@@ -156,7 +144,7 @@ export function PanelInspector({ panelId }: { panelId: string }) {
             d.setPanelId(id);
           }}
         />
-        <Checkbox label={t('panel.visible')} checked={p.visible !== false} onChange={(v) => {
+        <Switch label={t('panel.visible')} checked={p.visible !== false} onChange={(v) => {
           if (v && !canPlace(page, p.grid, p.id)) {
             const spot = findFreeSpot(page, p.grid.w, Math.min(p.grid.h, ROWS_PER_SCREEN), 0, p.id);
             if (!spot) return toast('warn', t('editor.no_space'));

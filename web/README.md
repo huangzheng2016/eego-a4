@@ -1,7 +1,7 @@
 # EEGO A4 管理前端（web/）
 
 React 18 + TypeScript（strict）+ Vite 编写的设备管理界面：仪表盘可视化编辑、模板库、
-数据源向导、凭据、设备设置、告警、系统与屏幕预览。中文优先，可切换英文；浅色/深色主题。
+数据源向导、告警规则、首次使用向导、凭据、设备设置、告警事件、系统与设备实时画面。中文优先，可切换英文；浅色/深色主题。
 
 ## 运行架构
 
@@ -17,9 +17,11 @@ React 18 + TypeScript（strict）+ Vite 编写的设备管理界面：仪表盘�
   外加 `version.json`。加载页按 `version || build || hash` 拼接 `?v=` 做缓存失效；
   `version` 字段为 `<package version>+<内容 hash>`，每次内容变化都会变。
 * 应用启动时立即设置 `window.__EEGO_APP_LOADED = true`；加载页 8 秒内未看到该标志
-  则显示指向 `/legacy`（设备内置简易页面）的链接。
+  （或 app.js 加载出错）则显示中英文提示：前端无法从 GitHub Pages 加载，请检查
+  访问设备的电脑/手机能否上网后刷新。固件**不再内置任何管理页**（`/legacy`、
+  `/admin.js`、`/admin.css`、`/dashboard.js`、`/dashboard.css` 已删除，返回 404 JSON）。
 * `loader/index.html`、`loader/loader.js` 是固件内置加载页的**参考副本**
-  （权威版本在 `firmware/components/admin/src/admin_page.cpp`），保持两者一致。
+  （权威版本在 `firmware/components/admin/src/loader_page.cpp`），保持两者一致。
 
 ### 设备加载页所需 CSP
 
@@ -57,15 +59,16 @@ VITE_DEVICE=http://192.168.1.50 npm run dev
 
 Mock 模式的模板库直接读取 `../firmware/presets/`，数据源抓取/预览返回内置示例 JSON。
 Mock 代码通过 `import.meta.env.VITE_MOCK` 动态导入，生产构建中会被完全移除。
+URL 加 `?auto` 自动登录、`?fresh` 模拟未配置设备（进入首次向导）、`?fixture=<名>` 载入 `.tmp/render/fixtures/<名>.json`（固件渲染夹具，便于与 `.tmp/render/ft12/*.png` 对照）；实时画面与设备渲染预览由 mock 粗略绘制。
 
 常用脚本：
 
 | 命令 | 作用 |
 |---|---|
 | `npm run build` | 类型检查 + 构建到 `dist/` + 写 `version.json` |
-| `npm test` | vitest 单元测试（网格吸附/重叠、JSONPath、bundle 往返、撤销历史） |
+| `npm test` | vitest 单元测试（网格规则、拖放让位/缩放、表达式、JSONPath、bundle 往返、撤销历史） |
 | `npm run lint` | ESLint |
-| `npm run size` | 打印产物 gzip 体积（预算 200 KiB） |
+| `npm run size` | 打印产物 gzip 体积（预算 150 KiB，超出即失败） |
 
 ## 代码结构
 
@@ -76,26 +79,35 @@ src/
   api/mock.ts         开发用 mock 后端
   model/              纯逻辑：types（对应 dashboard_core/model.h）、grid（屏幕/网格规则）、
                       bundle（eego.dashboard-bundle/1 解析、预设展开、模板合并）、
-                      jsonpath、errors（校验字段路径 → 编辑器对象）、metrics
+                      layout（拖放让位/边角缩放）、expression（规则表达式，镜像 expression.cpp）、
+                      series（面板数据：样例/预览值/示例序列）、jsonpath、errors、metrics
   state/              session、draft（草稿/已应用、撤销重做、校验/应用/冲突）、toast、路由
-  pages/editor/       画布（拖动/缩放/键盘微调）、面板属性、页面设置
-  pages/*.tsx         模板库、数据源向导、凭据、设备设置、告警、系统、屏幕预览
+  pages/editor/       画布（拖动让位/8 向缩放/键盘微调/缩放）、DevicePanel（仿墨水屏渲染）、
+                      面板组件拖放、属性面板。DevicePanel 移植自 panels.cpp / panel_style.cpp（SVG、1:1 设备像素），
+                      数字格式见 model/format.ts，原生大字号字宽表 model/displayFont.ts（由 display_font_data.cpp 生成）
+  pages/*.tsx         模板库、数据源、告警规则（RulesPage）、首次向导（WelcomePage）、
+                      设备实时画面（LivePreview，应用后自动刷新）、凭据、设置、告警事件、系统
   i18n/               zh（默认）/ en 字典；术语见 i18n/index.tsx 顶部注释
-  ui/                 小型组件库（按钮、表单、弹窗、JSON 树、图标）
+  ui/                 设计系统组件（按钮、表单、开关、分段控件、骨架屏、空状态、弹窗、
+                      JSON 树）与内联 SVG 图标（ui/icons.tsx，无图标字体/CDN）
 ```
 
 ### 布局规则（与固件一致）
 
-每屏 552×768，内容区 496×712（`dashboard_ui/geometry.h kDashboardContent`），8px 间距。
+每屏 552×768，面板区 496×690（`geometry.h kDashboardContent` 496×712 减去底部 22px 状态行，状态线 y=718），8px 间距。
 `grid_columns` 按比例映射到内容宽度；每屏固定 8 个网格行，第 n 屏为 `y ∈ [8n, 8n+8)`。
-可见面板不得重叠、不得跨屏（`h ≤ 8` 且 `y % 8 + h ≤ 8`）。`row_height` 对设备无效。
-编辑器拒绝非法放置（红色虚影 + 提示），并在本地实时标出布局问题；最终以设备
+可见面板不得重叠、不得跨屏（`h ≤ 8` 且 `y % 8 + h ≤ 8`）。页面对象没有 `row_height`
+字段（已从 schema 删除，提交该字段会被当作未知字段拒绝）。设备只接受
+`eego.dashboard/2` + `schema_version: 2`，不做 v1 迁移或布局自动修复。
+拖动/缩放/放入新面板时，被覆盖的面板按阅读顺序在本屏内向下让位，放不下则移到其后
+第一个空位（可能是下一屏），永远不跨屏（`src/model/layout.ts`，拖动中实时预览）；最终以设备
 `/dashboard/validate` 为准。常量集中在 `src/model/grid.ts`。
 
 ### 草稿与应用
 
 编辑都发生在本地草稿上（自动保存到 localStorage，可恢复）。“校验”调用
-`POST /dashboard/validate`；“应用到设备”以 `If-Match: <revision>` `PUT /dashboard`
+`POST /dashboard/validate`（响应 `{valid, errors:[{field,message}], bundle?}`，
+不再有 `migrated`/`source_version`）；“应用到设备”以 `If-Match: <revision>` `PUT /dashboard`
 （未配置时 `POST`）。409 时弹出冲突对话框：加载设备版本或以最新 revision 覆盖。
 校验错误（如 `dashboard.pages[0].panels[2].grid`）映射到对应页面/面板/数据源字段。
 

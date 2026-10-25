@@ -13,7 +13,7 @@ import { clone, defaultPlan, sourceFromPlan, syncPlan, uniqueId } from '../model
 import { sourceErrors } from '../model/errors';
 import { pathForField, prefixMatch, type Segment } from '../model/jsonpath';
 import { RESPONSE_KINDS, type Bundle, type EventMapping, type MetricMapping, type SourcePlan } from '../model/types';
-import { Badge, Button, Card, Checkbox, Empty, Icon, KeyValueEditor, NumberInput, Select, TextArea, TextInput, type Option } from '../ui';
+import { Badge, Button, Card, Checkbox, Empty, Icon, KeyValueEditor, NumberInput, Select, TextArea, TextInput, type Option, PageHeader } from '../ui';
 import { JsonTree } from '../ui/JsonTree';
 import { DraftToolbar } from './editor/EditorPage';
 
@@ -27,7 +27,7 @@ export function waitSeconds(kind: 'test' | 'probe', now = Date.now()): number {
   if (calls[kind].length < LIMIT) return 0;
   return Math.ceil((WINDOW_MS - (now - calls[kind][0])) / 1000);
 }
-function noteCall(kind: 'test' | 'probe') {
+export function noteCall(kind: 'test' | 'probe') {
   calls[kind].push(Date.now());
 }
 
@@ -80,11 +80,9 @@ export function SourcesPage({ sourceId }: { sourceId: string }) {
 
   return (
     <div className="page wide">
-      <div className="page-head">
-        <h1>{t('src.title')}</h1>
-        <div className="row grow">
-          <DraftToolbar />
-        </div>
+      <PageHeader icon="db" title={t('src.title')} subtitle={t('src.subtitle')} />
+      <div className="card row" style={{ padding: '8px 12px', marginBottom: 16 }}>
+        <DraftToolbar compact />
       </div>
       <div className="src-layout">
         <div className="card src-list" style={{ padding: 6 }}>
@@ -187,7 +185,7 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
     try {
       const r = await api.testSource(clone(plan), variables);
       setPreview(r);
-      d.recordObserved(sourceId, r.metrics.map((m) => ({ metric: m.metric, unit: m.unit })));
+      d.recordObserved(sourceId, r.metrics.map((m) => ({ metric: m.metric, unit: m.unit, value: m.value, timestamp_ms: m.timestamp_ms, labels: m.labels })));
     } catch (e) {
       if (e instanceof ApiError && e.status === 429) calls.test = Array(LIMIT).fill(Date.now() - WINDOW_MS + (e.retryAfter ?? 60) * 1000);
       toast('error', errorText(e, t));

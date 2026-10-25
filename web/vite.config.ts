@@ -11,6 +11,7 @@ export default defineConfig(({ mode }) => {
   return {
     base: './',
     plugins: [react()],
+    define: env.VITE_MOCK === '1' ? { 'import.meta.env.VITE_REPO_ROOT': JSON.stringify(new URL('..', import.meta.url).pathname.replace(/\/$/, '')) } : {},
     build: {
       target: 'es2020',
       cssCodeSplit: false,

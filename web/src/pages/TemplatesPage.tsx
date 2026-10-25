@@ -8,8 +8,9 @@ import { navigate } from '../state/router';
 import { addTemplateAsPages, addTemplatePanels, bundleFromPreset, parseBundle, replaceWithTemplate } from '../model/bundle';
 import { columnsOf, isVisible, panelPixels, SCREEN_H, SCREEN_W } from '../model/grid';
 import type { Bundle, Page } from '../model/types';
-import { Badge, Button, Empty, Select, Spinner } from '../ui';
-import { PanelPreview } from './editor/PanelPreview';
+import { Badge, Button, EmptyState, Icon, PageHeader, Segmented, Select, SkeletonCard } from '../ui';
+import { DevicePanel } from './editor/DevicePanel';
+import type { ObservedMetrics } from '../model/metrics';
 
 export interface TemplateEntry {
   id: string;
@@ -40,19 +41,19 @@ export function libraryEntries(lib: api.TemplateLibrary): TemplateEntry[] {
   return out;
 }
 
-/** First screen of a page, scaled to `width` px. */
-export function ScreenThumb({ page, width = 150 }: { page: Page; width?: number }) {
+/** First screen of a page drawn like the device, scaled to `width` px. */
+export function ScreenThumb({ page, bundle, observed, width = 150 }: { page: Page; bundle?: Bundle | null; observed?: ObservedMetrics; width?: number }) {
   const scale = width / SCREEN_W;
   const columns = columnsOf(page);
   return (
-    <div style={{ position: 'relative', width, height: SCREEN_H * scale }} aria-hidden>
-      <div className="screen" style={{ top: 0, width: SCREEN_W, height: SCREEN_H, transform: `scale(${scale})`, transformOrigin: '0 0' }}>
+    <div className="thumb" style={{ width, height: SCREEN_H * scale }} aria-hidden>
+      <div style={{ position: 'absolute', left: 0, top: 0, width: SCREEN_W, height: SCREEN_H, transform: `scale(${scale})`, transformOrigin: '0 0', background: 'var(--paper)' }}>
         {page.panels.filter(isVisible).map((p) => {
           const px = panelPixels(p.grid, columns);
           if (px.screen !== 0) return null;
           return (
-            <div key={p.id} className="panel-box" style={{ left: px.x, top: px.y, width: px.w, height: px.h, cursor: 'default', borderWidth: 3 }}>
-              <PanelPreview panel={p} compact />
+            <div key={p.id} className="panel-box static" style={{ left: px.x, top: px.y, width: px.w, height: px.h, cursor: 'default' }}>
+              <DevicePanel panel={p} bundle={bundle ?? null} observed={observed} w={px.w} h={px.h} showDemoTag={false} />
             </div>
           );
         })}
@@ -117,34 +118,36 @@ export function TemplatesPage() {
 
   return (
     <div className="page wide">
-      <div className="page-head">
-        <h1 className="grow">{t('tpl.title')}</h1>
-        <div className="btn-group">
-          {(['all', 'layout', 'panel', 'example'] as Filter[]).map((f) => (
-            <Button key={f} size="sm" className={filter === f ? 'on' : ''} onClick={() => setFilter(f)}>
-              {f === 'all' ? t('tpl.all') : t(`tpl.kind.${f}`)}
-            </Button>
-          ))}
+      <PageHeader icon="templates" title={t('tpl.title')} subtitle={t('tpl.subtitle')} />
+      <div className="row" style={{ marginBottom: 16 }}>
+        <Segmented<Filter> value={filter} onChange={setFilter} options={(['all', 'layout', 'panel', 'example'] as Filter[]).map((f) => ({ value: f, label: f === 'all' ? t('tpl.all') : t(`tpl.kind.${f}`) }))} />
+        <span className="spacer" />
+        <div style={{ position: 'relative' }}>
+          <input className="input" style={{ width: 200, paddingLeft: 32 }} placeholder={t('tpl.search')} value={q} onChange={(e) => setQ(e.target.value)} aria-label={t('tpl.search')} />
+          <span style={{ position: 'absolute', left: 9, top: 9, color: 'var(--text-3)' }}>
+            <Icon name="search" size={16} />
+          </span>
         </div>
-        <input className="input" style={{ width: 180 }} placeholder={t('tpl.search')} value={q} onChange={(e) => setQ(e.target.value)} />
         <div style={{ width: 180 }}>
-          <Select label={t('tpl.target_page')} value={targetPage} options={d.draft.dashboard.pages.map((p) => ({ value: p.id, label: p.title || p.id }))} onChange={setTargetPage} />
+          <Select aria-label={t('tpl.target_page')} value={targetPage} options={d.draft.dashboard.pages.map((p) => ({ value: p.id, label: `${t('tpl.target_page')}: ${p.title || p.id}` }))} onChange={setTargetPage} />
         </div>
       </div>
       {error && <div className="notice warn">{error}</div>}
       {!entries && !error && (
-        <div>
-          <Spinner /> {t('common.loading')}
+        <div className="tpl-grid">
+          {Array.from({ length: 6 }, (_, i) => (
+            <SkeletonCard key={i} lines={4} />
+          ))}
         </div>
       )}
-      {entries && !shown.length && <Empty>{t('common.empty')}</Empty>}
+      {entries && !shown.length && <EmptyState icon="search" title={t('common.empty')} />}
       <div className="tpl-grid">
         {shown.map((e) => {
           const page = e.bundle.dashboard.pages[0];
           const sources = e.bundle.dashboard.sources.map((s) => s.id);
           return (
             <article key={`${e.kind}:${e.id}`} className="card tpl-card">
-              <div className="tpl-thumb">{page && <ScreenThumb page={page} />}</div>
+              <div className="tpl-thumb">{page && <ScreenThumb page={page} bundle={e.bundle} />}</div>
               <div className="tpl-meta">
                 <div className="row">
                   <strong className="grow">{e.title}</strong>

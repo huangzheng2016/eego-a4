@@ -4,7 +4,7 @@ import { useI18n } from '../i18n';
 import { useSession } from '../state/session';
 import { useToast } from '../state/toast';
 import { errorText, fieldMap } from '../state/errors';
-import { Badge, Button, Card, Modal, TextInput } from '../ui';
+import { Badge, Button, Card, Modal, TextInput, PageHeader } from '../ui';
 
 function uptime(s: number): string {
   const d = Math.floor(s / 86400);
@@ -79,7 +79,7 @@ export function SystemPage() {
 
   return (
     <div className="page stack">
-      <h1>{t('sys.title')}</h1>
+      <PageHeader icon="cpu" title={t('sys.title')} subtitle={t('sys.subtitle')} />
       <Card title={t('sys.status')} actions={<Button size="sm" onClick={() => void refreshStatus()}>{t('common.refresh')}</Button>}>
         {status ? (
           <table className="table">

@@ -198,7 +198,6 @@ export interface Page {
   title?: string;
   visible?: boolean;
   grid_columns?: number;
-  row_height?: number;
   panels: Panel[];
 }
 

@@ -2,7 +2,8 @@
 // Installed by main.tsx through a dynamic import that is dead-code-eliminated
 // from production builds.
 import { parseBundle, clone } from '../model/bundle';
-import { layoutIssues } from '../model/grid';
+import { columnsOf, isVisible, layoutIssues, panelPixels, screenCount } from '../model/grid';
+import { checkExpression } from '../model/expression';
 import { parseJsonPath, type PathToken } from '../model/jsonpath';
 import type { Bundle, SourcePlan } from '../model/types';
 
@@ -168,6 +169,17 @@ function validate(b: Bundle): { field: string; message: string }[] {
       if (p.source_id && !b.dashboard.sources.some((s) => s.id === p.source_id)) errors.push({ field: `${path}.source_id`, message: 'unknown source' });
     });
   });
+  b.dashboard.pages.forEach((page, pi) => {
+    if ('row_height' in page) errors.push({ field: `dashboard.pages[${pi}].row_height`, message: 'unknown field' });
+  });
+  b.dashboard.alert_rules.forEach((r, i) => {
+    const path = `dashboard.alert_rules[${i}]`;
+    if (!b.dashboard.sources.some((s) => s.id === r.source_id)) errors.push({ field: `${path}.source_id`, message: 'unknown source ID' });
+    if (!r.metric) errors.push({ field: `${path}.metric`, message: 'metric is required and bounded' });
+    const e = checkExpression(r.expression ?? '');
+    if (e) errors.push({ field: `${path}.expression`, message: e.message });
+    if (!r.style?.surfaces?.length) errors.push({ field: `${path}.style.surfaces`, message: 'select at least one known alert surface' });
+  });
   b.dashboard.sources.forEach((s, i) => {
     if (s.kind === 'http' && !/^https?:\/\//.test(s.url ?? '')) errors.push({ field: `dashboard.sources[${i}].url`, message: 'must be an http(s) URL' });
   });
@@ -226,7 +238,7 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
     case 'GET settings/schema':
       return json(200, SETTINGS_SCHEMA);
     case 'GET settings':
-      return json(200, { schema_version: 1, revision: 1, migrated: false, settings: state.settings, capabilities: capabilities(), power: { last_wake_reason: 'power_on', recovery_ap_active: false }, ble: { compiled: true, role: 'off', provisioning_state: 'idle' } });
+      return json(200, { schema_version: 1, revision: 1, settings: state.settings, capabilities: capabilities(), power: { last_wake_reason: 'power_on', recovery_ap_active: false }, ble: { compiled: true, role: 'off', provisioning_state: 'idle' } });
     case 'PUT settings': {
       const fields: Record<string, string> = {};
       for (const [k, v] of Object.entries(b)) {
@@ -264,7 +276,7 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
     }
     case 'POST dashboard/validate': {
       const errors = validate(body as Bundle);
-      return json(200, { valid: !errors.length, migrated: false, source_version: 2, errors });
+      return json(200, { valid: !errors.length, errors });
     }
     case 'GET dashboard/sample':
       return json(200, parseBundle(presetsByDir('examples')[0][1]));
@@ -287,11 +299,122 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
     a.state = m[2] === 'ack' ? 'acked' : 'cleared';
     return json(200, { ok: true, affected: 1 });
   }
-  if (path === 'display/snapshot.bmp') return err(503, 'unavailable', 'display snapshot unavailable in mock');
+  if (method === 'POST' && path === 'dashboard/render-preview') {
+    // Mirrors POST /dashboard/render-preview (crude drawing; real device uses its fonts).
+    const req = body as { bundle?: unknown; page_id?: string; screen?: number; refresh?: string } | null;
+    if (!req || typeof req.bundle !== 'object' || req.bundle === null) return err(400, 'invalid_request', 'bundle object required');
+    if (req.refresh !== undefined && req.refresh !== 'full' && req.refresh !== 'fast') return err(400, 'invalid_request', 'refresh must be full or fast');
+    if (req.screen !== undefined && (!Number.isInteger(req.screen) || req.screen < 0)) return err(400, 'invalid_request', 'screen must be a non-negative integer');
+    renderCalls.splice(0, renderCalls.length, ...renderCalls.filter((t) => Date.now() - t < 60000));
+    if (renderCalls.length >= 10) return new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'too many preview renders' } }), { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '30' } });
+    renderCalls.push(Date.now());
+    let draft: Bundle;
+    try {
+      draft = parseBundle({ schema: 'eego.dashboard-bundle/1', ...(req.bundle as object) });
+    } catch (e) {
+      return err(400, 'invalid_request', String(e));
+    }
+    const errors = validate(draft);
+    if (errors.length) return err(400, 'validation_failed', 'dashboard validation failed', Object.fromEntries(errors.map((e) => [e.field, e.message])));
+    const page = draft.dashboard.pages.find((p) => p.id === (req.page_id || draft.dashboard.default_page_id)) ?? draft.dashboard.pages[0];
+    if (!page) return err(400, 'invalid_request', 'unknown page');
+    const screens = screenCount(page);
+    const screen = Math.min(req.screen ?? 0, screens - 1);
+    const blob = await snapshot(draft, page.id, screen, req.refresh === 'fast');
+    if (!blob) return err(503, 'unavailable', 'render preview unavailable');
+    const data = draft.dashboard.samples.length ? 'bundle' : 'placeholder';
+    return new Response(blob, { status: 200, headers: { 'Content-Type': 'image/png', 'X-Preview-Page': page.id, 'X-Preview-Screen': String(screen), 'X-Preview-Screens': String(screens), 'X-Preview-Data': data } });
+  }
+  if (path === 'display/snapshot.bmp') {
+    const blob = await snapshot();
+    return blob ? new Response(blob, { status: 200, headers: { 'Content-Type': 'image/png' } }) : err(503, 'unavailable', 'display snapshot unavailable');
+  }
   return err(404, 'not_found', 'resource not found');
 }
 
-export function installMock(): void {
+/** Rough 1-bit-looking frame of the applied dashboard's first screen. */
+const renderCalls: number[] = [];
+
+async function snapshot(source: Bundle | null = state.bundle, pageId?: string, screen = 0, fast = false): Promise<Blob | null> {
+  const b = source;
+  const c = document.createElement('canvas');
+  c.width = 552;
+  c.height = 768;
+  const g = c.getContext('2d');
+  if (!g) return null;
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, 552, 768);
+  g.fillStyle = '#000';
+  g.strokeStyle = '#000';
+  g.lineWidth = 1;
+  const page = b?.dashboard.pages.find((p) => p.id === (pageId || b.dashboard.default_page_id)) ?? b?.dashboard.pages[0];
+  if (!b || !page) {
+    g.font = '16px sans-serif';
+    g.fillText('No dashboard configured', 180, 384);
+  } else {
+    const cols = columnsOf(page);
+    for (const p of page.panels.filter(isVisible)) {
+      const px = panelPixels(p.grid, cols);
+      if (px.screen !== screen) continue;
+      g.strokeRect(px.x + 0.5, px.y + 0.5, px.w - 1, px.h - 1);
+      let y = px.y + 6;
+      if (p.title) {
+        g.font = 'bold 16px sans-serif';
+        g.fillText(p.title, px.x + 6, y + 15, px.w - 12);
+        g.fillRect(px.x + 6, y + 19, px.w - 12, 1);
+        y += 21;
+      }
+      const sample = b.dashboard.samples.filter((s) => s.source_id === p.source_id && s.metric === p.metric).pop();
+      if (p.kind === 'card' && sample) {
+        const size = Math.min(64, Math.max(16, Math.floor((px.y + px.h - y - 6) / 16) * 16));
+        g.font = `bold ${size}px sans-serif`;
+        const text = sample.value.toFixed(p.style?.precision ?? 1) + (p.style?.unit ? ' ' + p.style.unit : '');
+        const w = g.measureText(text).width;
+        g.fillText(text, px.x + Math.max(6, (px.w - w) / 2), y + (px.y + px.h - y) / 2 + size / 3, px.w - 12);
+      } else if (p.kind === 'text' && p.text?.content) {
+        g.font = '16px sans-serif';
+        g.fillText(p.text.content.slice(0, 60), px.x + 6, y + 18, px.w - 12);
+      } else if (p.kind === 'chart') {
+        g.beginPath();
+        const pts = 16;
+        for (let i = 0; i < pts; i++) {
+          const xx = px.x + 6 + (i * (px.w - 12)) / (pts - 1);
+          const yy = y + 8 + ((Math.sin(i / 2) + 1) / 2) * (px.y + px.h - y - 20);
+          if (i) g.lineTo(xx, yy);
+          else g.moveTo(xx, yy);
+        }
+        g.stroke();
+      } else if (p.kind !== 'button') {
+        g.font = '16px sans-serif';
+        g.fillStyle = fast ? '#000' : '#666';
+        g.fillText('No data', px.x + px.w / 2 - 28, y + (px.y + px.h - y) / 2);
+        g.fillStyle = '#000';
+      } else {
+        g.font = 'bold 16px sans-serif';
+        g.fillText(p.actions?.[0]?.label ?? 'Button', px.x + 12, px.y + px.h / 2 + 5);
+      }
+    }
+  }
+  return new Promise((res) => c.toBlob((x) => res(x), 'image/png'));
+}
+
+export async function installMock(): Promise<void> {
+  // Dev conveniences for headless screenshots: ?auto logs in, ?fresh starts
+  // unconfigured, ?fixture=<name> loads .tmp/render/fixtures/<name>.json (the
+  // firmware render harness input) as the applied dashboard.
+  const q = new URLSearchParams(location.search);
+  if (q.has('auto')) sessionStorage.setItem('eego_admin_token', TOKEN);
+  if (q.has('fresh')) state.bundle = null;
+  const fixture = q.get('fixture');
+  if (fixture && /^[a-z0-9-]+$/.test(fixture)) {
+    try {
+      const res = await fetch(`/@fs${import.meta.env.VITE_REPO_ROOT ?? ''}/.tmp/render/fixtures/${fixture}.json`);
+      if (res.ok) state.bundle = { ...parseBundle(await res.json()), revision: state.revision };
+      localStorage.removeItem('eego_dashboard_draft');
+    } catch {
+      /* fixture missing: keep the default example */
+    }
+  }
   const realFetch = window.fetch.bind(window);
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;

@@ -3,7 +3,7 @@ import * as api from '../api';
 import { useEnumLabel, useI18n, type DictKey } from '../i18n';
 import { useToast } from '../state/toast';
 import { errorText } from '../state/errors';
-import { Badge, Button, Card, Empty, Spinner } from '../ui';
+import { Badge, Button, Card, EmptyState, Icon, PageHeader, Skeleton } from '../ui';
 
 function fmt(ts?: number): string {
   if (!ts) return '—';
@@ -46,20 +46,32 @@ export function AlertsPage() {
   const count = (s: string) => live.filter((a) => a.severity === s).length;
   return (
     <div className="page stack">
-      <div className="page-head">
-        <h1 className="grow">{t('alerts.title')}</h1>
-        <Button onClick={load}>{t('common.refresh')}</Button>
-        <Button disabled={!list.some((a) => a.state === 'active')} onClick={() => void act(api.ackAllAlerts)}>
-          {t('alerts.ack_all')}
-        </Button>
-      </div>
+      <PageHeader
+        icon="bell"
+        title={t('alerts.title')}
+        subtitle={t('alerts.subtitle')}
+        actions={
+          <>
+            <Button onClick={load}>
+              <Icon name="refresh" size={16} /> {t('common.refresh')}
+            </Button>
+            <Button variant="primary" disabled={!list.some((a) => a.state === 'active')} onClick={() => void act(api.ackAllAlerts)}>
+              <Icon name="check" size={16} /> {t('alerts.ack_all')}
+            </Button>
+          </>
+        }
+      />
       {err && <div className="notice warn">{err}</div>}
       {data && <div className="muted">{t('alerts.summary', { n: live.length, c: count('critical'), w: count('warning'), i: count('info') })}</div>}
       <Card>
         {!data && !err ? (
-          <Spinner />
+          <div className="card-body col">
+            <Skeleton h={18} />
+            <Skeleton h={18} w="80%" />
+            <Skeleton h={18} w="60%" />
+          </div>
         ) : !list.length ? (
-          <Empty>{t('alerts.empty')}</Empty>
+          <EmptyState icon="ok" title={t('alerts.empty')}>{t('alerts.empty_desc')}</EmptyState>
         ) : (
           <div className="scroll-x">
             <table className="table">

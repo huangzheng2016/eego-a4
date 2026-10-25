@@ -95,7 +95,6 @@ export interface SettingsSchema {
 export interface SettingsResponse {
   schema_version: number;
   revision: number;
-  migrated: boolean;
   settings: Record<string, unknown>;
   capabilities: Record<string, boolean>;
   power: Record<string, unknown>;
@@ -127,8 +126,6 @@ export const putDashboard = (bundle: Bundle, revision: number) =>
 export const createDashboard = (bundle: Bundle) => request<Bundle>('/dashboard', { method: 'POST', body: bundle });
 export interface ValidateResponse {
   valid: boolean;
-  migrated: boolean;
-  source_version: number;
   errors: FieldError[];
   bundle?: Bundle;
 }
@@ -197,21 +194,40 @@ export interface TemplateLibrary {
 }
 export const getTemplates = () => request<TemplateLibrary>('/dashboard/templates', { timeoutMs: 30000 });
 
+export type PreviewRefresh = 'full' | 'fast';
+export type PreviewData = 'bundle' | 'live' | 'mixed' | 'placeholder' | 'none';
+export interface RenderPreview {
+  blob: Blob;
+  page: string;
+  screen: number;
+  /** Total screens of that page (X-Preview-Screens). */
+  screens: number;
+  data: PreviewData | string;
+}
+/**
+ * On-device render of a draft with the real fonts (nothing is applied).
+ * 200 image/bmp 552×768 4-bpp (fast = B/W only). Errors: 400 validation_failed
+ * (fields), 413, 415, 429 (10/min per session), 503 busy/timeout/unavailable.
+ */
+export async function renderPreview(bundle: Bundle, opts: { pageId?: string; screen?: number; refresh?: PreviewRefresh } = {}): Promise<RenderPreview> {
+  const body: Record<string, unknown> = { bundle, screen: Math.max(0, Math.floor(opts.screen ?? 0)), refresh: opts.refresh ?? 'full' };
+  if (opts.pageId) body.page_id = opts.pageId;
+  const res = await request<Response>('/dashboard/render-preview', { method: 'POST', body, raw: true, timeoutMs: 30000 });
+  const num = (h: string, d: number) => {
+    const n = Number(res.headers.get(h));
+    return Number.isFinite(n) && res.headers.get(h) !== null ? n : d;
+  };
+  return {
+    blob: await res.blob(),
+    page: res.headers.get('X-Preview-Page') ?? opts.pageId ?? '',
+    screen: num('X-Preview-Screen', opts.screen ?? 0),
+    screens: Math.max(1, num('X-Preview-Screens', 1)),
+    data: res.headers.get('X-Preview-Data') ?? 'none',
+  };
+}
+
 /** Current e-ink frame: 1-bit 552×768 BMP; 503 when unavailable. */
 export async function getDisplaySnapshot(): Promise<Blob> {
   const res = await request<Response>('/display/snapshot.bmp', { raw: true, timeoutMs: 15000 });
   return res.blob();
 }
-
-// Legacy source presets (alert sources), kept for reference in the source wizard.
-export interface SourcePreset {
-  id: string;
-  label_zh: string;
-  label_en: string;
-  kind_hint: string;
-  builtin_poll: boolean;
-  config_template: unknown;
-  notes: string;
-  notes_en: string;
-}
-export const listSourcePresets = () => request<{ presets: SourcePreset[] }>('/sources/presets');

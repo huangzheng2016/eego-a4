@@ -7,8 +7,15 @@ export interface MetricOption {
   origin: 'mapping' | 'preview' | 'sample' | 'panel';
 }
 
-/** Metric names observed in sources/test previews, keyed by source ID. */
-export type ObservedMetrics = Record<string, { metric: string; unit?: string }[]>;
+export interface ObservedMetric {
+  metric: string;
+  unit?: string;
+  value?: number;
+  timestamp_ms?: number;
+  labels?: Record<string, string>;
+}
+/** Metrics observed in sources/test previews, keyed by source ID. */
+export type ObservedMetrics = Record<string, ObservedMetric[]>;
 
 export function metricsForSource(b: Bundle, sourceId: string, observed: ObservedMetrics = {}): MetricOption[] {
   const out = new Map<string, MetricOption>();

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <!--
   REFERENCE COPY of the device loader page. The firmware serves its own copy
-  at "/" (firmware/components/admin/src/admin_page.cpp kLoaderHtml) together
+  at "/" (firmware/components/admin/src/loader_page.cpp kLoaderHtml) together
   with /loader.js (see loader.js next to this file) and this CSP:
 
     default-src 'self'; script-src 'self' https://huangzheng2016.github.io;
@@ -23,8 +23,9 @@
 <body>
 <div id="root"></div>
 <div id="eego-fallback" hidden>
-<p>管理界面加载失败（需要能访问互联网）。Web app failed to load (internet access required).</p>
-<p><a href="/legacy">打开内置管理页 / Open built-in admin page</a></p>
+<h1>管理界面加载失败 / Admin app failed to load</h1>
+<p>管理界面托管在 GitHub Pages（https://huangzheng2016.github.io/eego-a4），无法从该地址加载。请确认访问本页的电脑或手机能够连接互联网，然后刷新页面。</p>
+<p>The admin frontend is hosted on GitHub Pages (https://huangzheng2016.github.io/eego-a4) and could not be loaded. Make sure the computer or phone you are using has internet access, then reload this page.</p>
 </div>
 <script src="/loader.js"></script>
 </body>

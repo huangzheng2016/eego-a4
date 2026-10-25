@@ -7,8 +7,13 @@ import type { GridRect, Page, Panel } from './types';
 
 export const SCREEN_W = 552;
 export const SCREEN_H = 768;
-/** dashboard_ui geometry.h kDashboardContent */
-export const CONTENT = { x: 28, y: 28, w: 496, h: 712 } as const;
+/**
+ * Dashboard area: geometry.h kDashboardContent (28, 28, 496×712) minus the
+ * 22 px status line the runtime reserves at the bottom (dashboard_runtime.cpp
+ * kStatusLineY = 718), i.e. what buildPageLayout() actually receives.
+ */
+export const CONTENT = { x: 28, y: 28, w: 496, h: 690 } as const;
+export const STATUS_LINE_Y = 718;
 export const GAP_X = 8;
 export const GAP_Y = 8;
 export const ROWS_PER_SCREEN = 8;

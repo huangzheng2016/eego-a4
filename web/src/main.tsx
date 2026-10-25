@@ -9,13 +9,13 @@ declare global {
   }
 }
 // Tell the device loader (/loader.js) that the bundle executed; otherwise it
-// shows a fallback link to /legacy after ~8 s.
+// shows a static "failed to load" notice after ~8 s.
 window.__EEGO_APP_LOADED = true;
 
 async function boot() {
   if (import.meta.env.VITE_MOCK === '1') {
     const { installMock } = await import('./api/mock');
-    installMock();
+    await installMock();
   }
   const el = document.getElementById('root') ?? document.body.appendChild(document.createElement('div'));
   createRoot(el).render(

@@ -40,18 +40,29 @@ export function parseBundle(raw: unknown): Bundle {
   b.schema_version = 1;
   if (typeof b.revision !== 'number') b.revision = 0;
   if (!Array.isArray(b.source_plans)) b.source_plans = [];
+  // The device only accepts eego.dashboard/2 (no migration on the device).
+  b.dashboard.schema = DASHBOARD_SCHEMA;
+  b.dashboard.schema_version = 2;
   const d = b.dashboard as unknown as Record<string, unknown>;
   for (const key of DASHBOARD_ARRAYS) if (!Array.isArray(d[key])) d[key] = [];
   for (const page of b.dashboard.pages) {
     if (!Array.isArray(page.panels)) page.panels = [];
     for (const panel of page.panels) if (!panel.grid) panel.grid = { x: 0, y: 0, w: 6, h: 4 };
+    stripLegacyPage(page);
   }
   return b;
 }
 
+/** `row_height` was removed from the model (unknown field → 400); drop it from old imports. */
+function stripLegacyPage(page: Page): void {
+  delete (page as { row_height?: number }).row_height;
+}
+
 /** Strip undefined values and produce the JSON body sent to the device. */
 export function serializeBundle(b: Bundle): Bundle {
-  return JSON.parse(JSON.stringify(b)) as Bundle;
+  const out = JSON.parse(JSON.stringify(b)) as Bundle;
+  for (const page of out.dashboard?.pages ?? []) stripLegacyPage(page);
+  return out;
 }
 
 export function bundleToText(b: Bundle): string {
@@ -72,7 +83,7 @@ export function bundleFromPreset(preset: PresetDoc, mockHost?: string): Bundle {
     refresh_ms: 60000,
     sources: clone(t.sources ?? []),
     variables: clone(t.variables ?? []),
-    pages: clone(t.pages),
+    pages: clone(t.pages).map((p) => (stripLegacyPage(p), p)),
     alert_rules: clone(t.alert_rules ?? []),
     assets: clone(t.assets ?? []),
     samples: clone(t.samples ?? []),
@@ -99,7 +110,7 @@ export function emptyBundle(): Bundle {
       refresh_ms: 60000,
       sources: [],
       variables: [],
-      pages: [{ id: 'main', title: 'Main', visible: true, grid_columns: 24, row_height: 16, panels: [] }],
+      pages: [{ id: 'main', title: 'Main', visible: true, grid_columns: 24, panels: [] }],
       alert_rules: [],
       assets: [],
       samples: [],

@@ -13,7 +13,7 @@ for (const f of readdirSync(dir)) {
   console.log(`${f.padEnd(12)} ${(buf.length / 1024).toFixed(1).padStart(8)} KiB  gzip ${(gz / 1024).toFixed(1).padStart(7)} KiB`);
 }
 console.log(`total gzip ${(total / 1024).toFixed(1)} KiB`);
-if (total > 200 * 1024) {
-  console.error('bundle exceeds 200 KiB gzip budget');
+if (total > 150 * 1024) {
+  console.error('bundle exceeds 150 KiB gzip budget');
   process.exit(1);
 }

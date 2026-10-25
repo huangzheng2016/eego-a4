@@ -4,7 +4,7 @@ import { useI18n } from '../i18n';
 import { useToast } from '../state/toast';
 import { errorText, fieldMap } from '../state/errors';
 import { useDraft } from '../state/draft';
-import { Button, Card, Empty, Spinner, TextInput } from '../ui';
+import { Button, Card, Empty, Spinner, TextInput, PageHeader } from '../ui';
 
 export function CredentialsPage() {
   const { t } = useI18n();
@@ -52,7 +52,7 @@ export function CredentialsPage() {
 
   return (
     <div className="page stack">
-      <h1>{t('cred.title')}</h1>
+      <PageHeader icon="key" title={t('cred.title')} subtitle={t('cred.subtitle')} />
       <div className="notice">{t('cred.note')}</div>
       <Card title={t('cred.write')}>
         <form className="form-grid two" onSubmit={submit} autoComplete="off">

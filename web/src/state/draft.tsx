@@ -5,7 +5,7 @@ import * as api from '../api';
 import { ApiError } from '../api';
 import { clone, emptyBundle, parseBundle, serializeBundle } from '../model/bundle';
 import type { FieldError } from '../model/errors';
-import type { ObservedMetrics } from '../model/metrics';
+import type { ObservedMetric, ObservedMetrics } from '../model/metrics';
 import type { Bundle } from '../model/types';
 import { useI18n } from '../i18n';
 import { useToast } from './toast';
@@ -45,11 +45,18 @@ export interface DraftCtx {
   redo: () => void;
   reload: () => Promise<void>;
   validate: () => Promise<boolean>;
-  apply: () => Promise<boolean>;
+  /** Apply the draft (or `override`, which also becomes the draft). */
+  apply: (override?: Bundle) => Promise<boolean>;
   discard: () => void;
   resolveConflict: (choice: 'reload' | 'overwrite' | 'cancel') => Promise<void>;
   restore: (yes: boolean) => void;
-  recordObserved: (sourceId: string, metrics: { metric: string; unit?: string }[]) => void;
+  recordObserved: (sourceId: string, metrics: ObservedMetric[]) => void;
+  /** Increments after every successful apply (drives the live device preview). */
+  appliedSeq: number;
+  /** Date.now() of the last successful apply (0 = none this session). */
+  appliedAt: number;
+  /** Show device validation errors (e.g. from render-preview) on the draft. */
+  reportErrors: (fields: FieldError[]) => void;
 }
 
 const Ctx = createContext<DraftCtx | null>(null);
@@ -90,6 +97,8 @@ export function DraftProvider({ children }: { children: ReactNode }) {
   const [observed, setObserved] = useState<ObservedMetrics>({});
   const [pageId, setPageIdState] = useState('');
   const [panelId, setPanelId] = useState<string | null>(null);
+  const [appliedSeq, setAppliedSeq] = useState(0);
+  const [appliedAt, setAppliedAt] = useState(0);
 
   const draft = hist.present;
   const dirty = applied ? !same(applied, draft) : true;
@@ -174,8 +183,8 @@ export function DraftProvider({ children }: { children: ReactNode }) {
       const r = await api.validateDashboard(serializeBundle(draft));
       setErrors(r.errors ?? []);
       setValidity(r.valid ? 'valid' : 'invalid');
-      if (r.valid) toast('ok', t('draft.valid') + (r.migrated ? ` · ${t('draft.migrated')}` : ''));
-      else toast('error', t('draft.invalid', { n: r.errors.length }));
+      if (r.valid) toast('ok', t('draft.valid'));
+      else toast('error', t('draft.invalid', { n: r.errors?.length ?? 0 }));
       return r.valid;
     } catch (e) {
       toast('error', errorText(e, t));
@@ -186,20 +195,23 @@ export function DraftProvider({ children }: { children: ReactNode }) {
   }, [draft, toast, t]);
 
   const doApply = useCallback(
-    async (rev: number) => {
-      const body = serializeBundle({ ...draft, revision: rev });
+    async (rev: number, override?: Bundle) => {
+      const body = serializeBundle({ ...(override ?? draft), revision: rev });
       const result = applied ? await api.putDashboard(body, rev) : await api.createDashboard(body);
       adopt(result, true);
       writeSaved(null);
+      setAppliedSeq((n) => n + 1);
+      setAppliedAt(Date.now());
       toast('ok', t('draft.applied', { rev: result.revision }));
     },
     [draft, applied, adopt, toast, t],
   );
 
-  const apply = useCallback(async () => {
+  const apply = useCallback(async (override?: Bundle) => {
+    if (override) setHist((h) => commit(h, clone(override)));
     setBusy('apply');
     try {
-      await doApply(revision);
+      await doApply(revision, override);
       return true;
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
@@ -240,6 +252,8 @@ export function DraftProvider({ children }: { children: ReactNode }) {
         const result = await api.putDashboard(body, c.remoteRevision);
         adopt(result, true);
         writeSaved(null);
+        setAppliedSeq((n) => n + 1);
+      setAppliedAt(Date.now());
         toast('ok', t('draft.applied', { rev: result.revision }));
       } catch (e) {
         if (e instanceof ApiError && e.code === 'validation_failed') {
@@ -270,7 +284,12 @@ export function DraftProvider({ children }: { children: ReactNode }) {
     [restorable, revision],
   );
 
-  const recordObserved = useCallback((sourceId: string, metrics: { metric: string; unit?: string }[]) => {
+  const reportErrors = useCallback((fields: FieldError[]) => {
+    setErrors(fields);
+    setValidity(fields.length ? 'invalid' : 'unknown');
+  }, []);
+
+  const recordObserved = useCallback((sourceId: string, metrics: ObservedMetric[]) => {
     setObserved((o) => ({ ...o, [sourceId]: metrics }));
   }, []);
 
@@ -305,8 +324,11 @@ export function DraftProvider({ children }: { children: ReactNode }) {
       resolveConflict,
       restore,
       recordObserved,
+      appliedSeq,
+      appliedAt,
+      reportErrors,
     }),
-    [loading, loadError, applied, draft, dirty, errors, validity, busy, conflict, restorable, hist.past.length, hist.future.length, observed, pageId, panelId, setPageId, update, replace, reload, validate, apply, discard, resolveConflict, restore, recordObserved],
+    [loading, loadError, applied, draft, dirty, errors, validity, busy, conflict, restorable, hist.past.length, hist.future.length, observed, pageId, panelId, setPageId, update, replace, reload, validate, apply, discard, resolveConflict, restore, recordObserved, appliedSeq, appliedAt, reportErrors],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

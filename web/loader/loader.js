@@ -1,7 +1,8 @@
-// REFERENCE COPY of the device's /loader.js (admin_page.cpp kLoaderJs).
+// REFERENCE COPY of the device's /loader.js (loader_page.cpp kLoaderJs).
 // Fetches <BASE>/version.json, then injects <BASE>/assets/app.css and
 // <BASE>/assets/app.js (type=module) with ?v=<version|build|hash>. If the app
-// has not set window.__EEGO_APP_LOADED within 8 s, the /legacy link is shown.
+// has not set window.__EEGO_APP_LOADED within 8 s, a static zh/en notice naming
+// the Pages URL is shown.
 (function () {
   'use strict';
   var BASE = 'https://huangzheng2016.github.io/eego-a4';

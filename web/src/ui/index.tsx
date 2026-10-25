@@ -1,10 +1,12 @@
 // Small UI primitives. Keep these dependency-free.
+import { Icon } from './icons';
 import {
   useEffect,
   useId,
   useRef,
   useState,
   type ButtonHTMLAttributes,
+  type CSSProperties,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
@@ -222,7 +224,10 @@ export function Modal({
     <div className="modal-scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className={`modal ${size ?? ''}`} role="dialog" aria-modal="true">
         <div className="modal-head">
-          <h2>{title}</h2>
+          <h2 className="grow">{title}</h2>
+          <button type="button" className="btn ghost icon sm" aria-label="close" onClick={onClose}>
+            <Icon name="x" size={16} />
+          </button>
         </div>
         <div className="modal-body">{children}</div>
         {footer && <div className="modal-foot">{footer}</div>}
@@ -245,8 +250,13 @@ export function Card({ title, actions, children, className }: { title?: ReactNod
   );
 }
 
-export function Badge({ tone, children }: { tone?: 'ok' | 'warn' | 'danger' | 'accent'; children: ReactNode }) {
-  return <span className={`badge ${tone ?? ''}`}>{children}</span>;
+export function Badge({ tone, children, dot }: { tone?: 'ok' | 'warn' | 'danger' | 'accent'; children: ReactNode; dot?: boolean }) {
+  return (
+    <span className={`badge ${tone ?? ''}`}>
+      {dot && <i className="badge-dot" />}
+      {children}
+    </span>
+  );
 }
 
 export function Spinner() {
@@ -257,43 +267,83 @@ export function Empty({ children }: { children: ReactNode }) {
   return <div className="empty">{children}</div>;
 }
 
-/** Minimal inline SVG icons (stroke-based, 16px). */
-const ICONS: Record<string, string> = {
-  undo: 'M4 7h7a4 4 0 0 1 0 8H7M4 7l3-3M4 7l3 3',
-  redo: 'M12 7H5a4 4 0 0 0 0 8h4M12 7L9 4m3 3L9 10',
-  plus: 'M8 3v10M3 8h10',
-  trash: 'M3 4h10M6 4V2.5h4V4M4.5 4l.7 9.5h5.6l.7-9.5',
-  copy: 'M5 5h8v8H5zM3 11V3h8',
-  up: 'M8 13V3M4 7l4-4 4 4',
-  down: 'M8 3v10M4 9l4 4 4-4',
-  menu: 'M2 4h12M2 8h12M2 12h12',
-  check: 'M3 8.5l3 3 7-7',
-  x: 'M4 4l8 8M12 4l-8 8',
-  grid: 'M2 2h12v12H2zM2 6h12M2 10h12M6 2v12M10 2v12',
-  layout: 'M2 2h12v12H2zM2 7h12M8 7v7',
-  db: 'M3 4c0-1.1 2.2-2 5-2s5 .9 5 2-2.2 2-5 2-5-.9-5-2zm0 0v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2',
-  key: 'M10 2a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM7 8l-5 5v1.5h2v-1.5h1.5V11H7',
-  gear: 'M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M3 13l1.4-1.4M11.6 4.4L13 3',
-  bell: 'M4 11V7a4 4 0 0 1 8 0v4l1.5 1.5h-11zM6.5 14h3',
-  cpu: 'M4 4h8v8H4zM6 1v3M10 1v3M6 12v3M10 12v3M1 6h3M1 10h3M12 6h3M12 10h3',
-  eye: 'M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z',
-  play: 'M5 3l8 5-8 5z',
-  download: 'M8 2v8M4.5 6.5L8 10l3.5-3.5M3 13h10',
-  upload: 'M8 10V2M4.5 5.5L8 2l3.5 3.5M3 13h10',
-  sun: 'M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15',
-  globe: 'M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM1.5 8h13M8 1.5c2 2 2.5 4 2.5 6.5S10 12.5 8 14.5C6 12.5 5.5 10.5 5.5 8S6 3.5 8 1.5',
-  logout: 'M6 2H3v12h3M10 5l3 3-3 3M13 8H6',
-  zoomin: 'M7 2a5 5 0 1 0 0 10A5 5 0 0 0 7 2zM14 14l-3.5-3.5M5 7h4M7 5v4',
-  zoomout: 'M7 2a5 5 0 1 0 0 10A5 5 0 0 0 7 2zM14 14l-3.5-3.5M5 7h4',
-  fetch: 'M2 8a6 6 0 0 1 10.5-4M14 8a6 6 0 0 1-10.5 4M12.5 1v3h-3M3.5 15v-3h3',
-};
-export function Icon({ name, size = 16 }: { name: keyof typeof ICONS | string; size?: number }) {
+/** Illustrated empty state with an optional call to action. */
+export function EmptyState({ icon = 'sparkles', title, children, action }: { icon?: string; title: ReactNode; children?: ReactNode; action?: ReactNode }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d={ICONS[name] ?? ''} />
-    </svg>
+    <div className="empty-state">
+      <div className="empty-icon">
+        <Icon name={icon} size={26} />
+      </div>
+      <div className="empty-title">{title}</div>
+      {children && <div className="empty-desc">{children}</div>}
+      {action && <div className="row" style={{ justifyContent: 'center', marginTop: 4 }}>{action}</div>}
+    </div>
   );
 }
+
+/** Shimmering placeholder blocks while data loads. */
+export function Skeleton({ w = '100%', h = 14, r, style }: { w?: number | string; h?: number | string; r?: number; style?: CSSProperties }) {
+  return <span className="skeleton" style={{ width: w, height: h, borderRadius: r, ...style }} aria-hidden />;
+}
+export function SkeletonCard({ lines = 3 }: { lines?: number }) {
+  return (
+    <div className="card card-body col" aria-busy="true">
+      <Skeleton w="40%" h={16} />
+      {Array.from({ length: lines }, (_, i) => (
+        <Skeleton key={i} w={`${90 - i * 12}%`} />
+      ))}
+    </div>
+  );
+}
+
+export function PageHeader({ title, subtitle, icon, actions }: { title: ReactNode; subtitle?: ReactNode; icon?: string; actions?: ReactNode }) {
+  return (
+    <header className="page-head">
+      {icon && (
+        <span className="page-icon">
+          <Icon name={icon} size={20} />
+        </span>
+      )}
+      <div className="grow">
+        <h1>{title}</h1>
+        {subtitle && <p className="page-sub">{subtitle}</p>}
+      </div>
+      {actions && <div className="row page-actions">{actions}</div>}
+    </header>
+  );
+}
+
+export function Segmented<T extends string>({ value, options, onChange, size, label }: { value: T; options: { value: T; label: ReactNode; icon?: string; title?: string }[]; onChange: (v: T) => void; size?: 'sm'; label?: string }) {
+  return (
+    <div className={`segmented${size ? ' ' + size : ''}`} role="radiogroup" aria-label={label}>
+      {options.map((o) => (
+        <button key={o.value} type="button" role="radio" aria-checked={o.value === value} title={o.title} className={o.value === value ? 'on' : ''} onClick={() => onChange(o.value)}>
+          {o.icon && <Icon name={o.icon} size={15} />}
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function Switch({ checked, onChange, label, disabled, hint }: { checked: boolean | undefined; onChange: (v: boolean) => void; label?: ReactNode; disabled?: boolean; hint?: ReactNode }) {
+  return (
+    <label className={`switch-row${disabled ? ' disabled' : ''}`}>
+      <span className="switch">
+        <input type="checkbox" role="switch" checked={!!checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+        <span className="switch-track" />
+      </span>
+      {label && (
+        <span className="col" style={{ gap: 0 }}>
+          <span>{label}</span>
+          {hint && <span className="dim">{hint}</span>}
+        </span>
+      )}
+    </label>
+  );
+}
+
+export { Icon, Logo } from './icons';
 
 /** Editable list of string key/value pairs (headers, label maps). */
 export function KeyValueEditor({

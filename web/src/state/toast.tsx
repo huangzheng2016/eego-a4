@@ -29,9 +29,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       <div className="toasts" role="status" aria-live="polite">
         {items.map((t) => (
           <div key={t.id} className={`toast ${t.kind}`}>
+            <span className="toast-ico">
+              <Icon name={t.kind === 'ok' ? 'ok' : t.kind === 'error' ? 'error' : t.kind === 'warn' ? 'warn' : 'info'} size={18} />
+            </span>
             <div className="grow">{t.text}</div>
             <Button size="sm" icon variant="ghost" aria-label="close" onClick={() => dismiss(t.id)}>
-              <Icon name="x" />
+              <Icon name="x" size={15} />
             </Button>
           </div>
         ))}

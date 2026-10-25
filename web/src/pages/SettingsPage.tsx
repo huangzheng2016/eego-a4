@@ -6,7 +6,7 @@ import * as api from '../api';
 import { useEnumLabel, useI18n, type DictKey } from '../i18n';
 import { useToast } from '../state/toast';
 import { errorText, fieldMap } from '../state/errors';
-import { Button, Card, Checkbox, NumberInput, Select, Spinner, TextArea, TextInput } from '../ui';
+import { Button, Card, Checkbox, NumberInput, Select, TextArea, TextInput, Icon, PageHeader, SkeletonCard } from '../ui';
 
 const GROUP_ORDER = ['hardware', 'display', 'refresh', 'power', 'time_language', 'ble', 'diagnostics', 'other'];
 /** Client-side regrouping (schema groups are firmware-defined). */
@@ -161,21 +161,31 @@ export function SettingsPage() {
 
   if (!schema || !data) {
     return (
-      <div className="page">
-        <Spinner /> {t('common.loading')}
+      <div className="page stack">
+        <PageHeader icon="sliders" title={t('set.title')} />
+        <SkeletonCard lines={4} />
+        <SkeletonCard lines={3} />
       </div>
     );
   }
   const dirty = Object.keys(changed).length > 0;
   return (
     <div className="page stack">
-      <div className="page-head">
-        <h1 className="grow">{t('set.title')}</h1>
-        <Button onClick={() => void load()}>{t('common.reload')}</Button>
-        <Button variant="primary" loading={busy} disabled={!dirty} onClick={() => void save()}>
-          {t('set.save')}
-        </Button>
-      </div>
+      <PageHeader
+        icon="sliders"
+        title={t('set.title')}
+        subtitle={t('set.subtitle')}
+        actions={
+          <>
+            <Button onClick={() => void load()}>
+              <Icon name="refresh" size={16} /> {t('common.reload')}
+            </Button>
+            <Button variant="primary" loading={busy} disabled={!dirty} onClick={() => void save()}>
+              {t('set.save')}
+            </Button>
+          </>
+        }
+      />
       {groups.hidden > 0 && <div className="dim">{t('set.capability_off', { n: groups.hidden })}</div>}
       {groups.ordered.map(([group, fields]) => {
         const titleKey = `set.group.${group}` as DictKey;
