@@ -13,7 +13,7 @@
 //     白字、info=浅灰底黑字），选中/聚焦用黑框 + 浅灰底，禁用文字用中灰。
 //
 // 布局（552×768 竖屏，全部内容在普通 UI 安全区 28,28,496×712 内）：
-//   状态栏 28..72 ｜ 内容区 76..683 ｜ 软键栏 691..735（M11 竖屏安全区定稿）。
+//   状态栏 28..72 ｜ 内容区 76..667 ｜ 软键栏 672..731（M11 竖屏安全区定稿）。
 
 #include <cstddef>
 #include <cstdint>
@@ -31,11 +31,11 @@ constexpr int16_t kContentX = 28;
 constexpr int16_t kContentY = 28;
 constexpr int16_t kContentW = 496;
 constexpr int16_t kStatusBarH = 44;
-constexpr int16_t kSoftKeyBarH = 52;
+constexpr int16_t kSoftKeyBarH = 68;
 constexpr int16_t kContentTop = 28 + kStatusBarH + 4;                    // 76
-constexpr int16_t kContentBottom = 28 + 712 - kSoftKeyBarH - 4;          // 683
-constexpr int16_t kSoftKeyY = 28 + 712 - kSoftKeyBarH;                   // 687
-constexpr int16_t kSoftKeyH = 44;
+constexpr int16_t kContentBottom = 28 + 712 - kSoftKeyBarH - 4;          // 668
+constexpr int16_t kSoftKeyY = 28 + 712 - kSoftKeyBarH;                   // 672
+constexpr int16_t kSoftKeyH = 60;
 constexpr int16_t kRowsPerPage = 6;
 constexpr int16_t kRowH = 92;
 }  // namespace geom

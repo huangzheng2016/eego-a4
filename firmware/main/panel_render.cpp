@@ -201,14 +201,7 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
   // 左：时间（RTC 有效时 MM-DD HH:MM，否则 --:--）
   textGray(c, x + 8, static_cast<int16_t>(y + 13), m.timeText, 2, 0, true);
 
-  // 中：电源模式徽标 + WiFi 状态（右侧电池区保留 100px，超出截断防碰撞）
-  int16_t cx = x + 150;
-  const char* mode = m.mains ? tr(Str::ModeMains) : tr(Str::ModeBattery);
-  const int16_t modeW = static_cast<int16_t>(textW(mode, 1) + 16);
-  c.fillRoundRectGray(cx, static_cast<int16_t>(y + 10), modeW, 24, 6, m.mains ? 5 : 9);
-  textGray(c, static_cast<int16_t>(cx + 8), static_cast<int16_t>(y + 15), mode, 1,
-           m.mains ? 15 : 0, true);
-  cx = static_cast<int16_t>(cx + modeW + 8);
+  // 中：电源模式 + WiFi 状态整组居中（避让左侧时间和右侧电池）
   const char* wifi = tr(Str::WifiDisconnected);
   switch (m.wifiState) {
     case 1: wifi = tr(Str::WifiConnecting); break;
@@ -217,7 +210,23 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
     case 4: wifi = tr(Str::WifiOffline); break;
     default: break;
   }
-  const int16_t wifiMaxW = static_cast<int16_t>(x + w - 110 - cx);
+  const char* mode = m.mains ? tr(Str::ModeMains) : tr(Str::ModeBattery);
+  const int16_t modeW = static_cast<int16_t>(textW(mode, 1) + 16);
+  const int16_t groupW = static_cast<int16_t>(modeW + 8 + textW(wifi, 1));
+  const int16_t minCx = x + 120;
+  const int16_t maxCx = static_cast<int16_t>(x + w - 100 - groupW);
+  int16_t cx = static_cast<int16_t>(x + (w - groupW) / 2);
+  if (maxCx < minCx) {
+    cx = minCx;
+  } else {
+    if (cx < minCx) cx = minCx;
+    if (cx > maxCx) cx = maxCx;
+  }
+  c.fillRoundRectGray(cx, static_cast<int16_t>(y + 10), modeW, 24, 6, m.mains ? 5 : 9);
+  textGray(c, static_cast<int16_t>(cx + 8), static_cast<int16_t>(y + 15), mode, 1,
+           m.mains ? 15 : 0, true);
+  cx = static_cast<int16_t>(cx + modeW + 8);
+  const int16_t wifiMaxW = static_cast<int16_t>(x + w - 100 - cx);
   if (wifiMaxW > 40) {
     cx = static_cast<int16_t>(cx + drawTextFit(c, cx, static_cast<int16_t>(y + 15), wifiMaxW,
                                                wifi, 1, false, 6) +
@@ -260,22 +269,22 @@ void drawSoftKeys(PortraitCanvas& c, const SoftKeyModel* keys, size_t n, size_t 
   for (size_t i = 0; i < n; i++) {
     const int16_t x = static_cast<int16_t>(geom::kContentX + i * (kw + gap));
     const bool sel = (i == focused);
+    int16_t scale = 2;
+    if (textW(keys[i].label, 2) > kw - 12 || fontH(2) > geom::kSoftKeyH - 8) scale = 1;
+    const int16_t tw = textW(keys[i].label, scale);
+    const int16_t tx = static_cast<int16_t>(x + (kw - tw) / 2);
+    const int16_t ty = static_cast<int16_t>(geom::kSoftKeyY + (geom::kSoftKeyH - fontH(scale)) / 2);
+    const int16_t textX = tx < x + 6 ? static_cast<int16_t>(x + 6) : tx;
     if (!keys[i].enabled) {
       // 禁用：浅灰底 + 中灰字（不可用 BW 描边，白边在白底上不可见）
       c.fillRoundRectGray(x, geom::kSoftKeyY, kw, geom::kSoftKeyH, 8, 12);
-      const int16_t tw = textW(keys[i].label, 1);
-      textGray(c, static_cast<int16_t>(x + (kw - tw) / 2),
-               static_cast<int16_t>(geom::kSoftKeyY + 14), keys[i].label, 1, 6);
+      drawTextFit(c, textX, ty, kw - 12, keys[i].label, scale, false, 6);
     } else if (sel) {
       c.fillRoundRectGray(x, geom::kSoftKeyY, kw, geom::kSoftKeyH, 8, 0);
-      const int16_t tw = textW(keys[i].label, 1);
-      textGray(c, static_cast<int16_t>(x + (kw - tw) / 2),
-               static_cast<int16_t>(geom::kSoftKeyY + 14), keys[i].label, 1, 15, true);
+      drawTextFit(c, textX, ty, kw - 12, keys[i].label, scale, true, 15);
     } else {
       c.drawRoundRect(x, geom::kSoftKeyY, kw, geom::kSoftKeyH, 8, 0);
-      const int16_t tw = textW(keys[i].label, 1);
-      textGray(c, static_cast<int16_t>(x + (kw - tw) / 2),
-               static_cast<int16_t>(geom::kSoftKeyY + 14), keys[i].label, 1, 0);
+      drawTextFit(c, textX, ty, kw - 12, keys[i].label, scale, false, 0);
     }
   }
 }

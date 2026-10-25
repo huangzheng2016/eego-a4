@@ -325,6 +325,19 @@ extern "C" void app_main(void) {
     }
   }
 #endif
+#ifdef EEGO_LOCAL_TIMEZONE_OFFSET_MIN
+  {
+    eego::settings::Settings next = deviceSettings.snapshot().values;
+    next.timezone_offset_min = EEGO_LOCAL_TIMEZONE_OFFSET_MIN;
+    uint32_t changed = 0;
+    std::string error;
+    if (deviceSettings.update(next, &changed, error)) {
+      ESP_LOGI(TAG, "local timezone set to %d", next.timezone_offset_min);
+    } else {
+      ESP_LOGE(TAG, "local timezone init failed: %s", error.c_str());
+    }
+  }
+#endif
   eego::settings::Capabilities capabilities;
   capabilities.frontlight = eego::FrontlightManager::instance().present();
   capabilities.battery = eego::PowerManager::instance().readBattery().millivolts > 0;

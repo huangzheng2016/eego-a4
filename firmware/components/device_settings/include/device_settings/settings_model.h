@@ -73,7 +73,7 @@ struct Settings {
   uint32_t idle_sleep_s = 90;
   int sleep_start_min = -1;
   int sleep_end_min = -1;
-  int timezone_offset_min = 0;
+  int timezone_offset_min = 480;
   bool frontlight_enabled = false;
   uint8_t frontlight_brightness = 60;
   uint8_t frontlight_warmth = 50;

@@ -670,7 +670,7 @@ const char* schemaJson() {
     "idle_sleep_s": {"type":"int","range":[0,600],"minimum_nonzero":30,"default":90,"group":"power"},
     "sleep_start_min": {"type":"int","range":[-1,1439],"default":-1,"group":"power"},
     "sleep_end_min": {"type":"int","range":[-1,1439],"default":-1,"group":"power"},
-    "timezone_offset_min": {"type":"int","range":[-840,840],"step":15,"default":0,"group":"time_language"},
+    "timezone_offset_min": {"type":"int","range":[-840,840],"step":15,"default":480,"group":"time_language"},
     "frontlight_enabled": {"type":"bool","default":false,"capability":"frontlight","group":"display"},
     "frontlight_brightness": {"type":"int","range":[1,100],"default":60,"capability":"frontlight","group":"display"},
     "frontlight_warmth": {"type":"int","range":[0,100],"default":50,"capability":"frontlight","group":"display"},
