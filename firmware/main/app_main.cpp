@@ -314,6 +314,17 @@ extern "C" void app_main(void) {
   if (settingsErr != ESP_OK) {
     ESP_LOGE(TAG, "device settings init failed: %s", esp_err_to_name(settingsErr));
   }
+#ifdef EEGO_LOCAL_POWER_MODE_MAINS
+  {
+    eego::settings::Settings next = deviceSettings.snapshot().values;
+    next.power_mode = eego::settings::PowerMode::Mains;
+    uint32_t changed = 0;
+    std::string error;
+    if (!deviceSettings.update(next, &changed, error)) {
+      ESP_LOGE(TAG, "local power mode init failed: %s", error.c_str());
+    }
+  }
+#endif
   eego::settings::Capabilities capabilities;
   capabilities.frontlight = eego::FrontlightManager::instance().present();
   capabilities.battery = eego::PowerManager::instance().readBattery().millivolts > 0;

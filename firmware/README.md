@@ -36,6 +36,8 @@ idf.py -C firmware -B .tmp/firmware-build size-components
 该文件被 `.gitignore` 排除。仅当 NVS 中没有 WiFi 账号或管理密码时，固件会在首次
 启动写入对应默认值，之后不覆盖修改。需要替换现有 WiFi 账号时，可临时定义
 `EEGO_LOCAL_WIFI_REPLACE`，写入新默认值后应移除并重新构建，避免每次启动覆盖。
+需要临时关闭深睡时，可定义 `EEGO_LOCAL_POWER_MODE_MAINS`，确认 Mains 生效后移除；
+NVS 会保留该电源模式，之后仍可在设置中改回 Auto 或 Battery。
 
 **这样构建的固件和备份都含明文秘密，必须私有保存，不得上传 GitHub、Release 或公开分享。**
 
