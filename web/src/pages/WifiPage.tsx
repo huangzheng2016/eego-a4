@@ -4,7 +4,7 @@ import { useI18n, type DictKey } from '../i18n';
 import { useToast } from '../state/toast';
 import { errorText } from '../state/errors';
 import { Badge, Button, Card, Checkbox, Empty, Icon, Modal, PageHeader, Spinner, TextInput } from '../ui';
-import { disconnectReasonText, moveItem, rowsFromNetworks, signalQuality, toEdits, validateRow, type WifiRow } from '../model/wifi';
+import { disconnectReasonText, moveItem, rowsFromNetworks, signalBars, signalQuality, toEdits, validateRow, type WifiRow } from '../model/wifi';
 
 interface EditState {
   /** Row index being edited, -1 for a new network. */
@@ -131,9 +131,35 @@ export function WifiPage() {
                   <tr>
                     <th>{t('wifi.signal')}</th>
                     <td>
-                      {current.rssi} dBm <span className="dim">· {t(`wifi.signal.${signalQuality(current.rssi)}` as DictKey)}</span>
+                      <SignalBars bars={signalBars(signalQuality(current.rssi))} /> {current.rssi} dBm{' '}
+                      <span className={signalQuality(current.rssi) === 'weak' ? 'warn-text' : 'dim'}>· {t(`wifi.signal.${signalQuality(current.rssi)}` as DictKey)}</span>
                     </td>
                   </tr>
+                  {signalQuality(current.rssi) === 'weak' && (
+                    <tr>
+                      <th />
+                      <td className="warn-text">{t('wifi.signal_hint')}</td>
+                    </tr>
+                  )}
+                  {current.rssi_min_10m !== undefined && current.rssi_min_10m !== 0 && (
+                    <tr>
+                      <th>{t('wifi.link')}</th>
+                      <td className="dim">
+                        {t('wifi.link_value', {
+                          min: String(current.rssi_min_10m),
+                          avg: String(current.rssi_avg_10m ?? 0),
+                          bt: String(current.beacon_timeouts ?? 0),
+                          roams: String(current.roams ?? 0),
+                        })}
+                      </td>
+                    </tr>
+                  )}
+                  {current.last_dhcp_ms !== undefined && current.last_dhcp_ms >= 0 && (
+                    <tr>
+                      <th>{t('wifi.dhcp')}</th>
+                      <td className="mono">{(current.last_dhcp_ms / 1000).toFixed(1)} s</td>
+                    </tr>
+                  )}
                   <tr>
                     <th>{t('wifi.ip')}</th>
                     <td className="mono">{current.ip || '—'}</td>
@@ -177,11 +203,11 @@ export function WifiPage() {
           <Empty>{t('wifi.empty')}</Empty>
         ) : (
           <>
-            <p className="dim" style={{ marginBottom: 8 }}>{t('wifi.list_hint')}</p>
-            <table className="table">
+            <p className="dim card-lead">{t('wifi.list_hint')}</p>
+            <table className="table stack-sm">
               <thead>
                 <tr>
-                  <th style={{ width: 48 }}>{t('wifi.priority')}</th>
+                  <th className="col-narrow">{t('wifi.priority')}</th>
                   <th>SSID</th>
                   <th>{t('wifi.security')}</th>
                   <th />
@@ -193,7 +219,6 @@ export function WifiPage() {
                     key={r.ssid}
                     draggable={!busy}
                     title={t('wifi.drag')}
-                    className={drag === i ? 'faded' : undefined}
                     onDragStart={(e) => {
                       setDrag(i);
                       e.dataTransfer.effectAllowed = 'move';
@@ -205,7 +230,7 @@ export function WifiPage() {
                       setDrag(null);
                     }}
                     onDragEnd={() => setDrag(null)}
-                    style={{ cursor: busy ? undefined : 'grab' }}
+                    className={[drag === i ? 'faded' : '', busy ? '' : 'draggable'].filter(Boolean).join(' ') || undefined}
                   >
                     <td className="mono">
                       <Icon name="move" size={14} /> {i + 1}
@@ -214,7 +239,7 @@ export function WifiPage() {
                       {r.ssid} {inUse(i) && <Badge tone="ok">{t('wifi.in_use')}</Badge>}
                     </td>
                     <td className="dim">{r.hasPassword ? t('wifi.secured') : t('wifi.open')}</td>
-                    <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <td className="cell-actions">
                       <Button size="sm" icon variant="ghost" aria-label={t('wifi.up')} title={t('wifi.up')} disabled={busy || i === 0} onClick={() => move(i, i - 1)}>
                         <Icon name="up" size={14} />
                       </Button>
@@ -313,5 +338,15 @@ export function WifiPage() {
         </Modal>
       )}
     </div>
+  );
+}
+
+function SignalBars({ bars }: { bars: number }) {
+  return (
+    <span className="signal-bars" aria-hidden="true">
+      {[1, 2, 3, 4].map((i) => (
+        <i key={i} className={i <= bars ? 'on' : undefined} />
+      ))}
+    </span>
   );
 }

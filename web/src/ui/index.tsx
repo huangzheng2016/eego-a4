@@ -206,7 +206,7 @@ export function Checkbox({
   hint?: ReactNode;
 }) {
   return (
-    <div className={`field${error ? ' has-error' : ''}`}>
+    <div className={`field check-field${error ? ' has-error' : ''}`}>
       <label className="check">
         <input type="checkbox" checked={!!checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
         <span>{label}</span>
@@ -413,5 +413,32 @@ export function KeyValueEditor({
         </Button>
       </div>
     </div>
+  );
+}
+
+/** Password/secret input with a show/hide toggle (never pre-filled from the device). */
+export function SecretInput({
+  label,
+  error,
+  hint,
+  wide,
+  value,
+  onChange,
+  showLabel = 'show',
+  hideLabel = 'hide',
+  ...rest
+}: BaseProps &
+  Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'type'> & { value: string; onChange: (v: string) => void; showLabel?: string; hideLabel?: string }) {
+  const id = useId();
+  const [shown, setShown] = useState(false);
+  return (
+    <Field label={label} error={error} hint={hint} wide={wide} htmlFor={id}>
+      <div className="input-affix">
+        <input id={id} className="input" type={shown ? 'text' : 'password'} autoComplete="new-password" spellCheck={false} value={value} onChange={(e) => onChange(e.target.value)} {...rest} />
+        <button type="button" className="affix-btn" aria-label={shown ? hideLabel : showLabel} title={shown ? hideLabel : showLabel} aria-pressed={shown} onClick={() => setShown((s) => !s)}>
+          <Icon name={shown ? 'eyeoff' : 'eye'} size={16} />
+        </button>
+      </div>
+    </Field>
   );
 }

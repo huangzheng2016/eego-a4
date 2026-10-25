@@ -74,7 +74,16 @@ export function AlertsPage() {
           <EmptyState icon="ok" title={t('alerts.empty')}>{t('alerts.empty_desc')}</EmptyState>
         ) : (
           <div className="scroll-x">
-            <table className="table">
+            <table className="table stack-sm">
+              <thead>
+                <tr>
+                  <th>{t('alerts.col.severity')}</th>
+                  <th>{t('alerts.col.alert')}</th>
+                  <th>{t('alerts.col.state')}</th>
+                  <th>{t('alerts.col.last_seen')}</th>
+                  <th />
+                </tr>
+              </thead>
               <tbody>
                 {list.map((a) => (
                   <tr key={a.id} className={a.state === 'cleared' || a.state === 'expired' ? 'faded' : ''}>
@@ -91,12 +100,12 @@ export function AlertsPage() {
                       {(a.occurrences ?? 1) > 1 && <div className="dim">{t('alerts.occurrences', { n: a.occurrences ?? 1 })}</div>}
                     </td>
                     <td className="dim">{fmt(a.last_seen)}</td>
-                    <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <td className="cell-actions">
                       {a.state === 'active' && (
                         <Button size="sm" onClick={() => void act(() => api.ackAlert(a.id))}>
                           {t('alerts.ack')}
                         </Button>
-                      )}{' '}
+                      )}
                       {(a.state === 'active' || a.state === 'acked') && (
                         <Button size="sm" onClick={() => void act(() => api.clearAlert(a.id))}>
                           {t('alerts.clear')}

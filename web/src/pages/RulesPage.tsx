@@ -94,11 +94,11 @@ export function RulesPage({ ruleId }: { ruleId: string }) {
           </Button>
         }
       />
-      <div className="card row" style={{ padding: '8px 12px', marginBottom: 16 }}>
+      <div className="card row toolbar-card">
         <DraftToolbar compact />
       </div>
       {!sources.length && (
-        <div className="notice warn" style={{ marginBottom: 16 }}>
+        <div className="notice warn mb-4">
           <Icon name="warn" size={16} />
           <span className="grow">{t('rules.no_sources')}</span>
           <Button size="sm" onClick={() => navigate('sources')}>
@@ -111,16 +111,16 @@ export function RulesPage({ ruleId }: { ruleId: string }) {
           <EmptyState icon="rules" title={t('rules.empty_title')} action={<Button variant="primary" onClick={() => create()}><Icon name="plus" size={16} /> {t('rules.add')}</Button>}>
             {t('rules.empty_desc')}
           </EmptyState>
-          <div className="card-body" style={{ borderTop: '1px solid var(--border)' }}>
-            <h4 style={{ marginBottom: 10 }}>{t('rules.presets')}</h4>
+          <div className="card-body border-top">
+            <h4 className="mb-3">{t('rules.presets')}</h4>
             <div className="tiles">
               {presets.map((p) => (
-                <button key={p.key} type="button" className="card tile" style={{ cursor: 'pointer', textAlign: 'left' }} onClick={() => create(p.rule)}>
+                <button key={p.key} type="button" className="card tile tile-btn" onClick={() => create(p.rule)}>
                   <span className="tile-label">
                     <Icon name={p.icon} size={15} /> {label('severity', p.rule.style!.severity!)}
                   </span>
                   <strong>{p.rule.title}</strong>
-                  <code className="expr" style={{ alignSelf: 'flex-start' }}>{p.rule.expression}</code>
+                  <code className="expr self-start">{p.rule.expression}</code>
                 </button>
               ))}
             </div>
@@ -136,19 +136,19 @@ export function RulesPage({ ruleId }: { ruleId: string }) {
               return (
                 <div key={r.id} className={`card rule${r.id === sel?.id ? ' on' : ''}${r.enabled === false ? ' off' : ''}`} role="button" tabIndex={0} onClick={() => setSelected(r.id)} onKeyDown={(e) => e.key === 'Enter' && setSelected(r.id)}>
                   <span className={`rule-strip ${sev}`} />
-                  <div className="col" style={{ gap: 3, minWidth: 0 }}>
+                  <div className="col gap-xs min-w-0">
                     <div className="row nowrap">
                       <strong className="truncate">{r.title || r.id}</strong>
                       <Badge tone={sev === 'critical' ? 'danger' : sev === 'warning' ? 'warn' : 'accent'}>{label('severity', sev)}</Badge>
                       {errs > 0 && <Badge tone="danger">{t('rules.errors', { n: errs })}</Badge>}
                     </div>
-                    <div className="row nowrap dim" style={{ minWidth: 0 }}>
+                    <div className="row nowrap dim min-w-0">
                       <span className="truncate mono">
                         {r.source_id || '—'} / {r.metric || '—'}
                       </span>
                       <code className="expr truncate">{r.expression}</code>
                       {(r.for_ms ?? 0) > 0 && (
-                        <span className="row nowrap" style={{ gap: 3 }}>
+                        <span className="row nowrap gap-xs">
                           <Icon name="clock" size={13} /> {fmtDuration(r.for_ms ?? 0, t)}
                         </span>
                       )}
@@ -195,7 +195,7 @@ function Group({ title, children, hint }: { title: string; children: ReactNode; 
   return (
     <div className="section">
       <h4>{title}</h4>
-      {hint && <p className="dim" style={{ margin: '-4px 0 8px' }}>{hint}</p>}
+      {hint && <p className="dim section-hint">{hint}</p>}
       {children}
     </div>
   );
@@ -247,9 +247,9 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
   };
 
   return (
-    <div className="card card-body col" style={{ gap: 0, position: 'sticky', top: 16 }}>
+    <div className="card card-body col gap-0 sticky-panel">
       <div className="row nowrap">
-        <span className="page-icon" style={{ width: 34, height: 34, borderRadius: 9 }}>
+        <span className="page-icon sm">
           <Icon name="rules" size={18} />
         </span>
         <h3 className="grow truncate">{r.title || r.id}</h3>
@@ -281,9 +281,9 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
           <Icon name="trash" size={16} />
         </Button>
       </div>
-      {errs._ && <div className="notice danger" style={{ marginTop: 10 }}>{errs._}</div>}
+      {errs._ && <div className="notice danger mt-2">{errs._}</div>}
 
-      <div className="form-grid two" style={{ marginTop: 14 }}>
+      <div className="form-grid two mt-3">
         <TextInput label={t('rules.name')} value={r.title} onChange={(v) => set((x) => (x.title = v), 'title')} error={errs.title} />
         <TextInput
           label="ID"
@@ -309,7 +309,7 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
           </datalist>
         </div>
         {metrics.length > 0 && (
-          <div className="chips" style={{ marginTop: 8 }}>
+          <div className="chips mt-2">
             {metrics.slice(0, 12).map((m) => (
               <button key={m.name} type="button" className={`chip${m.name === r.metric ? ' on' : ''}`} onClick={() => set((x) => (x.metric = m.name), 'metric')}>
                 {m.name}
@@ -320,18 +320,18 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
       </Group>
 
       <Group title={t('rules.condition')} hint={t('rules.condition_hint')}>
-        <div className="row" style={{ marginBottom: 10 }}>
+        <div className="row mb-3">
           <span className="mono">value</span>
           <Segmented size="sm" value={simple?.op ?? ('' as (typeof OPS)[number])} onChange={(op) => set((x) => (x.expression = `value ${op} ${simple?.n ?? 80}`), 'expr')} options={OPS.map((o) => ({ value: o, label: o }))} label={t('rules.operator')} />
-          <div style={{ width: 110 }}>
+          <div className="w-num">
             <NumberInput aria-label={t('rules.threshold')} value={simple?.n} onChange={(n) => n !== undefined && set((x) => (x.expression = `value ${simple?.op ?? '>'} ${n}`), 'expr')} placeholder="80" />
           </div>
           {latest?.unit && <span className="dim">{latest.unit}</span>}
         </div>
         <Field label={t('rules.expression')} error={errs.expression || (syntax ? t('rules.syntax_at', { msg: syntax.message, pos: syntax.offset + 1 }) : undefined)} hint={syntax ? undefined : unknownIds.length ? t('rules.unknown_ids', { list: unknownIds.join(', ') }) : t('rules.syntax_ok')}>
-          <textarea ref={exprRef} className="input" rows={2} spellCheck={false} value={r.expression ?? ''} onChange={(e) => set((x) => (x.expression = e.target.value), 'expr')} style={{ minHeight: 56, fontSize: 14 }} />
+          <textarea ref={exprRef} rows={2} spellCheck={false} value={r.expression ?? ''} onChange={(e) => set((x) => (x.expression = e.target.value), 'expr')} className="input expr-input" />
         </Field>
-        <div className="chips" style={{ marginTop: 8 }}>
+        <div className="chips mt-2">
           {['value', 'now', '&&', '||', '!', '( )', ...EXPRESSION_FUNCTIONS.filter((f) => f !== 'convert').map((f) => `${f}()`)].map((s) => (
             <button key={s} type="button" className="chip" onClick={() => insert(s === '( )' ? '()' : s)}>
               {s}
@@ -343,7 +343,7 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
       <Group title={t('rules.preview')}>
         <div className={`eval${result?.ok ? (fires ? ' fire' : ' calm') : ''}`}>
           <Icon name={!result ? 'info' : !result.ok ? 'error' : fires ? 'warn' : 'ok'} size={22} />
-          <div className="grow col" style={{ gap: 0 }}>
+          <div className="grow col gap-0">
             {testValue !== undefined ? (
               <span className="eval-value">{formatValue(testValue, latest?.unit ?? '', 2)}</span>
             ) : (
@@ -362,12 +362,12 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
               {trial === undefined && latest && ` · ${latest.live ? t('rules.from_preview') : t('rules.from_samples')}`}
             </span>
           </div>
-          <div style={{ width: 120 }}>
+          <div className="w-num">
             <NumberInput label={t('rules.try_value')} allowEmpty value={trial} onChange={setTrial} placeholder={latest ? String(latest.value) : '42'} />
           </div>
         </div>
         {!latest && r.source_id && (
-          <div className="dim" style={{ marginTop: 6 }}>
+          <div className="dim mt-2">
             <a href={`#/sources/${encodeURIComponent(r.source_id)}`}>{t('rules.run_preview')}</a>
           </div>
         )}
@@ -376,7 +376,7 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
       <Group title={t('rules.for')}>
         <div className="row">
           <Segmented size="sm" value={DURATIONS.includes(forMs) ? String(forMs) : 'custom'} onChange={(v) => v !== 'custom' && set((x) => (x.for_ms = Number(v)), 'for')} options={[...DURATIONS.map((ms) => ({ value: String(ms), label: fmtDuration(ms, t) })), { value: 'custom', label: t('common.custom') }]} />
-          <div style={{ width: 120 }}>
+          <div className="w-num">
             <NumberInput aria-label={t('rules.seconds_label')} min={0} max={604800} value={Math.round(forMs / 1000)} onChange={(v) => v !== undefined && set((x) => (x.for_ms = Math.round(v) * 1000), 'for')} error={errs.for_ms} />
           </div>
           <span className="dim">{t('rules.seconds_label')}</span>
@@ -384,15 +384,15 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
       </Group>
 
       <Group title={t('rules.presentation')}>
-        <div className="col" style={{ gap: 12 }}>
+        <div className="col gap-md">
           <Segmented<Severity> value={sev} onChange={(v) => setStyle({ severity: v })} options={SEVERITIES.map((s) => ({ value: s, label: label('severity', s), icon: s === 'critical' ? 'error' : s === 'warning' ? 'warn' : 'info' }))} label={t('panel.severity')} />
           <div>
-            <div className="dim" style={{ marginBottom: 6 }}>{t('rules.surfaces')}</div>
+            <div className="dim mb-2">{t('rules.surfaces')}</div>
             <div className="chips">
               {SURFACES.map((s) => {
                 const on = surfaces.includes(s);
                 return (
-                  <button key={s} type="button" className={`chip${on ? ' on' : ''}`} style={{ fontFamily: 'var(--font)' }} onClick={() => setStyle({ surfaces: on ? (surfaces.length > 1 ? surfaces.filter((x) => x !== s) : surfaces) : [...surfaces, s] })}>
+                  <button key={s} type="button" className={`chip text${on ? ' on' : ''}`} onClick={() => setStyle({ surfaces: on ? (surfaces.length > 1 ? surfaces.filter((x) => x !== s) : surfaces) : [...surfaces, s] })}>
                     {on && '✓ '}
                     {t(`rules.surface.${s}`)}
                   </button>

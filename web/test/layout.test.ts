@@ -32,16 +32,16 @@ describe('resolvePlacement (push aside)', () => {
     expect(r.ok).toBe(true);
   });
 
-  it('never crosses the screen boundary: overflow moves to the next free slot', () => {
+  it('fails instead of pushing a panel off the screen', () => {
     const pg = page([panel('a', 0, 0, 24, 2), panel('b', 0, 2, 24, 6)]);
-    const r = resolvePlacement(pg, 'a', { x: 0, y: 2, w: 24, h: 4 });
-    expect(r.ok).toBe(true);
-    // b (h=6) cannot fit below a (rows 2..5) inside screen 0 → screen 1.
-    expect(r.grids.b).toEqual({ x: 0, y: 8, w: 24, h: 6 });
-    for (const g of Object.values(r.grids)) expect(fitsScreen(g)).toBe(true);
+    // b (h=6) cannot fit anywhere next to a (rows 2..5): a page is one screen.
+    expect(resolvePlacement(pg, 'a', { x: 0, y: 2, w: 24, h: 4 }).ok).toBe(false);
+    const ok = resolvePlacement(pg, 'a', { x: 0, y: 0, w: 12, h: 2 });
+    expect(ok.ok).toBe(true);
+    for (const g of Object.values(ok.grids)) expect(fitsScreen(g)).toBe(true);
   });
 
-  it('prefers a free slot in the same row band before the next screen', () => {
+  it('moves a panel that cannot be pushed down to a free slot on the screen', () => {
     const pg = page([panel('a', 0, 4, 12, 4), panel('b', 0, 0, 12, 8)]);
     // drop a on top of b; b is 8 tall so cannot be pushed down; right half is free.
     const r = resolvePlacement(pg, 'a', { x: 0, y: 0, w: 12, h: 4 });
@@ -49,13 +49,12 @@ describe('resolvePlacement (push aside)', () => {
   });
 
   it('avoids panels that have not been visited when searching a free slot', () => {
-    const pg = page([panel('a', 0, 0, 24, 1), panel('b', 0, 1, 24, 7), panel('c', 0, 8, 24, 4)]);
-    const r = resolvePlacement(pg, 'a', { x: 0, y: 1, w: 24, h: 2 });
+    const pg = page([panel('a', 0, 0, 12, 2), panel('b', 0, 2, 12, 2), panel('c', 12, 0, 12, 2)]);
+    const r = resolvePlacement(pg, 'a', { x: 0, y: 2, w: 12, h: 6 });
     expect(r.ok).toBe(true);
-    // b cannot fit in screen 0 under a → first free slot after c on screen 1 is
-    // not available (c occupies rows 8..11, b needs 7 rows) → screen 2.
-    expect(r.grids.b).toEqual({ x: 0, y: 16, w: 24, h: 7 });
-    expect(r.grids.c).toEqual({ x: 0, y: 8, w: 24, h: 4 });
+    // b cannot be pushed below a (rows 2..7) → first free slot not used by c.
+    expect(r.grids.b).toEqual({ x: 0, y: 0, w: 12, h: 2 });
+    expect(r.grids.c).toEqual({ x: 12, y: 0, w: 12, h: 2 });
     const after = page(pg.panels.map((p) => ({ ...p, grid: r.grids[p.id] })));
     expect(layoutIssues(after)).toEqual([]);
   });
@@ -99,8 +98,8 @@ describe('resizeRect (edge handles)', () => {
     expect(resizeRect(o, 'w', 20, 0, 24)).toEqual({ x: 11, y: 2, w: 1, h: 3 });
     expect(resizeRect(o, 'n', 0, -5, 24)).toEqual({ x: 4, y: 0, w: 8, h: 5 });
   });
-  it('north never crosses into the previous screen', () => {
-    expect(resizeRect({ x: 0, y: 9, w: 4, h: 2 }, 'n', 0, -4, 24)).toEqual({ x: 0, y: 8, w: 4, h: 3 });
+  it('north stops at the top of the screen', () => {
+    expect(resizeRect({ x: 0, y: 1, w: 4, h: 2 }, 'n', 0, -4, 24)).toEqual({ x: 0, y: 0, w: 4, h: 3 });
   });
   it('corners combine both axes', () => {
     expect(resizeRect(o, 'nw', -1, -1, 24)).toEqual({ x: 3, y: 1, w: 9, h: 4 });
@@ -115,11 +114,9 @@ describe('nudgePlacement', () => {
     expect(r.grids.a.y).toBe(1);
     expect(r.grids.b.y).toBe(3);
   });
-  it('hops to the next screen instead of straddling', () => {
-    const pg = page([panel('a', 0, 6, 24, 2)]);
-    expect(nudgePlacement(pg, 'a', 0, 1)!.grids.a.y).toBe(8);
-    const pg2 = page([panel('a', 0, 8, 24, 2)]);
-    expect(nudgePlacement(pg2, 'a', 0, -1)!.grids.a.y).toBe(6);
+  it('stops at the top and bottom of the screen', () => {
+    expect(nudgePlacement(page([panel('a', 0, 6, 24, 2)]), 'a', 0, 1)).toBeNull();
+    expect(nudgePlacement(page([panel('a', 0, 0, 24, 2)]), 'a', 0, -1)).toBeNull();
   });
   it('refuses to leave the column range', () => {
     expect(nudgePlacement(page([panel('a', 0, 0, 4, 2)]), 'a', -1, 0)).toBeNull();

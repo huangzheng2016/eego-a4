@@ -1,6 +1,7 @@
 // "设备实时画面": GET /display/snapshot.bmp (1-bit 552×768) shown in a device
 // frame. Re-fetched automatically a few seconds after every successful apply
-// (the e-ink refresh takes a moment) and optionally every 30 s.
+// (the e-ink refresh takes a moment) and optionally every 30 s. With several
+// screens, ‹ › switch the device's current screen (POST /device/screen).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import { useI18n } from '../i18n';
@@ -20,9 +21,12 @@ export function LivePreview({ compact }: { compact?: boolean }) {
   const [at, setAt] = useState<Date | null>(null);
   const [countdown, setCountdown] = useState<{ left: number; total: number } | null>(null);
   const urlRef = useRef<string | null>(null);
+  const [screen, setScreen] = useState<api.DeviceScreen | null>(null);
+  const [paging, setPaging] = useState(false);
 
   const load = useCallback(async () => {
     setBusy(true);
+    api.getDeviceScreen().then(setScreen, () => setScreen(null));
     try {
       const blob = await api.getDisplaySnapshot();
       const next = URL.createObjectURL(blob);
@@ -68,6 +72,19 @@ export function LivePreview({ compact }: { compact?: boolean }) {
     };
   }, [appliedAt, load]);
 
+  const page = async (step: number) => {
+    setPaging(true);
+    try {
+      const r = await api.setDeviceScreen({ step });
+      setScreen((s) => (s ? { ...s, index: r.index, count: r.count, shown: true } : s));
+      setTimeout(() => void load(), 2500);  // e-ink refresh takes a moment
+    } catch (e) {
+      setErr(errorText(e, t));
+    } finally {
+      setPaging(false);
+    }
+  };
+
   useEffect(() => {
     if (!auto) return;
     const id = setInterval(() => document.visibilityState === 'visible' && void load(), 30000);
@@ -99,6 +116,19 @@ export function LivePreview({ compact }: { compact?: boolean }) {
           </span>
         )}
       </div>
+      {screen?.available && screen.count > 1 && (
+        <div className="row" style={{ justifyContent: 'center' }}>
+          <Button size="sm" icon disabled={paging} onClick={() => void page(-1)} aria-label={t('editor.render_prev')} title={t('editor.render_prev')}>
+            <Icon name="chevl" size={16} />
+          </Button>
+          <span className="muted" style={{ minWidth: 90, textAlign: 'center' }}>
+            {t('editor.render_screen', { n: screen.index + 1, total: screen.count })}
+          </span>
+          <Button size="sm" icon disabled={paging} onClick={() => void page(1)} aria-label={t('editor.render_next')} title={t('editor.render_next')}>
+            <Icon name="chevr" size={16} />
+          </Button>
+        </div>
+      )}
       {url && err && <div className="dim">{err}</div>}
       <Switch checked={auto} onChange={setAuto} label={t('preview.auto')} />
       <div className="dim">{t('preview.hint')}</div>

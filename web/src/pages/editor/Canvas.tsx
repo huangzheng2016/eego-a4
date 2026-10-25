@@ -1,27 +1,17 @@
-// Page canvas: each device screen is a 552×768 frame holding 8 grid rows.
+// Screen canvas: a page is exactly one 552×768 device screen of 8 grid rows.
 // Panels are drawn like the e-ink renderer (DevicePanel) at device pixels
 // inside a CSS-scaled container. Pointer-based move / 8-handle resize with
 // grid snapping; overlapped panels are pushed aside (model/layout.ts) and the
 // result is previewed live while dragging.
 import { forwardRef, useImperativeHandle, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent as RPointerEvent } from 'react';
 import { useI18n } from '../../i18n';
-import { CONTENT, STATUS_LINE_H, STATUS_LINE_Y, GAP_X, GAP_Y, ROWS_PER_SCREEN, SCREEN_H, SCREEN_W, columnsOf, edge, isVisible, panelPixels, pitch, screenIndex, type LayoutIssue } from '../../model/grid';
+import { CONTENT, STATUS_LINE_H, STATUS_LINE_Y, GAP_X, GAP_Y, PAGER_ZONE_W, ROWS_PER_SCREEN, SCREEN_H, SCREEN_W, columnsOf, edge, isVisible, panelPixels, pitch, type LayoutIssue } from '../../model/grid';
 import { HANDLES, nudgePlacement, resizeRect, resolvePlacement, type Handle, type Placement } from '../../model/layout';
 import type { Bundle, GridRect, Page, Panel } from '../../model/types';
 import type { ObservedMetrics } from '../../model/metrics';
 import { DevicePanel } from './DevicePanel';
 
-export const SCREEN_GAP = 28;
-export const LABEL_H = 34;
-const STRIDE = SCREEN_H + SCREEN_GAP + LABEL_H;
 export const NEW_ID = '__new__';
-
-export function screenTop(s: number): number {
-  return LABEL_H + s * STRIDE;
-}
-export function canvasHeight(screens: number): number {
-  return screenTop(screens) - SCREEN_GAP;
-}
 
 interface DragState {
   id: string;
@@ -57,7 +47,8 @@ export interface CanvasProps {
   editable?: boolean;
   /** Pending insertion from the palette (ghost + push preview). */
   insert?: GridRect | null;
-  screenLabel?: (n: number, empty: boolean) => string;
+  /** Position of this screen in the dashboard (status line "n/N" + ‹ › pager). */
+  screenNo?: { n: number; total: number };
   sizeLabel?: (w: number, h: number) => string;
   onSelect?: (id: string | null) => void;
   onCommit?: (placement: Placement, via: 'pointer' | 'keyboard', activeId: string) => void;
@@ -69,7 +60,7 @@ export interface CanvasProps {
 const sameRect = (a: GridRect, b: GridRect) => a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
 
 export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
-  { page, bundle, observed, scale, selectedId, issues = [], showGrid = true, editable, insert, screenLabel, sizeLabel, onSelect, onCommit, onBlocked, onDelete, onDuplicate },
+  { page, bundle, observed, scale, selectedId, issues = [], showGrid = true, editable, insert, screenNo, sizeLabel, onSelect, onCommit, onBlocked, onDelete, onDuplicate },
   ref,
 ) {
   const { t } = useI18n();
@@ -85,25 +76,18 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   const gridOf = (panel: Panel) => live?.grids[panel.id] ?? panel.grid;
 
   const visible = page.panels.filter(isVisible);
-  let lastScreen = 0;
-  for (const panel of visible) lastScreen = Math.max(lastScreen, screenIndex(gridOf(panel)));
-  if (live) for (const g of Object.values(live.grids)) lastScreen = Math.max(lastScreen, screenIndex(g));
-  const used = lastScreen + 1;
-  const screens = used + (editable ? 1 : 0);
 
   const toCanvas = (clientX: number, clientY: number) => {
     const r = rootRef.current!.getBoundingClientRect();
     return { x: (clientX - r.left) / scale, y: (clientY - r.top) / scale };
   };
-  /** Snap a free top-left (canvas px) + pointer y to a legal grid rect. */
-  const snap = (left: number, top: number, pointerY: number, w: number, h: number): GridRect => {
-    const s = Math.max(0, Math.min(screens - 1, Math.floor((pointerY - LABEL_H + SCREEN_GAP / 2) / STRIDE)));
-    const localY = top - screenTop(s) - CONTENT.y;
+  /** Snap a free top-left (canvas px) to a legal grid rect on the screen. */
+  const snap = (left: number, top: number, w: number, h: number): GridRect => {
     const hh = Math.min(h, ROWS_PER_SCREEN);
     const ww = Math.min(w, columns);
-    const row = Math.max(0, Math.min(ROWS_PER_SCREEN - hh, Math.round(localY / p.row)));
+    const row = Math.max(0, Math.min(ROWS_PER_SCREEN - hh, Math.round((top - CONTENT.y) / p.row)));
     const col = Math.max(0, Math.min(columns - ww, Math.round((left - CONTENT.x) / p.col)));
-    return { x: col, y: s * ROWS_PER_SCREEN + row, w: ww, h: hh };
+    return { x: col, y: row, w: ww, h: hh };
   };
 
   useImperativeHandle(ref, () => ({
@@ -114,7 +98,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       const pt = toCanvas(cx, cy);
       const wpx = w * p.col - GAP_X;
       const hpx = h * p.row - GAP_Y;
-      return snap(pt.x - wpx / 2, pt.y - Math.min(hpx / 2, 40), pt.y, w, h);
+      return snap(pt.x - wpx / 2, pt.y - Math.min(hpx / 2, 40), w, h);
     },
   }));
 
@@ -126,7 +110,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     const px = panelPixels(panel.grid, columns);
     const pt = toCanvas(e.clientX, e.clientY);
     const left = px.x;
-    const top = screenTop(px.screen) + px.y;
+    const top = px.y;
     const st: DragState = { id: panel.id, mode, pointerId: e.pointerId, startX: pt.x, startY: pt.y, offX: pt.x - left, offY: pt.y - top, origin: panel.grid, candidate: panel.grid, placement: null, moved: false, fx: left, fy: top };
     dragRef.current = st;
     setDrag(st);
@@ -145,7 +129,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     if (st.mode === 'move') {
       fx = pt.x - st.offX;
       fy = pt.y - st.offY;
-      cand = snap(fx, fy, pt.y, st.origin.w, st.origin.h);
+      cand = snap(fx, fy, st.origin.w, st.origin.h);
     } else {
       cand = resizeRect(st.origin, st.mode, Math.round(dx / p.col), Math.round(dy / p.row), columns);
     }
@@ -192,7 +176,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     }
   };
 
-  const height = canvasHeight(screens);
+  const height = SCREEN_H;
   const ghostRect = drag?.moved && drag.mode === 'move' ? drag.candidate : insert ?? null;
   const ghost = ghostRect ? panelPixels(ghostRect, columns) : null;
   const ghostOk = drag ? !!drag.placement?.ok : !!insertPlacement?.ok;
@@ -227,34 +211,38 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
         onPointerUp={end}
         onPointerCancel={end}
       >
-        {Array.from({ length: screens }, (_, s) => (
-          <div key={s}>
-            {screenLabel && (
-              <div className="screen-label" style={{ top: screenTop(s) - LABEL_H + 4, fontSize: labelFont, height: LABEL_H - 10 }}>
-                {screenLabel(s + 1, s >= used)}
-              </div>
-            )}
-            <div className={`screen${s >= used ? ' empty-screen' : ''}`} style={{ top: screenTop(s), width: SCREEN_W, height: SCREEN_H }}>
-              {(showGrid || drag || insert) && gridSvg}
-              <div style={{ position: 'absolute', left: CONTENT.x, top: STATUS_LINE_Y, width: CONTENT.w, height: 1, background: '#000' }} />
-              {/* Device status line (dashboard_runtime drawStatus): body-size state + updated time. */}
-              <div
-                aria-hidden
-                style={{ position: 'absolute', left: CONTENT.x + 12, top: STATUS_LINE_Y + 1, width: CONTENT.w - 24, height: STATUS_LINE_H - 1, display: 'flex', alignItems: 'center', gap: 8, fontSize: 24, lineHeight: 1, color: '#000', opacity: 0.45, pointerEvents: 'none', whiteSpace: 'nowrap', overflow: 'hidden' }}
-              >
-                <span style={{ width: 12, height: 12, borderRadius: 6, background: '#000', flex: 'none' }} />
-                <span style={{ flex: 1 }}>{t('editor.status_line_state')}</span>
-                <span>{t('editor.status_line_updated')}</span>
-              </div>
-            </div>
+        <div className="screen" style={{ top: 0, width: SCREEN_W, height: SCREEN_H }}>
+          {(showGrid || drag || insert) && gridSvg}
+          <div style={{ position: 'absolute', left: CONTENT.x, top: STATUS_LINE_Y, width: CONTENT.w, height: 1, background: '#000' }} />
+          {/* Device status line (dashboard_runtime drawStatus): state, updated time, n/N and the ‹ › pager zones. */}
+          <div
+            aria-hidden
+            style={{ position: 'absolute', left: CONTENT.x + (screenNo && screenNo.total > 1 ? 22 : 12), top: STATUS_LINE_Y + 1, width: CONTENT.w - (screenNo && screenNo.total > 1 ? 44 : 24), height: STATUS_LINE_H - 1, display: 'flex', alignItems: 'center', gap: 8, fontSize: 24, lineHeight: 1, color: '#000', opacity: 0.45, pointerEvents: 'none', whiteSpace: 'nowrap', overflow: 'hidden' }}
+          >
+            <span style={{ width: 12, height: 12, borderRadius: 6, background: '#000', flex: 'none' }} />
+            <span style={{ flex: 1 }}>{t('editor.status_line_state')}</span>
+            <span>
+              {t('editor.status_line_updated')}
+              {screenNo && screenNo.total > 1 ? ` · ${screenNo.n}/${screenNo.total}` : ''}
+            </span>
           </div>
-        ))}
+          {screenNo && screenNo.total > 1 && (
+            <>
+              <div className="pager-zone" title={t('editor.pager_prev')} style={{ left: CONTENT.x, top: STATUS_LINE_Y + 1, width: PAGER_ZONE_W, height: STATUS_LINE_H - 1 }}>
+                ‹
+              </div>
+              <div className="pager-zone right" title={t('editor.pager_next')} style={{ left: CONTENT.x + CONTENT.w - PAGER_ZONE_W, top: STATUS_LINE_Y + 1, width: PAGER_ZONE_W, height: STATUS_LINE_H - 1 }}>
+                ›
+              </div>
+            </>
+          )}
+        </div>
         {visible.map((panel) => {
           const isDrag = drag?.id === panel.id && drag.moved;
           const g = isDrag && drag.mode !== 'move' ? drag.candidate : gridOf(panel);
           const px = panelPixels(g, columns);
           let left = px.x;
-          let top = screenTop(px.screen) + px.y;
+          let top = px.y;
           if (isDrag && drag.mode === 'move') {
             left = drag.fx;
             top = drag.fy;
@@ -282,7 +270,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
           );
         })}
         {ghost && (
-          <div className={`panel-ghost${ghostOk ? '' : ' bad'}`} style={{ left: ghost.x, top: screenTop(ghost.screen) + ghost.y, width: ghost.w, height: ghost.h }}>
+          <div className={`panel-ghost${ghostOk ? '' : ' bad'}`} style={{ left: ghost.x, top: ghost.y, width: ghost.w, height: ghost.h }}>
             {sizeLabel && ghostRect && <span className="ghost-tag" style={{ fontSize: labelFont, top: -labelFont * 2 }}>{sizeLabel(ghostRect.w, ghostRect.h)}</span>}
           </div>
         )}

@@ -80,10 +80,10 @@ function Login() {
             <div className="brand-sub">{t('app.tagline')}</div>
           </div>
         </div>
-        <form className="col" style={{ gap: 14 }} onSubmit={submit}>
+        <form className="col gap-lg" onSubmit={submit}>
           <div>
             <h2>{t('login.title')}</h2>
-            <p className="muted" style={{ fontSize: 13, marginTop: 4 }}>{t('login.subtitle')}</p>
+            <p className="muted login-sub">{t('login.subtitle')}</p>
           </div>
           {!onDevice && (
             <div className="notice warn">
@@ -92,7 +92,7 @@ function Login() {
             </div>
           )}
           <TextInput label={t('login.password')} type="password" autoComplete="current-password" autoFocus value={pw} onChange={setPw} error={err} />
-          <Button type="submit" variant="primary" loading={busy} disabled={!pw} style={{ minHeight: 40 }}>
+          <Button type="submit" variant="primary" loading={busy} disabled={!pw} className="btn-lg">
             {t('login.submit')}
           </Button>
         </form>
@@ -229,8 +229,8 @@ function Shell() {
             <span className="grow">{connLabel}</span>
             {status && <span className="mono dim">{status.network.ip}</span>}
           </div>
-          <div className="row" style={{ justifyContent: 'space-between' }}>{prefs}</div>
-          <Button size="sm" variant="ghost" onClick={() => void logout()} style={{ justifyContent: 'flex-start' }}>
+          <div className="row between">{prefs}</div>
+          <Button size="sm" variant="ghost" onClick={() => void logout()} className="justify-start">
             <Icon name="logout" size={16} /> {t('login.logout')}
           </Button>
         </div>
@@ -283,13 +283,13 @@ function Shell() {
                   {t(n.key)}
                 </a>
               ))}
-              <button type="button" className="sheet-item" style={{ border: 0 }} onClick={() => void logout()}>
+              <button type="button" className="sheet-item borderless" onClick={() => void logout()}>
                 <Icon name="logout" size={22} />
                 {t('login.logout')}
               </button>
             </div>
-            <div className="row" style={{ justifyContent: 'space-between', marginTop: 14 }}>{prefs}</div>
-            <div className="conn" style={{ marginTop: 8 }}>
+            <div className="row between mt-3">{prefs}</div>
+            <div className="conn mt-2">
               <span className={`dot ${connection === 'online' ? 'ok' : connection === 'offline' ? 'bad' : ''}`} />
               {connLabel} {status && <span className="mono dim">{status.network.ip}</span>}
             </div>

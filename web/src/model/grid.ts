@@ -1,8 +1,8 @@
 // Grid geometry shared with the firmware renderer.
 // Source of truth: dashboard_core/model.h (kGridRowsPerScreen, gridFitsScreen)
 // and dashboard_ui/src/layout.cpp (proportional edge mapping).
-// TODO(api): the renderer mapping is being finalised by the firmware team; keep
-// all screen constants here so they can be adjusted in one place.
+// Model: a dashboard has 1..MAX_SCREENS pages and every page IS one device
+// screen of ROWS_PER_SCREEN grid rows (panels need y + h <= 8).
 import type { GridRect, Page, Panel } from './types';
 
 export const SCREEN_W = 552;
@@ -19,6 +19,14 @@ export const STATUS_LINE_H = 40;
 export const GAP_X = 8;
 export const GAP_Y = 8;
 export const ROWS_PER_SCREEN = 8;
+/** dashboard_core config.h Limits::max_pages: one page = one screen. */
+export const MAX_SCREENS = 8;
+/**
+ * Status-line virtual pager (dashboard_runtime.cpp statusTouchZone): with more
+ * than one screen, taps on the left third of the line page back, the right
+ * third page forward.
+ */
+export const PAGER_ZONE_W = Math.floor(CONTENT.w / 3);
 export const DEFAULT_COLUMNS = 24;
 export const MAX_COLUMNS = 64;
 
@@ -39,18 +47,9 @@ export function edge(boundary: number, cells: number, length: number, gap: numbe
   return Math.floor((boundary * (length + gap)) / cells);
 }
 
-export function screenIndex(g: GridRect): number {
-  const screen = Math.floor(g.y / ROWS_PER_SCREEN);
-  const row = g.y % ROWS_PER_SCREEN;
-  return row + g.h > ROWS_PER_SCREEN && row !== 0 ? screen + 1 : screen;
-}
-
-export function screenRow(g: GridRect): number {
-  return screenIndex(g) === Math.floor(g.y / ROWS_PER_SCREEN) ? g.y % ROWS_PER_SCREEN : 0;
-}
-
+/** model.h gridFitsScreen(): the panel lies inside the page's single screen. */
 export function fitsScreen(g: GridRect): boolean {
-  return g.h >= 1 && g.h <= ROWS_PER_SCREEN && (g.y % ROWS_PER_SCREEN) + g.h <= ROWS_PER_SCREEN;
+  return g.h >= 1 && g.y >= 0 && g.y + g.h <= ROWS_PER_SCREEN;
 }
 
 export function overlaps(a: GridRect, b: GridRect): boolean {
@@ -61,18 +60,17 @@ export function isVisible(p: Panel): boolean {
   return p.visible !== false;
 }
 
-/** Pixel rectangle of a panel inside its screen (screen-local coordinates). */
-export function panelPixels(g: GridRect, columns: number): PixelRect & { screen: number } {
+/** Pixel rectangle of a panel on the screen. */
+export function panelPixels(g: GridRect, columns: number): PixelRect {
   const col = Math.min(g.x, columns - 1);
   const span = Math.max(1, Math.min(g.w, columns - col));
-  const row = screenRow(g);
+  const row = Math.max(0, Math.min(ROWS_PER_SCREEN - 1, g.y));
   const rowSpan = Math.max(1, Math.min(g.h, ROWS_PER_SCREEN - row));
   const left = edge(col, columns, CONTENT.w, GAP_X);
   const right = edge(col + span, columns, CONTENT.w, GAP_X) - GAP_X;
   const top = edge(row, ROWS_PER_SCREEN, CONTENT.h, GAP_Y);
   const bottom = edge(row + rowSpan, ROWS_PER_SCREEN, CONTENT.h, GAP_Y) - GAP_Y;
   return {
-    screen: screenIndex(g),
     x: CONTENT.x + left,
     y: CONTENT.y + top,
     w: Math.max(1, right - left),
@@ -85,38 +83,21 @@ export function pitch(columns: number): { col: number; row: number } {
   return { col: (CONTENT.w + GAP_X) / columns, row: (CONTENT.h + GAP_Y) / ROWS_PER_SCREEN };
 }
 
-/** Number of screens a page uses (at least 1). */
-export function screenCount(page: Page): number {
-  let last = 0;
-  for (const p of page.panels) if (isVisible(p)) last = Math.max(last, screenIndex(p.grid));
-  return last + 1;
-}
-
-/**
- * Normalise a candidate rectangle: integer, size within bounds, inside the
- * columns, and inside exactly one screen. A rect crossing a screen boundary is
- * pulled back so its bottom sits on the boundary (or pushed to the next
- * screen when `preferNext` is set, i.e. the pointer is below the boundary).
- */
-export function clampRect(r: GridRect, columns: number, preferNext = false): GridRect {
+/** Normalise a candidate rectangle: integer, inside the columns and the screen. */
+export function clampRect(r: GridRect, columns: number): GridRect {
   const w = Math.max(1, Math.min(columns, Math.round(r.w)));
   const h = Math.max(1, Math.min(ROWS_PER_SCREEN, Math.round(r.h)));
   const x = Math.max(0, Math.min(columns - w, Math.round(r.x)));
-  let y = Math.max(0, Math.round(r.y));
-  const row = y % ROWS_PER_SCREEN;
-  if (row + h > ROWS_PER_SCREEN) {
-    const screenTop = y - row;
-    y = preferNext ? screenTop + ROWS_PER_SCREEN : screenTop + ROWS_PER_SCREEN - h;
-  }
+  const y = Math.max(0, Math.min(ROWS_PER_SCREEN - h, Math.round(r.y)));
   return { x, y, w, h };
 }
 
 /** Clamp a resize: keep the top-left corner, cap size to the columns and screen. */
 export function clampResize(r: GridRect, columns: number): GridRect {
   const x = Math.max(0, Math.min(columns - 1, Math.round(r.x)));
-  const y = Math.max(0, Math.round(r.y));
+  const y = Math.max(0, Math.min(ROWS_PER_SCREEN - 1, Math.round(r.y)));
   const w = Math.max(1, Math.min(columns - x, Math.round(r.w)));
-  const h = Math.max(1, Math.min(ROWS_PER_SCREEN - (y % ROWS_PER_SCREEN), Math.round(r.h)));
+  const h = Math.max(1, Math.min(ROWS_PER_SCREEN - y, Math.round(r.h)));
   return { x, y, w, h };
 }
 
@@ -143,23 +124,20 @@ export function snapDelta(dxPx: number, dyPx: number, columns: number): { dx: nu
   return { dx: Math.round(dxPx / p.col), dy: Math.round(dyPx / p.row) };
 }
 
-/** First free spot of size w×h, scanning row-major from `startRow`. */
-export function findFreeSpot(
-  page: Page,
-  w: number,
-  h: number,
-  startRow = 0,
-  ignoreId?: string,
-  maxScreens = 32,
-): GridRect | null {
+/** First free spot of size w×h on the screen, scanning row-major from `startRow`. */
+export function findFreeSpot(page: Page, w: number, h: number, startRow = 0, ignoreId?: string): GridRect | null {
   const columns = columnsOf(page);
   const ww = Math.max(1, Math.min(columns, w));
   const hh = Math.max(1, Math.min(ROWS_PER_SCREEN, h));
-  for (let y = startRow; y < maxScreens * ROWS_PER_SCREEN; y++) {
-    for (let x = 0; x + ww <= columns; x++) {
-      const r = { x, y, w: ww, h: hh };
-      if (fitsScreen(r) && !collides(r, page.panels, ignoreId)) return r;
+  for (let pass = 0; pass < 2; pass++) {
+    const from = pass === 0 ? Math.max(0, startRow) : 0;
+    for (let y = from; y + hh <= ROWS_PER_SCREEN; y++) {
+      for (let x = 0; x + ww <= columns; x++) {
+        const r = { x, y, w: ww, h: hh };
+        if (!collides(r, page.panels, ignoreId)) return r;
+      }
     }
+    if (startRow <= 0) break;
   }
   return null;
 }
@@ -171,31 +149,25 @@ export function findFreeSpot(
 export function nudge(page: Page, panel: Panel, dx: number, dy: number, resize = false): GridRect | null {
   const g = panel.grid;
   const next = resize ? { ...g, w: g.w + dx, h: g.h + dy } : { ...g, x: g.x + dx, y: g.y + dy };
-  if (!resize && dy !== 0 && !fitsScreen(next)) {
-    // Jump across the screen boundary instead of refusing.
-    const screen = Math.floor(g.y / ROWS_PER_SCREEN);
-    next.y = dy > 0 ? (screen + 1) * ROWS_PER_SCREEN : screen * ROWS_PER_SCREEN - g.h;
-    if (next.y < 0) return null;
-  }
   return canPlace(page, next, panel.id) ? next : null;
 }
 
 export interface LayoutIssue {
   panelId: string;
-  message: 'cross_screen' | 'too_tall' | 'overlap' | 'columns';
+  message: 'off_screen' | 'overlap' | 'columns';
   otherId?: string;
 }
 
-/** Client-side mirror of validate.cpp layout checks. */
+/** Client-side mirror of validate.cpp layout checks (fit applies to hidden panels too). */
 export function layoutIssues(page: Page): LayoutIssue[] {
   const columns = columnsOf(page);
   const out: LayoutIssue[] = [];
+  for (const p of page.panels) if (!isVisible(p) && !fitsScreen(p.grid)) out.push({ panelId: p.id, message: 'off_screen' });
   const visible = page.panels.filter(isVisible);
   visible.forEach((p, i) => {
     const g = p.grid;
     if (g.x + g.w > columns) out.push({ panelId: p.id, message: 'columns' });
-    if (g.h > ROWS_PER_SCREEN) out.push({ panelId: p.id, message: 'too_tall' });
-    else if (!fitsScreen(g)) out.push({ panelId: p.id, message: 'cross_screen' });
+    if (!fitsScreen(g)) out.push({ panelId: p.id, message: 'off_screen' });
     for (let j = 0; j < i; j++) {
       if (overlaps(g, visible[j].grid)) out.push({ panelId: p.id, message: 'overlap', otherId: visible[j].id });
     }

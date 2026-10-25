@@ -5,11 +5,14 @@ import { useToast } from '../../state/toast';
 import { navigate } from '../../state/router';
 import { Badge, Button, EmptyState, Icon, Segmented, Skeleton } from '../../ui';
 import { RenderPreviewDialog } from './RenderPreviewDialog';
+import { ScreenStrip } from './ScreenStrip';
+import * as api from '../../api';
+import { errorText } from '../../state/errors';
 import { Canvas, type CanvasHandle } from './Canvas';
 import { PageInspector, PanelInspector, newPanel } from './Inspector';
-import { columnsOf, findFreeSpot, layoutIssues, SCREEN_W } from '../../model/grid';
+import { columnsOf, findFreeSpot, layoutIssues, MAX_SCREENS, SCREEN_W } from '../../model/grid';
 import { applyPlacement, defaultSize, resolvePlacement, type Placement } from '../../model/layout';
-import { allPanelIds, BundleError, bundleToText, parseBundle, uniqueId } from '../../model/bundle';
+import { addScreen, allPanelIds, BundleError, bundleToText, deviceScreenIndex, duplicateScreen, moveScreen, parseBundle, removeScreen, uniqueId } from '../../model/bundle';
 import { locateError } from '../../model/errors';
 import { PANEL_KINDS, type GridRect, type PanelKind } from '../../model/types';
 import { LivePreview } from '../LivePreview';
@@ -146,6 +149,7 @@ export function EditorPage() {
   const seenApply = useRef(d.appliedSeq);
   const [renderSupported, setRenderSupported] = useState(true);
   const [renderOpen, setRenderOpen] = useState(false);
+  const [showBusy, setShowBusy] = useState(false);
   useUndoShortcuts();
 
   const dash = d.draft.dashboard;
@@ -207,9 +211,41 @@ export function EditorPage() {
   }
 
   const addPage = () => {
+    if (dash.pages.length >= MAX_SCREENS) return toast('warn', t('editor.max_screens', { n: MAX_SCREENS }));
     const id = uniqueId('page', dash.pages.map((p) => p.id));
-    d.update((b) => b.dashboard.pages.push({ id, title: `${t('editor.page')} ${b.dashboard.pages.length + 1}`, visible: true, grid_columns: 24, panels: [] }));
+    const title = t('editor.screen', { n: dash.pages.length + 1 });
+    d.update((b) => void addScreen(b.dashboard, title, id));
     d.setPageId(id);
+  };
+  const duplicatePage = () => {
+    if (!page) return;
+    if (dash.pages.length >= MAX_SCREENS) return toast('warn', t('editor.max_screens', { n: MAX_SCREENS }));
+    const id = uniqueId(page.id, dash.pages.map((p) => p.id));
+    const title = `${page.title || page.id} ${t('editor.copy_suffix')}`;
+    d.update((b) => void duplicateScreen(b.dashboard, page.id, title, id));
+    d.setPageId(id);
+  };
+  const deletePage = () => {
+    if (!page || dash.pages.length <= 1) return;
+    if (!confirm(t('editor.delete_page_confirm', { name: page.title || page.id }))) return;
+    const index = dash.pages.indexOf(page);
+    d.update((b) => void removeScreen(b.dashboard, page.id));
+    const next = dash.pages.filter((p) => p.id !== page.id)[Math.max(0, index - 1)];
+    if (next) d.setPageId(next.id);
+  };
+  const showOnDevice = async () => {
+    if (!page) return;
+    const index = deviceScreenIndex(dash, page.id);
+    if (index < 0) return toast('warn', t('editor.show_hidden'));
+    setShowBusy(true);
+    try {
+      const r = await api.setDeviceScreen({ index });
+      toast(d.dirty ? 'info' : 'ok', t(d.dirty ? 'editor.shown_on_device_dirty' : 'editor.shown_on_device', { n: r.index + 1, total: r.count }));
+    } catch (e) {
+      toast('error', e instanceof api.ApiError && e.status === 409 ? t('editor.show_no_dashboard') : errorText(e, t));
+    } finally {
+      setShowBusy(false);
+    }
   };
   const addPanel = (kind: PanelKind) => {
     const p = newPanel(d.draft, d.pageId, kind, t(`kind.${kind}` as DictKey));
@@ -294,25 +330,6 @@ export function EditorPage() {
       <aside className="ed-rail">
         <section className="ed-rail-sec">
           <div className="ed-rail-head">
-            <h4 className="grow">{t('editor.pages')}</h4>
-            <Button size="sm" icon variant="ghost" title={t('editor.add_page')} onClick={addPage}>
-              <Icon name="plus" size={16} />
-            </Button>
-          </div>
-          <div className="ed-pages-list col" style={{ gap: 2 }}>
-            {dash.pages.map((p, i) => (
-              <div key={p.id} className={`page-item${p.id === d.pageId ? ' on' : ''}`} onClick={() => d.setPageId(p.id)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && d.setPageId(p.id)} title={p.id}>
-                <span className="page-num">{i + 1}</span>
-                <span className="grow">{p.title || p.id}</span>
-                {p.visible === false && <Icon name="eyeoff" size={14} />}
-                {pageErrCount(p.id) > 0 && <Badge tone="danger">{pageErrCount(p.id)}</Badge>}
-                {dash.default_page_id === p.id && <span title={t('editor.default_page')}>★</span>}
-              </div>
-            ))}
-          </div>
-        </section>
-        <section className="ed-rail-sec">
-          <div className="ed-rail-head">
             <h4 className="grow">{t('editor.palette')}</h4>
           </div>
           <div className="palette">
@@ -350,6 +367,23 @@ export function EditorPage() {
         <div className="ed-toolbar">
           <DraftToolbar compact />
         </div>
+        <ScreenStrip
+          pages={dash.pages}
+          currentId={d.pageId}
+          defaultId={dash.default_page_id}
+          errorCount={pageErrCount}
+          onSelect={d.setPageId}
+          onAdd={addPage}
+          onDuplicate={duplicatePage}
+          onDelete={deletePage}
+          onMove={(from, to) => d.update((b) => moveScreen(b.dashboard, from, to))}
+          onRename={(id, title) => {
+            const cur = dash.pages.find((p) => p.id === id);
+            if (cur && (cur.title ?? '') !== title) d.update((b) => (b.dashboard.pages.find((p) => p.id === id)!.title = title));
+          }}
+          onShowOnDevice={d.configured ? () => void showOnDevice() : null}
+          showBusy={showBusy}
+        />
         <div className="ed-toolbar" style={{ minHeight: 44, paddingTop: 6, paddingBottom: 6 }}>
           <strong className="truncate" style={{ maxWidth: 260 }}>{page?.title || page?.id}</strong>
           {page && <span className="dim hide-sm">{t('editor.grid_info', { c: columnsOf(page) })}</span>}
@@ -399,7 +433,7 @@ export function EditorPage() {
               selectedId={d.panelId}
               issues={issues}
               insert={pal?.active ? pal.rect : null}
-              screenLabel={(n, empty) => (empty ? t('editor.screen_new', { n }) : t('editor.screen', { n }))}
+              screenNo={deviceScreenIndex(dash, page.id) >= 0 ? { n: deviceScreenIndex(dash, page.id) + 1, total: dash.pages.filter((p) => p.visible !== false).length } : undefined}
               sizeLabel={(w, h) => t('editor.size', { w, h })}
               onSelect={d.setPanelId}
               onCommit={(pl, via, id) => {

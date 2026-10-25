@@ -6,7 +6,7 @@ import { useToast } from '../state/toast';
 import { errorText } from '../state/errors';
 import { navigate } from '../state/router';
 import { addTemplateAsPages, addTemplatePanels, bundleFromPreset, parseBundle, replaceWithTemplate } from '../model/bundle';
-import { columnsOf, isVisible, panelPixels, SCREEN_H, SCREEN_W } from '../model/grid';
+import { columnsOf, isVisible, MAX_SCREENS, panelPixels, SCREEN_H, SCREEN_W } from '../model/grid';
 import type { Bundle, Page } from '../model/types';
 import { Badge, Button, EmptyState, Icon, PageHeader, Segmented, Select, SkeletonCard } from '../ui';
 import { DevicePanel } from './editor/DevicePanel';
@@ -41,7 +41,7 @@ export function libraryEntries(lib: api.TemplateLibrary): TemplateEntry[] {
   return out;
 }
 
-/** First screen of a page drawn like the device, scaled to `width` px. */
+/** A page (= one screen) drawn like the device, scaled to `width` px. */
 export function ScreenThumb({ page, bundle, observed, width = 150 }: { page: Page; bundle?: Bundle | null; observed?: ObservedMetrics; width?: number }) {
   const scale = width / SCREEN_W;
   const columns = columnsOf(page);
@@ -50,7 +50,6 @@ export function ScreenThumb({ page, bundle, observed, width = 150 }: { page: Pag
       <div style={{ position: 'absolute', left: 0, top: 0, width: SCREEN_W, height: SCREEN_H, transform: `scale(${scale})`, transformOrigin: '0 0', background: 'var(--paper)' }}>
         {page.panels.filter(isVisible).map((p) => {
           const px = panelPixels(p.grid, columns);
-          if (px.screen !== 0) return null;
           return (
             <div key={p.id} className="panel-box static" style={{ left: px.x, top: px.y, width: px.w, height: px.h, cursor: 'default' }}>
               <DevicePanel panel={p} bundle={bundle ?? null} observed={observed} w={px.w} h={px.h} showDemoTag={false} />
@@ -95,7 +94,8 @@ export function TemplatesPage() {
   );
 
   const addAsPage = (e: TemplateEntry) => {
-    const { bundle, pageId } = addTemplateAsPages(d.draft, e.bundle);
+    const { bundle, pageId, added } = addTemplateAsPages(d.draft, e.bundle);
+    if (!added) return toast('warn', t('editor.max_screens', { n: MAX_SCREENS }));
     d.replace(bundle);
     d.setPageId(pageId);
     toast('ok', t('tpl.added_page', { name: e.title }));
@@ -129,7 +129,7 @@ export function TemplatesPage() {
           </span>
         </div>
         <div style={{ width: 180 }}>
-          <Select aria-label={t('tpl.target_page')} value={targetPage} options={d.draft.dashboard.pages.map((p) => ({ value: p.id, label: `${t('tpl.target_page')}: ${p.title || p.id}` }))} onChange={setTargetPage} />
+          <Select aria-label={t('tpl.target_page')} value={targetPage} options={d.draft.dashboard.pages.map((p, i) => ({ value: p.id, label: `${t('tpl.target_page')}: ${t('editor.screen', { n: i + 1 })}${p.title ? ` · ${p.title}` : ''}` }))} onChange={setTargetPage} />
         </div>
       </div>
       {error && <div className="notice warn">{error}</div>}

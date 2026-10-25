@@ -12,10 +12,12 @@ import { clone, defaultPlan, emptyBundle, replaceWithTemplate, sourceFromPlan, s
 import { toJsonPath, type Segment } from '../model/jsonpath';
 import { metricsForSource, type ObservedMetrics } from '../model/metrics';
 import type { Bundle, Panel, SourcePlan } from '../model/types';
-import { Badge, Button, EmptyState, Icon, Select, Skeleton, TextInput } from '../ui';
+import { Badge, Button, EmptyState, Icon, Skeleton, TextInput } from '../ui';
 import { JsonTree } from '../ui/JsonTree';
 import { ScreenThumb, libraryEntries, type TemplateEntry } from './TemplatesPage';
 import { noteCall, waitSeconds } from './SourcesPage';
+import { SecretField } from './SourceAuth';
+import { suggestCredentialKey } from '../model/credentials';
 
 export const WELCOME_SKIP_KEY = 'eego_welcome_skipped';
 type Step = 0 | 1 | 2 | 3;
@@ -40,7 +42,9 @@ export function WelcomePage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [observed, setObserved] = useState<ObservedMetrics>({});
   const [focusPanel, setFocusPanel] = useState<string | null>(null);
-  const [creds, setCreds] = useState<api.CredentialMeta[]>([]);
+  const [bearerOpen, setBearerOpen] = useState<Record<string, boolean>>({});
+  const [creds, setCreds] = useState<api.CredentialMeta[] | null>(null);
+  const reloadCreds = () => api.listCredentials().then((r) => setCreds(r.credentials), () => setCreds((c) => c ?? []));
 
   useEffect(() => {
     api.getTemplates().then(
@@ -50,7 +54,7 @@ export function WelcomePage() {
         setLoadErr(errorText(e, t));
       },
     );
-    api.listCredentials().then((r) => setCreds(r.credentials), () => undefined);
+    api.listCredentials().then((r) => setCreds(r.credentials), () => setCreds([]));
   }, [t]);
 
   const skip = () => {
@@ -262,13 +266,35 @@ export function WelcomePage() {
                 </div>
                 <div className="card-body col" style={{ gap: 12 }}>
                   {p.kind === 'http' ? (
-                    <div className="form-grid" style={{ gridTemplateColumns: 'minmax(0, 3fr) minmax(0, 1fr) auto', alignItems: 'end' }}>
-                      <TextInput label={t('src.url')} value={p.url} onChange={(v) => setPlan(p.id, (x) => (x.url = v))} inputMode="url" spellCheck={false} />
-                      <Select label={t('src.auth')} value={p.auth_token_ref ?? ''} options={[{ value: '', label: t('src.no_auth') }, ...creds.map((c) => ({ value: c.ref, label: c.ref }))]} onChange={(v) => setPlan(p.id, (x) => (x.auth_token_ref = v))} />
-                      <Button variant="primary" loading={busy === `probe:${p.id}`} onClick={() => void probe(p)}>
-                        <Icon name="fetch" size={16} /> {t('wz.probe')}
-                      </Button>
-                    </div>
+                    <>
+                      <div className="wz-url-row">
+                        <TextInput label={t('src.url')} value={p.url} onChange={(v) => setPlan(p.id, (x) => (x.url = v))} inputMode="url" spellCheck={false} />
+                        <Button variant="primary" loading={busy === `probe:${p.id}`} onClick={() => void probe(p)}>
+                          <Icon name="fetch" size={16} /> {t('wz.probe')}
+                        </Button>
+                      </div>
+                      <div className="field">
+                        <span className="label">{t('wz.bearer')}</span>
+                        {p.auth_token_ref || creds?.length || bearerOpen[p.id] ? (
+                          <SecretField
+                            compact
+                            value={p.auth_token_ref ?? ''}
+                            onChange={(ref) => setPlan(p.id, (x) => (x.auth_token_ref = ref))}
+                            creds={creds}
+                            reloadCreds={reloadCreds}
+                            suggest={suggestCredentialKey(p.id, (creds ?? []).map((c) => c.key))}
+                            secretLabel={t('auth.token')}
+                          />
+                        ) : (
+                          <div>
+                            <Button size="sm" onClick={() => setBearerOpen((o) => ({ ...o, [p.id]: true }))}>
+                              <Icon name="key" size={14} /> {t('auth.new')}
+                            </Button>
+                          </div>
+                        )}
+                        <span className="hint">{t('wz.bearer_h')}</span>
+                      </div>
+                    </>
                   ) : (
                     <div className="dim">{t('wz.static_source')}</div>
                   )}

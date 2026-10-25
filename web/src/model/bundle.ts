@@ -12,7 +12,7 @@ import {
   type Source,
   type SourcePlan,
 } from './types';
-import { findFreeSpot, ROWS_PER_SCREEN, columnsOf, isVisible } from './grid';
+import { findFreeSpot, MAX_SCREENS, ROWS_PER_SCREEN, columnsOf, isVisible } from './grid';
 
 export function clone<T>(v: T): T {
   return v === undefined ? v : (JSON.parse(JSON.stringify(v)) as T);
@@ -160,6 +160,59 @@ function renamePanelRefs(pages: Page[], map: Map<string, string>, pageMap: Map<s
   }
 }
 
+// ---------------------------------------------------------------------------
+// Screens (one page = one device screen, at most MAX_SCREENS)
+
+/** Append an empty screen; returns its page ID ('' when already at MAX_SCREENS). Mutates `d`. */
+export function addScreen(d: Dashboard, title: string, id = uniqueId('page', d.pages.map((p) => p.id))): string {
+  if (d.pages.length >= MAX_SCREENS || d.pages.some((p) => p.id === id)) return '';
+  d.pages.push({ id, title, visible: true, grid_columns: 24, panels: [] });
+  return id;
+}
+
+/**
+ * Copy a screen right after the original with fresh page/panel IDs; references
+ * between panels of the copy point at the copied panels. Returns the new page
+ * ID ('' when at MAX_SCREENS or unknown). Mutates `d`.
+ */
+export function duplicateScreen(d: Dashboard, pageId: string, title?: string, id = uniqueId(pageId, d.pages.map((p) => p.id))): string {
+  const index = d.pages.findIndex((p) => p.id === pageId);
+  if (index < 0 || d.pages.length >= MAX_SCREENS || d.pages.some((p) => p.id === id)) return '';
+  const copy = clone(d.pages[index]);
+  const taken = new Set(allPanelIds(d));
+  const map = new Map<string, string>();
+  for (const p of copy.panels) {
+    const nid = uniqueId(p.id, taken);
+    taken.add(nid);
+    map.set(p.id, nid);
+  }
+  renamePanelRefs([copy], map, new Map());
+  copy.id = id;
+  if (title !== undefined) copy.title = title;
+  d.pages.splice(index + 1, 0, copy);
+  return id;
+}
+
+/** Remove a screen (never the last one); keeps default_page_id valid. Mutates `d`. */
+export function removeScreen(d: Dashboard, pageId: string): boolean {
+  if (d.pages.length <= 1 || !d.pages.some((p) => p.id === pageId)) return false;
+  d.pages = d.pages.filter((p) => p.id !== pageId);
+  if (d.default_page_id === pageId) d.default_page_id = d.pages[0].id;
+  return true;
+}
+
+/** Move the screen at `from` to position `to` (array order = device order). Mutates `d`. */
+export function moveScreen(d: Dashboard, from: number, to: number): void {
+  if (from === to || from < 0 || to < 0 || from >= d.pages.length || to >= d.pages.length) return;
+  const [page] = d.pages.splice(from, 1);
+  d.pages.splice(to, 0, page);
+}
+
+/** 0-based device screen index of a page (visible pages only; -1 when hidden/unknown). */
+export function deviceScreenIndex(d: Dashboard, pageId: string): number {
+  return d.pages.filter((p) => p.visible !== false).findIndex((p) => p.id === pageId);
+}
+
 function sameSource(a: Source, b: Source): boolean {
   return JSON.stringify({ ...a, id: '' }) === JSON.stringify({ ...b, id: '' });
 }
@@ -220,17 +273,24 @@ function prepareTemplatePages(dst: Bundle, src: Bundle, pages: Page[]): Page[] {
   return out;
 }
 
-/** Append all pages of a template as new pages. Returns the first new page ID. */
-export function addTemplateAsPages(draft: Bundle, template: Bundle): { bundle: Bundle; pageId: string } {
+/**
+ * Append the pages of a template as new screens (each page = one screen), up to
+ * MAX_SCREENS in total. Returns the first new page ID ('' when there is no room).
+ */
+export function addTemplateAsPages(draft: Bundle, template: Bundle): { bundle: Bundle; pageId: string; added: number } {
+  const room = MAX_SCREENS - draft.dashboard.pages.length;
+  if (room <= 0) return { bundle: draft, pageId: '', added: 0 };
   const dst = clone(draft);
-  const pages = prepareTemplatePages(dst, template, template.dashboard.pages);
+  const pages = prepareTemplatePages(dst, template, template.dashboard.pages.slice(0, room));
   dst.dashboard.pages.push(...pages);
-  return { bundle: dst, pageId: pages[0]?.id ?? '' };
+  return { bundle: dst, pageId: pages[0]?.id ?? '', added: pages.length };
 }
 
 /**
- * Insert a template's panels into an existing page, keeping their relative
- * arrangement and placing the block at the first free screen region.
+ * Insert a template's panels into an existing page (= one screen), keeping
+ * their relative arrangement when the block fits somewhere on the screen, else
+ * placing each panel in the first free spot. Fails (no panel IDs) when the
+ * screen has no room.
  */
 export function addTemplatePanels(draft: Bundle, pageId: string, template: Bundle): { bundle: Bundle; panelIds: string[] } {
   const dst = clone(draft);
@@ -244,31 +304,34 @@ export function addTemplatePanels(draft: Bundle, pageId: string, template: Bundl
   const visible = tplPage.panels.filter(isVisible);
   for (const p of tplPage.panels) {
     const g = p.grid;
+    const h = Math.max(1, Math.min(ROWS_PER_SCREEN, g.h));
     p.grid = {
       x: Math.min(columns - 1, Math.round(g.x * scale)),
-      y: g.y,
+      y: Math.max(0, Math.min(ROWS_PER_SCREEN - h, g.y)),
       w: Math.max(1, Math.min(columns, Math.round(g.w * scale))),
-      h: Math.min(ROWS_PER_SCREEN, g.h),
+      h,
     };
   }
-  // Find a block offset (whole screens) where every visible panel fits.
+  const hits = (r: { x: number; y: number; w: number; h: number }, list: Page['panels']) =>
+    list.some((o) => isVisible(o) && r.x < o.grid.x + o.grid.w && o.grid.x < r.x + r.w && r.y < o.grid.y + o.grid.h && o.grid.y < r.y + r.h);
+  // Shift the whole block vertically to the first offset where every panel fits.
   const minY = visible.length ? Math.min(...visible.map((p) => p.grid.y)) : 0;
+  const maxY = visible.length ? Math.max(...visible.map((p) => p.grid.y + p.grid.h)) : 0;
   let placed = false;
-  for (let screen = 0; screen < 32 && !placed; screen++) {
-    const dy = screen * ROWS_PER_SCREEN - (minY - (minY % ROWS_PER_SCREEN));
-    const ok = visible.every((p) => {
-      const r = { ...p.grid, y: p.grid.y + dy };
-      return r.x + r.w <= columns && !page.panels.some((o) => isVisible(o) && r.x < o.grid.x + o.grid.w && o.grid.x < r.x + r.w && r.y < o.grid.y + o.grid.h && o.grid.y < r.y + r.h);
-    });
-    if (ok) {
-      for (const p of tplPage.panels) if (isVisible(p)) p.grid.y += dy;
+  for (let top = 0; top + (maxY - minY) <= ROWS_PER_SCREEN && !placed; top++) {
+    const dy = top - minY;
+    if (visible.every((p) => p.grid.x + p.grid.w <= columns && !hits({ ...p.grid, y: p.grid.y + dy }, page.panels))) {
+      for (const p of visible) p.grid.y += dy;
       placed = true;
     }
   }
   if (!placed) {
+    const probe: Page = { ...page, panels: [...page.panels] };
     for (const p of visible) {
-      const spot = findFreeSpot(page, p.grid.w, p.grid.h);
-      if (spot) p.grid = spot;
+      const spot = findFreeSpot(probe, p.grid.w, p.grid.h);
+      if (!spot) return { bundle: draft, panelIds: [] };
+      p.grid = spot;
+      probe.panels.push(p);
     }
   }
   page.panels.push(...tplPage.panels);

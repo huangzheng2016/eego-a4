@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { addTemplateAsPages, addTemplatePanels, bundleFromPreset, emptyBundle, parseBundle, serializeBundle, syncPlan, sourceFromPlan, defaultPlan } from '../src/model/bundle';
+import { addScreen, addTemplateAsPages, addTemplatePanels, allPanelIds, bundleFromPreset, defaultPlan, deviceScreenIndex, duplicateScreen, emptyBundle, moveScreen, parseBundle, removeScreen, serializeBundle, sourceFromPlan, syncPlan } from '../src/model/bundle';
 import { layoutIssues } from '../src/model/grid';
 import { locateError, toFieldErrors } from '../src/model/errors';
 import type { PresetDoc } from '../src/model/types';
@@ -68,14 +68,27 @@ describe('template merging', () => {
     expect(newPage.panels.every((p) => p.source_id === 'metrics-2')).toBe(true);
     expect(bundle.source_plans.some((p) => p.id === 'metrics-2')).toBe(true);
   });
-  it('inserts panels into free space on an existing page', () => {
-    const b = addTemplateAsPages(emptyBundle(), kpi).bundle;
+  it('inserts panels into free space on an existing screen', () => {
+    const b = emptyBundle();
     const page = b.dashboard.pages[0];
     const { bundle, panelIds } = addTemplatePanels(b, page.id, kpi);
     expect(panelIds.length).toBe(4);
     const target = bundle.dashboard.pages.find((p) => p.id === page.id)!;
-    expect(target.panels.length).toBe(4 + (page.panels.length));
+    expect(target.panels.length).toBe(4 + page.panels.length);
     expect(layoutIssues(target)).toEqual([]);
+  });
+  it('refuses to insert into a full screen', () => {
+    const b = emptyBundle();
+    b.dashboard.pages[0].panels = [{ id: 'full', kind: 'text', grid: { x: 0, y: 0, w: 24, h: 8 } }];
+    expect(addTemplatePanels(b, b.dashboard.pages[0].id, kpi).panelIds).toEqual([]);
+  });
+  it('adds templates as new screens up to 8', () => {
+    let b = emptyBundle();
+    for (let i = 0; i < 10; i++) b = addTemplateAsPages(b, kpi).bundle;
+    expect(b.dashboard.pages).toHaveLength(8);
+    const r = addTemplateAsPages(b, kpi);
+    expect(r.added).toBe(0);
+    expect(r.pageId).toBe('');
   });
 });
 
@@ -102,5 +115,43 @@ describe('validation error mapping', () => {
   it('accepts both error shapes', () => {
     expect(toFieldErrors({ a: 'x' })).toEqual([{ field: 'a', message: 'x' }]);
     expect(toFieldErrors([{ field: 'b', message: 'y' }])).toEqual([{ field: 'b', message: 'y' }]);
+  });
+});
+
+describe('screens (one page = one screen)', () => {
+  it('adds up to 8 screens', () => {
+    const b = emptyBundle();
+    for (let i = 0; i < 10; i++) addScreen(b.dashboard, `S${i}`);
+    expect(b.dashboard.pages).toHaveLength(8);
+    expect(addScreen(b.dashboard, 'x')).toBe('');
+  });
+  it('duplicates a screen with fresh ids and internal references', () => {
+    const b = emptyBundle();
+    b.dashboard.pages[0].panels = [
+      { id: 'a', kind: 'card', grid: { x: 0, y: 0, w: 12, h: 2 }, linked_panel_ids: ['b'] },
+      { id: 'b', kind: 'button', grid: { x: 12, y: 0, w: 12, h: 2 }, actions: [{ id: 'go', kind: 'goto_panel', label: 'A', target: 'a' }] },
+    ];
+    const id = duplicateScreen(b.dashboard, 'main', 'Copy');
+    expect(b.dashboard.pages.map((p) => p.id)).toEqual(['main', id]);
+    const copy = b.dashboard.pages[1];
+    expect(copy.title).toBe('Copy');
+    const ids = allPanelIds(b.dashboard);
+    expect(new Set(ids).size).toBe(4);
+    expect(copy.panels[0].linked_panel_ids).toEqual([copy.panels[1].id]);
+    expect(copy.panels[1].actions?.[0].target).toBe(copy.panels[0].id);
+  });
+  it('removes and reorders screens, keeping the default page valid', () => {
+    const b = emptyBundle();
+    const two = addScreen(b.dashboard, 'Two');
+    const three = addScreen(b.dashboard, 'Three');
+    moveScreen(b.dashboard, 2, 0);
+    expect(b.dashboard.pages.map((p) => p.id)).toEqual([three, 'main', two]);
+    expect(removeScreen(b.dashboard, 'main')).toBe(true);
+    expect(b.dashboard.default_page_id).toBe(three);
+    b.dashboard.pages[1].visible = false;
+    expect(deviceScreenIndex(b.dashboard, two)).toBe(-1);
+    expect(deviceScreenIndex(b.dashboard, three)).toBe(0);
+    removeScreen(b.dashboard, two);
+    expect(removeScreen(b.dashboard, three)).toBe(false); // never the last screen
   });
 });

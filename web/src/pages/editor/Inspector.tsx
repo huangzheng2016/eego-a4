@@ -74,7 +74,7 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
   const setGrid = (k: 'x' | 'y' | 'w' | 'h', v: number | undefined) => {
     if (v === undefined) return;
     const g = { ...p.grid, [k]: Math.max(k === 'w' || k === 'h' ? 1 : 0, Math.round(v)) };
-    if (p.visible === false) return set((x) => (x.grid = g), 'grid');
+    if (p.visible === false) return fitsScreen(g) && g.x + g.w <= columns ? set((x) => (x.grid = g), 'grid') : toast('warn', t('editor.blocked'));
     if (g.x + g.w > columns || !fitsScreen(g)) return toast('warn', t('editor.blocked'));
     const placement = resolvePlacement(page, p.id, g);
     if (!placement.ok) return toast('warn', t('editor.blocked'));
@@ -156,7 +156,7 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
       <Section title={t('panel.position')}>
         <div className="form-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
           <NumberInput label="x" min={0} max={columns - 1} value={p.grid.x} onChange={(v) => setGrid('x', v)} />
-          <NumberInput label="y" min={0} value={p.grid.y} onChange={(v) => setGrid('y', v)} />
+          <NumberInput label="y" min={0} max={ROWS_PER_SCREEN - 1} value={p.grid.y} onChange={(v) => setGrid('y', v)} />
           <NumberInput label="w" min={1} max={columns} value={p.grid.w} onChange={(v) => setGrid('w', v)} />
           <NumberInput label="h" min={1} max={ROWS_PER_SCREEN} value={p.grid.h} onChange={(v) => setGrid('h', v)} />
         </div>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { WIFI_PASSWORD_KEEP, disconnectReasonText, moveItem, rowsFromNetworks, signalQuality, toEdits, validateRow, type WifiRow } from '../src/model/wifi';
+import { WIFI_PASSWORD_KEEP, disconnectReasonText, moveItem, rowsFromNetworks, signalBars, signalQuality, toEdits, validateRow, type WifiRow } from '../src/model/wifi';
 
 describe('wifi list helpers', () => {
   const rows: WifiRow[] = rowsFromNetworks([
@@ -36,9 +36,18 @@ describe('wifi list helpers', () => {
   });
 
   it('describes signal and disconnect reasons', () => {
-    expect(signalQuality(-50)).toBe('good');
-    expect(signalQuality(-70)).toBe('fair');
-    expect(signalQuality(-85)).toBe('weak');
+    expect(signalQuality(-50)).toBe('excellent');
+    expect(signalQuality(-60)).toBe('excellent');
+    expect(signalQuality(-61)).toBe('good');
+    expect(signalQuality(-70)).toBe('good');
+    expect(signalQuality(-71)).toBe('fair');
+    expect(signalQuality(-80)).toBe('fair');
+    expect(signalQuality(-81)).toBe('weak');
+    expect(signalQuality(-93)).toBe('weak');
+    expect(signalQuality(0)).toBe('none');
+    expect(signalBars('excellent')).toBe(4);
+    expect(signalBars('weak')).toBe(1);
+    expect(signalBars('none')).toBe(0);
     expect(disconnectReasonText(0)).toBe('—');
     expect(disconnectReasonText(201)).toBe('201 · no AP found');
     expect(disconnectReasonText(77)).toBe('77 · other');

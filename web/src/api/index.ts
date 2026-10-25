@@ -33,7 +33,7 @@ export const changePassword = (old_password: string, new_password: string) =>
 // ---------------------------------------------------------------- status
 export interface DeviceStatus {
   device: { fw_version: string; fw_sha256: string; uptime_s: number; mode: string };
-  network: { ssid: string; ip: string; rssi: number; wifi_state: number; ap_active: boolean; last_disconnect_reason?: number; reconnect_attempts?: number; disconnects?: number };
+  network: { ssid: string; ip: string; rssi: number; wifi_state: number; ap_active: boolean; last_disconnect_reason?: number; reconnect_attempts?: number; disconnects?: number; signal?: string; signal_label?: string; signal_bars?: number; signal_hint?: string };
   time: { valid: boolean; now: number; sntp_synced: boolean; last_sync_at: number };
   memory: { internal_free: number; psram_free: number };
   storage: { sd_ready: boolean; config_valid: boolean };
@@ -41,6 +41,7 @@ export interface DeviceStatus {
   security: { sessions: number; ingest_key_masked: string; provisioned: boolean };
   /** Keep-awake override (RAM only on the device). */
   keep_awake?: KeepAwakeState;
+  screen?: DeviceScreen;
   /** Power source/sleep state published by the device UI task. */
   power?: PowerState;
 }
@@ -51,6 +52,22 @@ export const getStatus = () => request<DeviceStatus>('/status', { timeoutMs: 800
 /** minutes = 0 cancels; 1..240 keeps the device awake (no idle batching, no auto deep sleep). */
 export const setKeepAwake = (minutes: number) =>
   request<KeepAwakeState>('/device/keep-awake', { method: 'POST', body: { minutes }, timeoutMs: 8000 });
+
+/** Current dashboard screen on the device (one visible page = one screen). */
+export interface DeviceScreen {
+  available: boolean;
+  /** 0-based */
+  index: number;
+  count: number;
+  page_id: string;
+  /** dashboard is on the display (not settings/status) */
+  shown: boolean;
+  rotate_min: number;
+}
+export const getDeviceScreen = () => request<DeviceScreen>('/device/screen');
+/** Switch the displayed screen: absolute 0-based index or a wrapping step (±1). */
+export const setDeviceScreen = (target: { index: number } | { step: number }) =>
+  request<{ index: number; count: number }>('/device/screen', { method: 'POST', body: target, timeoutMs: 8000 });
 
 // ---------------------------------------------------------------- system
 export interface LogEntry {
@@ -150,6 +167,15 @@ export interface WifiCurrent {
   driver_restarts?: number;
   offline_ms?: number;
   reconnect_backoff_ms?: number;
+  /** excellent | good | fair | weak | none (firmware wifiSignalQuality). */
+  signal?: string;
+  signal_bars?: number;
+  signal_hint?: string;
+  rssi_min_10m?: number;
+  rssi_avg_10m?: number;
+  beacon_timeouts?: number;
+  roams?: number;
+  last_dhcp_ms?: number;
 }
 export interface WifiList {
   /** Order = connection priority. */
@@ -244,8 +270,9 @@ export type PreviewData = 'bundle' | 'live' | 'mixed' | 'placeholder' | 'none';
 export interface RenderPreview {
   blob: Blob;
   page: string;
+  /** 0-based screen = index of the page among visible pages (X-Preview-Screen). */
   screen: number;
-  /** Total screens of that page (X-Preview-Screens). */
+  /** Visible pages = device screens (X-Preview-Screens). */
   screens: number;
   data: PreviewData | string;
 }
@@ -255,8 +282,10 @@ export interface RenderPreview {
  * (fields), 413, 415, 429 (10/min per session), 503 busy/timeout/unavailable.
  */
 export async function renderPreview(bundle: Bundle, opts: { pageId?: string; screen?: number; refresh?: PreviewRefresh } = {}): Promise<RenderPreview> {
-  const body: Record<string, unknown> = { bundle, screen: Math.max(0, Math.floor(opts.screen ?? 0)), refresh: opts.refresh ?? 'full' };
+  // page_id and screen are alternatives (one page = one screen).
+  const body: Record<string, unknown> = { bundle, refresh: opts.refresh ?? 'full' };
   if (opts.pageId) body.page_id = opts.pageId;
+  else if (opts.screen !== undefined) body.screen = Math.max(0, Math.floor(opts.screen));
   const res = await request<Response>('/dashboard/render-preview', { method: 'POST', body, raw: true, timeoutMs: 30000 });
   const num = (h: string, d: number) => {
     const n = Number(res.headers.get(h));

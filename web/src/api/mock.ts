@@ -2,7 +2,7 @@
 // Installed by main.tsx through a dynamic import that is dead-code-eliminated
 // from production builds.
 import { parseBundle, clone } from '../model/bundle';
-import { columnsOf, isVisible, layoutIssues, panelPixels, screenCount } from '../model/grid';
+import { columnsOf, isVisible, layoutIssues, MAX_SCREENS, panelPixels } from '../model/grid';
 import { checkExpression } from '../model/expression';
 import { parseJsonPath, type PathToken } from '../model/jsonpath';
 import type { Bundle, SourcePlan } from '../model/types';
@@ -36,6 +36,7 @@ const SETTINGS_SCHEMA = {
     idle_refresh_min: { type: 'int', enum: [2, 5, 10, 15, 30, 60], default: 5, group: 'display_refresh' },
     idle_critical_immediate: { type: 'bool', default: true, group: 'display_refresh' },
     keep_awake_min: { type: 'int', enum: [10, 30, 60, 120], default: 30, group: 'power' },
+    screen_rotate_min: { type: 'int', enum: [0, 1, 2, 5, 10, 30], default: 0, group: 'display_refresh' },
     diagnostics_enabled: { type: 'bool', default: true, group: 'diagnostics' },
     ble_observer_enabled: { type: 'bool', default: false, capability: 'ble_observer', group: 'ble' },
     ble_observer_window_s: { type: 'int', range: [2, 60], default: 10, group: 'ble' },
@@ -198,6 +199,7 @@ function validate(b: Bundle): { field: string; message: string }[] {
   const errors: { field: string; message: string }[] = [];
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(b.dashboard.id ?? '')) errors.push({ field: 'dashboard.id', message: 'must match [A-Za-z0-9_-]{1,64}' });
   const ids = new Set<string>();
+  if (b.dashboard.pages.length > MAX_SCREENS) errors.push({ field: 'dashboard.pages', message: `array exceeds maximum item count ${MAX_SCREENS}` });
   b.dashboard.pages.forEach((page, pi) => {
     const issues = layoutIssues(page);
     page.panels.forEach((p, i) => {
@@ -262,12 +264,33 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
         alerts: { available: true, critical: 1, warning: 1, info: 0, active_total: 2 },
         security: { sessions: 1, ingest_key_masked: 'ab12****', provisioned: true },
         keep_awake: mockKeepAwake(),
+        screen: mockScreen(),
         power: {
           source: 'mains', source_reason: 'usb_host', power_mode: 'auto', mode: mockKeepAwake().active ? 'keep_awake' : 'active',
           battery_pct: 92, battery_mv: 4120, charging: false, usb_host: true, next_wake: 0, next_refresh: 0, sleep_in_s: -1,
           last_wake_reason: 'power-on', sleeps_since_boot: 0, last_screen_update: Math.floor(Date.now() / 1000) - 40,
         },
       });
+    case 'GET device/screen':
+      return json(200, mockScreen());
+    case 'POST device/screen': {
+      const cur = mockScreen();
+      if (!cur.available) return err(409, 'conflict', 'no dashboard loaded');
+      const hasIndex = typeof b.index === 'number' && Number.isInteger(b.index);
+      const hasStep = typeof b.step === 'number' && Number.isInteger(b.step);
+      if (hasIndex === hasStep) return err(400, 'validation_failed', 'validation failed', { index: 'give exactly one of integer index (0-based) or step' });
+      let next: number;
+      if (hasIndex) {
+        next = b.index as number;
+        if (next < 0 || next >= cur.count) return err(400, 'validation_failed', 'validation failed', { index: `must be in [0, ${cur.count - 1}]` });
+      } else {
+        const step = b.step as number;
+        if (step === 0 || Math.abs(step) > MAX_SCREENS) return err(400, 'validation_failed', 'validation failed', { step: 'must be a nonzero integer in [-8, 8]' });
+        next = (((cur.index + step) % cur.count) + cur.count) % cur.count;
+      }
+      mockScreenIndex = next;
+      return json(200, { index: next, count: cur.count });
+    }
     case 'GET device/keep-awake':
       return json(200, mockKeepAwake());
     case 'POST device/keep-awake': {
@@ -402,11 +425,17 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
     }
     const errors = validate(draft);
     if (errors.length) return err(400, 'validation_failed', 'dashboard validation failed', Object.fromEntries(errors.map((e) => [e.field, e.message])));
-    const page = draft.dashboard.pages.find((p) => p.id === (req.page_id || draft.dashboard.default_page_id)) ?? draft.dashboard.pages[0];
-    if (!page) return err(400, 'invalid_request', 'unknown page');
-    const screens = screenCount(page);
-    const screen = Math.min(req.screen ?? 0, screens - 1);
-    const blob = await snapshot(draft, page.id, screen, req.refresh === 'fast');
+    if (req.screen !== undefined && req.page_id) return err(400, 'invalid_request', 'give either page_id or screen, not both');
+    // One visible page = one screen.
+    const visible = draft.dashboard.pages.filter((p) => p.visible !== false);
+    const page =
+      req.screen !== undefined
+        ? visible[req.screen]
+        : visible.find((p) => p.id === (req.page_id || draft.dashboard.default_page_id)) ?? (req.page_id ? undefined : visible[0]);
+    if (!page) return err(400, 'validation_failed', 'render preview page not found', req.screen !== undefined ? { screen: `dashboard has ${visible.length} visible screen(s)` } : { page_id: 'no visible page with this id' });
+    const screens = visible.length;
+    const screen = visible.indexOf(page);
+    const blob = await snapshot(draft, page.id, req.refresh === 'fast');
     if (!blob) return err(503, 'unavailable', 'render preview unavailable');
     const data = draft.dashboard.samples.length ? 'bundle' : 'placeholder';
     return new Response(blob, { status: 200, headers: { 'Content-Type': 'image/png', 'X-Preview-Page': page.id, 'X-Preview-Screen': String(screen), 'X-Preview-Screens': String(screens), 'X-Preview-Data': data } });
@@ -418,10 +447,17 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
   return err(404, 'not_found', 'resource not found');
 }
 
-/** Rough 1-bit-looking frame of the applied dashboard's first screen. */
+/** Rough 1-bit-looking frame of the applied dashboard's current screen. */
 const renderCalls: number[] = [];
 
-async function snapshot(source: Bundle | null = state.bundle, pageId?: string, screen = 0, fast = false): Promise<Blob | null> {
+let mockScreenIndex = 0;
+function mockScreen() {
+  const visible = (state.bundle?.dashboard.pages ?? []).filter((p) => p.visible !== false);
+  const index = visible.length ? Math.min(mockScreenIndex, visible.length - 1) : 0;
+  return { available: visible.length > 0, index, count: visible.length, page_id: visible[index]?.id ?? '', shown: true, rotate_min: (state.settings as { screen_rotate_min?: number } | undefined)?.screen_rotate_min ?? 0 };
+}
+
+async function snapshot(source: Bundle | null = state.bundle, pageId?: string, fast = false): Promise<Blob | null> {
   const b = source;
   const c = document.createElement('canvas');
   c.width = 552;
@@ -433,7 +469,7 @@ async function snapshot(source: Bundle | null = state.bundle, pageId?: string, s
   g.fillStyle = '#000';
   g.strokeStyle = '#000';
   g.lineWidth = 1;
-  const page = b?.dashboard.pages.find((p) => p.id === (pageId || b.dashboard.default_page_id)) ?? b?.dashboard.pages[0];
+  const page = b?.dashboard.pages.find((p) => p.id === (pageId || mockScreen().page_id || b.dashboard.default_page_id)) ?? b?.dashboard.pages[0];
   if (!b || !page) {
     g.font = '16px sans-serif';
     g.fillText('No dashboard configured', 180, 384);
@@ -441,7 +477,6 @@ async function snapshot(source: Bundle | null = state.bundle, pageId?: string, s
     const cols = columnsOf(page);
     for (const p of page.panels.filter(isVisible)) {
       const px = panelPixels(p.grid, cols);
-      if (px.screen !== screen) continue;
       g.strokeRect(px.x + 0.5, px.y + 0.5, px.w - 1, px.h - 1);
       let y = px.y + 6;
       if (p.title) {

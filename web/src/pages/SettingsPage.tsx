@@ -31,6 +31,10 @@ function tzLabel(min: number): string {
 }
 const TZ_OPTIONS = Array.from({ length: (840 * 2) / 15 + 1 }, (_, i) => -840 + i * 15).map((m) => ({ value: String(m), label: tzLabel(m) }));
 
+function prefixed(p: string, o: Record<string, unknown> | undefined): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(o ?? {}).map(([k, v]) => [`${p}.${k}`, v]));
+}
+
 export function SettingsPage() {
   const { t } = useI18n();
   const enumLabel = useEnumLabel();
@@ -110,6 +114,11 @@ export function SettingsPage() {
     }
   };
 
+  const capLabel = (k: string) => {
+    const key = `set.cap.${k}` as DictKey;
+    const s = t(key);
+    return s === key ? k : s;
+  };
   const fieldLabel = (k: string) => {
     const key = `set.f.${k}` as DictKey;
     const s = t(key);
@@ -126,7 +135,8 @@ export function SettingsPage() {
     const v = form[key];
     const set = (nv: unknown) => setForm((s) => ({ ...s, [key]: nv }));
     const help = fieldHelp(key);
-    const hint = help ?? (f.range ? `${f.range[0]} – ${f.range[1]}${f.minimum_nonzero ? ` (0 / ≥${f.minimum_nonzero})` : ''}` : f.note);
+    const range = f.range ? t('set.range', { min: f.range[0], max: f.range[1] }) + (f.minimum_nonzero ? t('set.range_nonzero', { n: f.minimum_nonzero }) : '') : '';
+    const hint = help ? (range ? `${help}（${range}）` : help) : range || f.note;
     const common = { label: fieldLabel(key), error: errs[key] };
     if (f.type === 'bool') return <Checkbox key={key} {...common} hint={help} checked={!!v} onChange={set} />;
     if (f.enum) {
@@ -206,13 +216,15 @@ export function SettingsPage() {
         }
       />
       {groups.hidden > 0 && <div className="dim">{t('set.capability_off', { n: groups.hidden })}</div>}
+      {dirty && <div className="notice warn">{t('set.unsaved', { n: Object.keys(changed).length })}</div>}
       {groups.ordered.map(([group, fields]) => {
         const titleKey = `set.group.${group}` as DictKey;
         return (
           <Card key={group} title={t(titleKey) === titleKey ? group : t(titleKey)}>
             <div className="form-grid two">{fields.map(({ key, f }) => renderField(key, f))}</div>
+            {group === 'hardware' && <p className="dim card-foot-note">{t('set.touch_cal_note')}</p>}
             {group === 'ble' && caps.bluetooth && (
-              <div style={{ marginTop: 10 }}>
+              <div className="card-foot-note">
                 <Button
                   size="sm"
                   variant="danger"
@@ -234,16 +246,28 @@ export function SettingsPage() {
         );
       })}
       <Card title={t('set.status')}>
-        <div className="row" style={{ marginBottom: 8 }}>
+        <h4 className="block-gap">{t('set.caps')}</h4>
+        <div className="row">
           {Object.entries(caps).map(([k, on]) => (
-            <span key={k} className={`badge ${on ? 'ok' : ''}`}>
-              {on ? '✓' : '✗'} {k}
+            <span key={k} className={`badge ${on ? 'ok' : ''}`} title={k}>
+              {on ? '✓' : '✗'} {capLabel(k)}
             </span>
           ))}
         </div>
-        <details>
-          <summary className="dim">power / ble</summary>
-          <pre>{JSON.stringify({ power: data.power, ble: data.ble }, null, 2)}</pre>
+        <details className="form-details">
+          <summary>{t('set.raw_status')}</summary>
+          <div className="scroll-x">
+            <table className="table kv-table">
+              <tbody>
+                {Object.entries({ ...prefixed('power', data.power), ...prefixed('ble', data.ble) }).map(([k, v]) => (
+                  <tr key={k}>
+                    <th className="mono">{k}</th>
+                    <td className="mono">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </details>
       </Card>
     </div>

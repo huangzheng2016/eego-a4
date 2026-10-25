@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import * as api from '../api';
 import { useI18n } from '../i18n';
 import { useToast } from '../state/toast';
 import { errorText, fieldMap } from '../state/errors';
 import { useDraft } from '../state/draft';
-import { Button, Card, Empty, Spinner, TextInput, PageHeader } from '../ui';
+import { credentialKeyError, credentialValueError, sanitizeCredentialKey } from '../model/credentials';
+import { Badge, Button, Card, EmptyState, Icon, SecretInput, Spinner, TextInput, PageHeader } from '../ui';
+import type { DictKey } from '../i18n';
 
 export function CredentialsPage() {
   const { t } = useI18n();
@@ -15,6 +17,8 @@ export function CredentialsPage() {
   const [value, setValue] = useState('');
   const [errs, setErrs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  const valueRef = useRef<HTMLDivElement>(null);
+  const exists = !!list?.some((c) => c.key === key.trim());
 
   const load = useCallback(() => {
     api.listCredentials().then((r) => setList(r.credentials), (e) => toast('error', errorText(e, t)));
@@ -23,6 +27,12 @@ export function CredentialsPage() {
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    const ke = credentialKeyError(key.trim());
+    const ve = credentialValueError(value);
+    if (ke || ve) {
+      setErrs({ ...(ke ? { key: t(`auth.err.${ke}` as DictKey) } : {}), ...(ve ? { value: t(`auth.err.${ve}` as DictKey) } : {}) });
+      return;
+    }
     setBusy(true);
     setErrs({});
     try {
@@ -53,51 +63,74 @@ export function CredentialsPage() {
   return (
     <div className="page stack">
       <PageHeader icon="key" title={t('cred.title')} subtitle={t('cred.subtitle')} />
-      <div className="notice">{t('cred.note')}</div>
+      <div className="notice">
+        <Icon name="shield" size={16} />
+        <span>{t('cred.note')}</span>
+      </div>
       <Card title={t('cred.write')}>
+        <p className="dim card-lead">{t('cred.write_h')}</p>
         <form className="form-grid two" onSubmit={submit} autoComplete="off">
-          <TextInput label={t('cred.key')} value={key} onChange={(v) => setKey(v.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 15))} error={errs.key} maxLength={15} required />
-          <TextInput label={t('cred.value')} type="password" autoComplete="new-password" value={value} onChange={setValue} error={errs.value} maxLength={1024} required />
-          <div className="wide">
+          <TextInput label={t('auth.key')} value={key} onChange={(v) => setKey(sanitizeCredentialKey(v))} error={errs.key} hint={exists ? t('auth.key_overwrite') : t('auth.key_hint')} maxLength={15} spellCheck={false} required />
+          <div ref={valueRef}>
+            <SecretInput label={t('cred.value')} value={value} onChange={setValue} error={errs.value} hint={t('cred.value_h')} maxLength={1024} showLabel={t('auth.show')} hideLabel={t('auth.hide')} placeholder={t('auth.secret_ph')} required />
+          </div>
+          <div className="wide row">
             <Button type="submit" variant="primary" loading={busy} disabled={!key || !value}>
-              {t('cred.write')}
+              <Icon name="key" size={15} /> {exists ? t('cred.overwrite') : t('auth.save_to_device')}
             </Button>
+            {key && (
+              <Button variant="ghost" onClick={() => { setKey(''); setValue(''); setErrs({}); }}>
+                {t('common.cancel')}
+              </Button>
+            )}
           </div>
         </form>
       </Card>
-      <Card title={t('cred.list')} actions={<Button size="sm" onClick={load}>{t('common.refresh')}</Button>}>
+      <Card title={t('cred.list')} actions={<Button size="sm" onClick={load}><Icon name="refresh" size={14} /> {t('common.refresh')}</Button>}>
         {!list ? (
           <Spinner />
         ) : !list.length ? (
-          <Empty>{t('cred.empty')}</Empty>
+          <EmptyState icon="key" title={t('cred.empty')}>{t('cred.empty_h')}</EmptyState>
         ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>key</th>
-                <th>{t('cred.ref')}</th>
-                <th>{t('nav.sources')}</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {list.map((c) => (
-                <tr key={c.key}>
-                  <td className="mono">{c.key}</td>
-                  <td className="mono">{c.ref}</td>
-                  <td className="dim">{usedBy(c.ref).join(', ') || '—'}</td>
-                  <td style={{ textAlign: 'right' }}>
-                    <Button size="sm" onClick={() => setKey(c.key)}>
-                      {t('common.edit')}
-                    </Button>{' '}
-                    <Button size="sm" variant="danger" onClick={() => void remove(c.key)}>
-                      {t('common.delete')}
-                    </Button>
-                  </td>
+          <div className="scroll-x">
+            <table className="table stack-sm">
+              <thead>
+                <tr>
+                  <th>{t('auth.key')}</th>
+                  <th>{t('cred.ref')}</th>
+                  <th>{t('cred.used_by')}</th>
+                  <th />
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {list.map((c) => {
+                  const users = usedBy(c.ref);
+                  return (
+                    <tr key={c.key}>
+                      <td className="mono">{c.key}</td>
+                      <td className="mono dim">{c.ref}</td>
+                      <td>{users.length ? users.map((u) => <Badge key={u} tone="accent">{u}</Badge>) : <span className="dim">{t('cred.unused')}</span>}</td>
+                      <td className="cell-actions">
+                        <Button
+                          size="sm"
+                          onClick={() => {
+                            setKey(c.key);
+                            setValue('');
+                            valueRef.current?.querySelector('input')?.focus();
+                          }}
+                        >
+                          {t('cred.overwrite')}
+                        </Button>
+                        <Button size="sm" variant="danger" onClick={() => void remove(c.key)}>
+                          {t('common.delete')}
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </Card>
     </div>

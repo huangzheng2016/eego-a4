@@ -68,12 +68,17 @@ export function validateRow(row: WifiRow, rows: WifiRow[], index: number): Parti
   return errors;
 }
 
-export type SignalQuality = 'good' | 'fair' | 'weak';
+/** Mirrors firmware wifi_list.h wifiSignalQuality: ≥-60 / -60..-70 / -70..-80 / <-80; rssi ≥ 0 = unknown. */
+export type SignalQuality = 'excellent' | 'good' | 'fair' | 'weak' | 'none';
 export function signalQuality(rssi: number): SignalQuality {
-  if (rssi >= -60) return 'good';
-  if (rssi >= -72) return 'fair';
+  if (!Number.isFinite(rssi) || rssi >= 0) return 'none';
+  if (rssi >= -60) return 'excellent';
+  if (rssi >= -70) return 'good';
+  if (rssi >= -80) return 'fair';
   return 'weak';
 }
+const BARS: Record<SignalQuality, number> = { excellent: 4, good: 3, fair: 2, weak: 1, none: 0 };
+export const signalBars = (q: SignalQuality) => BARS[q];
 
 /** Common ESP-IDF wifi_err_reason_t codes (diagnostics only). */
 const REASONS: Record<number, string> = {

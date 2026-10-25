@@ -1,6 +1,7 @@
 // "设备渲染预览": POST /dashboard/render-preview renders the *draft* on the
 // device with its real fonts (nothing is applied). Full (4 grey levels) or
-// fast (B/W) refresh look, screen pager from X-Preview-Screens and the data
+// fast (B/W) refresh look, screen pager (one visible page = one screen) from
+// X-Preview-Screen / X-Preview-Screens and the data
 // origin badge from X-Preview-Data. Validation errors go to the draft's field
 // mapping (editor error list / inspector).
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -27,11 +28,11 @@ export function RenderPreviewDialog({ pageId, pageTitle, onClose, onUnsupported 
   draftRef.current = d.draft;
 
   const render = useCallback(
-    async (scr: number, mode: api.PreviewRefresh) => {
+    async (target: { pageId: string } | { screen: number }, mode: api.PreviewRefresh) => {
       setBusy(true);
       setError(null);
       try {
-        const r = await api.renderPreview(serializeBundle(draftRef.current), { pageId, screen: scr, refresh: mode });
+        const r = await api.renderPreview(serializeBundle(draftRef.current), { ...target, refresh: mode });
         const url = URL.createObjectURL(r.blob);
         if (urlRef.current) URL.revokeObjectURL(urlRef.current);
         urlRef.current = url;
@@ -53,11 +54,11 @@ export function RenderPreviewDialog({ pageId, pageTitle, onClose, onUnsupported 
         setBusy(false);
       }
     },
-    [pageId, d, t, onUnsupported],
+    [d, t, onUnsupported],
   );
 
   useEffect(() => {
-    void render(0, 'full');
+    void render({ pageId }, 'full');
     return () => {
       if (urlRef.current) URL.revokeObjectURL(urlRef.current);
     };
@@ -66,10 +67,11 @@ export function RenderPreviewDialog({ pageId, pageTitle, onClose, onUnsupported 
   }, []);
 
   const screens = result?.screens ?? 1;
-  const go = (s: number) => void render(s, refresh);
+  const go = (s: number) => void render({ screen: s }, refresh);
+  const title = result ? d.draft.dashboard.pages.find((p) => p.id === result.page)?.title || result.page : pageTitle;
 
   return (
-    <Modal title={t('editor.render_title', { page: pageTitle })} onClose={onClose}>
+    <Modal title={t('editor.render_title', { page: `${t('editor.screen', { n: screen + 1 })} · ${title}` })} onClose={onClose}>
       <div className="col" style={{ gap: 12 }}>
         <div className="row">
           <Segmented<api.PreviewRefresh>
@@ -77,7 +79,7 @@ export function RenderPreviewDialog({ pageId, pageTitle, onClose, onUnsupported 
             value={refresh}
             onChange={(m) => {
               setRefresh(m);
-              void render(screen, m);
+              void render({ screen }, m);
             }}
             options={[
               { value: 'full', label: t('editor.render_full'), title: t('editor.render_full_hint') },

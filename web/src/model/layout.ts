@@ -6,11 +6,11 @@
 //   1. The active panel takes its target rectangle.
 //   2. Every other visible panel is visited in reading order (y, then x).
 //      If it overlaps something already settled, it is pushed straight down
-//      inside its own screen to the first row where it fits.
-//   3. If it cannot fit in its screen any more, it moves to the next free slot
-//      (row-major scan from its current row, skipping settled panels and the
-//      panels not yet visited), which may be on a following screen.
-//   Panels never cross the 8-row screen boundary; hidden panels are ignored.
+//      to the first row where it still fits on the screen.
+//   3. Otherwise it moves to the first free slot on the screen (row-major,
+//      skipping settled panels and the panels not yet visited). When nothing
+//      fits the placement fails: a page is exactly one 8-row screen.
+//   Hidden panels are ignored.
 import { columnsOf, fitsScreen, isVisible, overlaps, ROWS_PER_SCREEN } from './grid';
 import type { GridRect, Page, PanelKind } from './types';
 
@@ -33,7 +33,7 @@ function legal(r: GridRect, columns: number): boolean {
  * Place panel `id` at `target` (or insert a new panel when `id` is not on the
  * page) and push overlapping panels aside.
  */
-export function resolvePlacement(page: Page, id: string, target: GridRect, maxScreens = 32): Placement {
+export function resolvePlacement(page: Page, id: string, target: GridRect): Placement {
   const columns = columnsOf(page);
   if (!legal(target, columns)) return { ok: false, grids: {}, moved: [] };
   const others = page.panels
@@ -44,7 +44,6 @@ export function resolvePlacement(page: Page, id: string, target: GridRect, maxSc
   const grids: Record<string, GridRect> = { [id]: { ...target } };
   const settled: GridRect[] = [target];
   const moved: string[] = [];
-  const limit = maxScreens * ROWS_PER_SCREEN;
 
   for (let i = 0; i < others.length; i++) {
     const p = others[i];
@@ -53,20 +52,19 @@ export function resolvePlacement(page: Page, id: string, target: GridRect, maxSc
     if (!hitsAny(g, settled)) {
       placed = g;
     } else {
-      // 2. push down within the same screen
-      const screenEnd = Math.floor(g.y / ROWS_PER_SCREEN) * ROWS_PER_SCREEN + ROWS_PER_SCREEN;
-      for (let y = g.y + 1; y + g.h <= screenEnd; y++) {
+      // 2. push down while it still fits on the screen
+      for (let y = g.y + 1; y + g.h <= ROWS_PER_SCREEN; y++) {
         const r = { ...g, y };
         if (!hitsAny(r, settled)) {
           placed = r;
           break;
         }
       }
-      // 3. next free slot, avoiding settled and not-yet-visited panels
+      // 3. first free slot on the screen, avoiding settled and not-yet-visited panels
       if (!placed) {
         const avoid = [...settled, ...others.slice(i + 1).map((o) => o.grid)];
         const h = Math.min(g.h, ROWS_PER_SCREEN);
-        outer: for (let y = g.y; y < limit; y++) {
+        outer: for (let y = 0; y + h <= ROWS_PER_SCREEN; y++) {
           for (let x = 0; x + g.w <= columns; x++) {
             const r = { x, y, w: g.w, h };
             if (fitsScreen(r) && !hitsAny(r, avoid)) {
@@ -98,12 +96,12 @@ export const HANDLES: Handle[] = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
 
 /**
  * Resize `origin` by dragging `handle` by (dc, dr) cells. The opposite edges
- * stay put; the result stays inside the columns and inside its screen.
+ * stay put; the result stays inside the columns and inside the screen.
  */
 export function resizeRect(origin: GridRect, handle: Handle, dc: number, dr: number, columns: number): GridRect {
   let { x, y, w, h } = origin;
-  const screenTop = Math.floor(origin.y / ROWS_PER_SCREEN) * ROWS_PER_SCREEN;
-  const screenEnd = screenTop + ROWS_PER_SCREEN;
+  const screenTop = 0;
+  const screenEnd = ROWS_PER_SCREEN;
   if (handle.includes('e')) w = clamp(origin.w + dc, 1, columns - origin.x);
   if (handle.includes('w')) {
     const right = Math.min(columns, origin.x + origin.w);
@@ -141,19 +139,14 @@ export function defaultSize(kind: PanelKind, columns: number): { w: number; h: n
   }
 }
 
-/** Move by whole cells (keyboard nudge) with push-aside; vertical moves hop screens. */
+/** Move by whole cells (keyboard nudge) with push-aside; stops at the screen edges. */
 export function nudgePlacement(page: Page, id: string, dx: number, dy: number): Placement | null {
   const panel = page.panels.find((p) => p.id === id);
   if (!panel) return null;
   const columns = columnsOf(page);
   const g = panel.grid;
   const next = { ...g, x: g.x + dx, y: g.y + dy };
-  if (next.x < 0 || next.x + next.w > columns || next.y < 0) return null;
-  if (!fitsScreen(next)) {
-    const screen = Math.floor(g.y / ROWS_PER_SCREEN);
-    next.y = dy > 0 ? (screen + 1) * ROWS_PER_SCREEN : screen * ROWS_PER_SCREEN - g.h;
-    if (next.y < 0) return null;
-  }
+  if (next.x < 0 || next.x + next.w > columns || !fitsScreen(next)) return null;
   const r = resolvePlacement(page, id, next);
   return r.ok ? r : null;
 }
