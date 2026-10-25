@@ -39,6 +39,16 @@ enum class WifiState : uint8_t {
 
 const char* wifiStateName(WifiState s);
 
+// 快连提示（电池定时唤醒）：上次成功关联的 SSID + BSSID + 信道。带提示的首次连接
+// 跳过全信道扫描与断开等待，直接按 BSSID/信道关联（单信道扫描 ~几十 ms）；失败
+// 立即回退到常规 connectMulti（扫描 + 按名直连），提示作废。
+struct ApHint {
+  bool valid = false;
+  std::string ssid;
+  uint8_t bssid[6] = {0, 0, 0, 0, 0, 0};
+  uint8_t channel = 0;
+};
+
 class WifiManager {
  public:
   static WifiManager& instance();
@@ -49,10 +59,19 @@ class WifiManager {
   // 多账号依次连接：每个 SSID 最多 3 次（首次 30s、后续 15s，弱信号容忍），
   // 全部失败进入 OfflineMode。扫描仅作诊断提示，按名直连不固定 BSSID
   // （weread 实证：固定 BSSID 在访客网络/虚拟多 BSSID 下反而认证失败）。
+  // 例外：setFastConnectHint() 设置的一次性快连先按 BSSID + 信道尝试一次
+  // （短超时），失败立即回到上述常规路径。
   WifiState connectMulti(const std::vector<WifiAccount>& accounts);
 
-  // 连接指定账号（阻塞，含关联+握手+DHCP，timeout_ms 单次超时）。
-  WifiState connect(const WifiAccount& acc, uint32_t timeout_ms = 15000);
+  // 连接指定账号（阻塞，含关联+握手+DHCP，timeout_ms 单次超时）。hint 非空且
+  // valid 时固定 BSSID + 信道（快连）。
+  WifiState connect(const WifiAccount& acc, uint32_t timeout_ms = 15000,
+                    const ApHint* hint = nullptr);
+
+  // 下一次 connectMulti 先按提示快连一次（一次性；须在连接前设置）。
+  void setFastConnectHint(const ApHint& hint);
+  // 最近一次成功关联的 AP（STA_CONNECTED 事件记录；无则 valid=false）。
+  ApHint lastConnectedAp() const;
 
   // 断开并停止驱动（电池唤醒流程结束前调用）
   void powerOff();
@@ -75,6 +94,8 @@ class WifiManager {
   bool ps_enabled_ = false;
   std::string current_ssid_;
   uint8_t last_reason_ = 0;
+  ApHint fast_hint_;
+  ApHint last_ap_;
 
   EventGroupHandle_t event_group_ = nullptr;
   volatile bool connecting_ = false;

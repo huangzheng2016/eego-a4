@@ -18,7 +18,9 @@
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_heap_caps.h"
 #include "esp_sleep.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -41,7 +43,6 @@ using eego::net::NetStack;
 using eego::settings::PowerMode;
 
 constexpr uint32_t kNetBitWifi = 1u << 0;
-constexpr uint32_t kPollWaitMs = 45000;
 constexpr uint32_t kRenderThrottleMs = 250;
 constexpr int64_t kClockCheckMs = 1000;          // 状态栏分钟变化检查周期（仅分钟变化才重绘）
 constexpr int64_t kBleProvRenderMs = 10000;      // BLE 配网倒计时最快 10s 重绘一次
@@ -49,14 +50,21 @@ constexpr int64_t kDoublePressSyncMs = 1000;     // 绑定修订号复查周期
 constexpr uint32_t kNetIdleProbeMs = 100;        // 单次 waitIdle 探测超时（入队 + 等待各 ≤100ms）
 constexpr int64_t kNetIdleFirstIntervalMs = 1000;
 constexpr int64_t kNetIdleMaxIntervalMs = 5000;
-constexpr int64_t kPollIdleBudgetMs = 40000;     // 原 waitIdle(30000) + 重试 waitIdle(10000)
-constexpr int64_t kSleepIdleBudgetMs = 15000;    // 原 waitIdle(10000) + 重试 waitIdle(5000)
+// 电池定时唤醒的硬预算（自启动起）：超时即取消在途请求、渲染已有数据并深睡。
+constexpr int64_t kFastWakeBudgetMs = 20000;
+// 等 WiFi 的上限：到点仍未连上也发起取数批次（静态源/缓存仍可渲染）。
+constexpr int64_t kFastWakeWifiWaitMs = 12000;
+constexpr int64_t kInteractiveWifiWaitMs = 15000;
+// 深睡前等 net_task 静默的预算（快速路径已取消在途请求，只需很短）。
+constexpr int64_t kFastSleepIdleBudgetMs = 2000;
+constexpr int64_t kSleepIdleBudgetMs = 8000;
+// 按键唤醒：启动后这段时间内的首个按键手势是「唤醒那一下」，不执行动作。
+constexpr int64_t kWakePressGuardMs = 1500;
 constexpr size_t kSettingsRowsPerPage = static_cast<size_t>(geom::kSettingsRowsPerPage);
 constexpr int64_t kDetailCheckMs = 1000;        // 告警详情内容变化检查周期
 constexpr int64_t kOnboardingCheckMs = 2000;    // 引导页地址/WiFi 变化检查周期
 constexpr int64_t kStatusRefreshMs = 30000;     // 状态页周期重绘（年龄/运行时长）
 
-constexpr uint32_t kDashboardPollWaitMs = 130000;
 
 void localTm(const eego::settings::Settings& settings, uint64_t unix, struct tm& out) {
   const time_t local = static_cast<time_t>(static_cast<int64_t>(unix) +
@@ -87,7 +95,8 @@ int64_t PanelApp::nowMs() const { return esp_timer_get_time() / 1000; }
 void PanelApp::begin(const Deps& deps) {
   deps_ = deps;
   settings_ = eego::settings::DeviceSettings::instance().snapshot().values;
-  wakeCause_ = static_cast<int>(esp_sleep_get_wakeup_cause());
+  wakeSource_ = battery::wakeSource();
+  fastWake_ = deps.fastWake;
   settingsSubscription_ = eego::settings::DeviceSettings::instance().subscribe(
       &PanelApp::onSettingsChanged, this);
   if (settingsSubscription_ < 0) ESP_LOGW(TAG, "settings subscription table full");
@@ -102,11 +111,10 @@ void PanelApp::begin(const Deps& deps) {
 
   mains_ = computeMains();
   NetStack::instance().wifi().setPowerSave(mains_);
-  if (!mains_) {
-    battPhase_ = BattPhase::Polling;
-    cycleStartMs_ = lastBatMs_;
-    pollDeadlineMs_ = cycleStartMs_ + kPollWaitMs;
-  }
+  phaseStartMs_ = lastBatMs_;
+  wakeStartUnix_ = TimeSource::valid() ? TimeSource::now() : 0;
+  if (battery::interactiveWake(wakeSource_)) wakePressGuardUntilMs_ = lastBatMs_ + kWakePressGuardMs;
+  if (!mains_) battPhase_ = fastWake_ ? BattPhase::Fetching : BattPhase::Interactive;
 
   applySettings(eego::settings::kChangedAll);
 
@@ -121,13 +129,21 @@ void PanelApp::begin(const Deps& deps) {
   dashboard_.begin(dashboardDeps);
   if (page_ != Page::Provision) page_ = home();
   dashboardWasAvailable_ = dashboard_.available();
-  dashboard_.setMains(mains_);
+  dashboard_.setMains(dashboardLive());
   syncDoublePress(true);
 
   configureRefreshPolicy();
   refreshPolicy_.noteInteraction(nowMs());
-  ESP_LOGI(TAG, "panel begin: mains=%d lang=%s bat=%umV/%u%%", mains_ ? 1 : 0,
-           settings_.language.c_str(), batCache_.millivolts, batCache_.percent);
+  ESP_LOGI(TAG, "panel begin: mains=%d wake=%s fast=%d lang=%s bat=%umV/%u%%", mains_ ? 1 : 0,
+           battery::wakeSourceName(wakeSource_), fastWake_ ? 1 : 0, settings_.language.c_str(),
+           batCache_.millivolts, batCache_.percent);
+  if (battPhase_ == BattPhase::Interactive) enterInteractive(nowMs());
+  if (fastWake_) {
+    // 快速路径不做首帧：面板保持上一帧，取数完成后由 presentSleepFrame 决定。
+    dirty_ = false;
+    forceFull_ = false;
+    return;
+  }
   markDirty(true);
 }
 
@@ -193,9 +209,6 @@ void PanelApp::applySettings(uint32_t changed) {
   }
   if ((changed & eego::settings::kChangedSleep) != 0) {
     lastScheduleCheckMs_ = nowMs() - 1001;
-    if (battPhase_ == BattPhase::Serving && settings_.idle_sleep_s > 0) {
-      awakeDeadlineMs_ = nowMs() + static_cast<int64_t>(settings_.idle_sleep_s) * 1000;
-    }
   }
   if ((changed & eego::settings::kChangedBle) != 0) {
     eego::ble::BleManager::instance().configure(settings_);
@@ -203,7 +216,8 @@ void PanelApp::applySettings(uint32_t changed) {
   if ((changed & (eego::settings::kChangedIdleRefresh | eego::settings::kChangedTimezone)) != 0) {
     configureRefreshPolicy();
   }
-  if ((changed & (eego::settings::kChangedPower | eego::settings::kChangedBle)) != 0) {
+  if (!fastWake_ &&
+      (changed & (eego::settings::kChangedPower | eego::settings::kChangedBle)) != 0) {
     eego::ble::BleManager::instance().onPowerMode(mains_);
   }
   markDirty((changed & (eego::settings::kChangedLanguage |
@@ -219,20 +233,26 @@ void PanelApp::onSettingsChanged(const eego::settings::Settings& values, uint32_
   if (changed != 0) self->noteInteraction(self->nowMs());
 }
 
-uint64_t PanelApp::nextWakeAt(int64_t now_ms) const {
-  if (admin::ProvisionPortal::instance().apActive() ||
-      eego::ble::BleManager::instance().sleepBlocked()) {
-    return 0;
-  }
-  const uint64_t now_unix = TimeSource::now();
-  uint64_t wake_at = 0;
-  uint32_t remaining = 0;
-  if (eego::settings::scheduledSleep(settings_, now_unix, wake_at, remaining)) return wake_at;
-  if (mains_ || settings_.idle_sleep_s == 0) return 0;
-  const int64_t cycle_end = cycleStartMs_ + static_cast<int64_t>(settings_.battery_poll_s) * 1000;
-  int64_t left = cycle_end > now_ms ? cycle_end - now_ms : 0;
-  if (left < 10000) left = 10000;
-  return now_unix + static_cast<uint64_t>(left / 1000);
+battery::WakeInputs PanelApp::wakeInputs(uint64_t now_unix) const {
+  battery::WakeInputs in;
+  in.now_unix = now_unix;
+  in.tz_offset_min = settings_.timezone_offset_min;
+  in.interval_min = settings_.battery_refresh_min;
+  in.night.start_min = settings_.sleep_start_min;
+  in.night.end_min = settings_.sleep_end_min;
+  // 常供电只有夜间暂停会深睡：不按电量缩放/停止唤醒。
+  in.battery_known = !mains_ && batCache_.millivolts > 0;
+  in.battery_pct = batCache_.percent;
+  in.charging = charging_ || batCache_.charging;
+  in.consecutive_failures = battery::rtcState().consecutive_failures;
+  return in;
+}
+
+uint64_t PanelApp::plannedWakeAt() {
+  const uint64_t now_unix = TimeSource::valid() ? TimeSource::now() : 0;
+  const battery::WakePlan plan = battery::planNextWake(wakeInputs(now_unix));
+  if (mains_ && plan.kind != battery::WakeKind::NightPause) return 0;
+  return plan.wake_unix;
 }
 
 // ── 跨任务通知（短平快）─────────────────────────────────────────────────────
@@ -302,6 +322,14 @@ void PanelApp::drainAdminMailbox() {
 void PanelApp::service() {
   const int64_t now = nowMs();
 
+  if (restartRequested_) {
+    // 快速路径中有人按键：以完整应用重启（RTC 状态保持；面板不清屏）。
+    ESP_LOGI(TAG, "button during battery wake: restarting into interactive mode");
+    NetStack::instance().wifi().powerOff();
+    battery::commitRtcState();
+    esp_restart();
+  }
+
   drainAdminMailbox();
   drainNetBits();
 
@@ -333,8 +361,17 @@ void PanelApp::service() {
   }
 
   const bool wantMains = computeMains();
-  if (wantMains != mains_) onModeChange(wantMains);
-  dashboard_.service(mains_);
+  if (wantMains != mains_) {
+    if (fastWake_) {
+      // 快速路径只初始化了最小子系统：接上电源后以完整应用重启。
+      ESP_LOGI(TAG, "external power during battery wake: restarting");
+      NetStack::instance().wifi().powerOff();
+      battery::commitRtcState();
+      esp_restart();
+    }
+    onModeChange(wantMains);
+  }
+  dashboard_.service(dashboardLive());
   if (dashboard_.consumeConfigChanged()) noteInteraction(now);  // web 端应用/删除 dashboard
   // web 端应用/删除 dashboard 后 runtime 自行重载；主页随可用性在
   // Dashboard ↔ Onboarding 之间切换，依赖 dashboard 的告警详情一并退出。
@@ -368,7 +405,7 @@ void PanelApp::service() {
       pageContext() != doublePressContext_) {
     syncDoublePress(false);
   }
-  eego::ble::BleManager::instance().service(mains_);
+  if (!fastWake_) eego::ble::BleManager::instance().service(mains_);
   const eego::ble::Status ble_status = eego::ble::BleManager::instance().status();
   if (ble_status.role != eego::ble::Role::Provisioning) {
     clearBlePop();
@@ -389,17 +426,22 @@ void PanelApp::service() {
       lastBleProvRenderMs_ = now;
       markDirty();
     }
-    if (!sleepPending_ && !admin::ProvisionPortal::instance().apActive() &&
+    // 常供电的夜间暂停：窗口内深睡到窗口结束（配网/BLE 配网期间推迟）。电池模式
+    // 由唤醒计划处理（交互期超时后的深睡计划会落到窗口结束，定时唤醒同理）。
+    if (battPhase_ == BattPhase::Mains && !sleepPending_ &&
+        !admin::ProvisionPortal::instance().apActive() &&
         !eego::ble::BleManager::instance().sleepBlocked()) {
       uint64_t wake_at = 0;
       uint32_t remaining = 0;
       if (eego::settings::scheduledSleep(settings_, nowUnix(), wake_at, remaining)) {
-        enterSleep(now, static_cast<int64_t>(remaining) * 1000);
+        requestSleep(now, "night pause");
       }
     }
   }
-  batteryFsm(now);
+  batteryService(now);
   serviceSleep(now);
+  // 定时唤醒快速路径不做交互式渲染：深睡帧由 presentSleepFrame 统一决定。
+  if (battPhase_ == BattPhase::Fetching) return;
 
   if (settings_.epd_full_refresh_s > 0 &&
       now - lastFullRenderMs_ >= static_cast<int64_t>(settings_.epd_full_refresh_s) * 1000) {
@@ -414,6 +456,7 @@ void PanelApp::service() {
   if (page_ == Page::Dashboard) {
     if (dashboard_.needsRender() && displayAllowed(now)) {
       dashboard_.render();
+      displayedThisBoot_ = true;
       noteDisplayed();
       noteInputResume();
       if (forceFull_) lastFullRenderMs_ = now;
@@ -434,6 +477,7 @@ void PanelApp::service() {
 
   if (dirty_ && now - lastRenderMs_ >= kRenderThrottleMs && displayAllowed(now)) {
     render(now);
+    displayedThisBoot_ = true;
     noteDisplayed();
   }
 }
@@ -538,6 +582,18 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
     stale = buttonGestureStale_[index] || ev.timestamp_us <= 0 || now_us < ev.timestamp_us;
   }
   if (stale) return;
+  if (fastWake_) {
+    restartRequested_ = true;  // 快速路径没有完整输入/显示栈：重启进交互模式
+    return;
+  }
+  if (ev.action == eego::ButtonAction::Press && wakePressGuardUntilMs_ != 0 &&
+      now_us / 1000 < wakePressGuardUntilMs_) {
+    // 按键唤醒：唤醒的那一下（ButtonManager 启动时仍按着）只唤醒，不执行动作。
+    wakePressGuardUntilMs_ = 0;
+    buttonGestureStale_[index] = true;
+    noteInteraction(now_us / 1000);
+    return;
+  }
   lastInputMs_ = now_us / 1000;
   noteInteraction(lastInputMs_);
   const ConfirmSource source = buttonSource(ev.id);
@@ -931,8 +987,7 @@ constexpr uint8_t kBrightnessSteps[] = {10, 25, 40, 60, 80, 100};  // 含默认 
 constexpr uint8_t kWarmthSteps[] = {0, 25, 50, 75, 100};
 constexpr uint32_t kDataRefreshSteps[] = {0, 60, 300, 900, 1800, 3600};
 constexpr uint32_t kEpdFullSteps[] = {0, 3600, 21600, 86400, 604800};
-constexpr uint32_t kBatteryPollSteps[] = {300, 900, 1800, 3600, 10800, 21600};
-constexpr uint32_t kIdleSleepSteps[] = {0, 30, 60, 90, 180, 300, 600};
+constexpr uint32_t kBatteryInteractiveSteps[] = {20, 30, 60, 120, 300, 600};  // 秒
 constexpr uint32_t kIdleAfterSteps[] = {0, 1, 2, 5, 10, 15, 30, 60};  // 分钟；0 = 关闭
 constexpr uint32_t kIdleRefreshSteps[] = {2, 5, 10, 15, 30, 60};       // 分钟（整除 60）
 constexpr int kTimezoneMinMin = -720;
@@ -945,6 +1000,16 @@ struct SleepPlanPreset {
 constexpr SleepPlanPreset kSleepPlans[] = {
     {-1, -1}, {22 * 60, 6 * 60}, {23 * 60, 7 * 60}, {0, 6 * 60}, {12 * 60 + 30, 13 * 60 + 30}};
 constexpr size_t kSleepPlanCount = sizeof(kSleepPlans) / sizeof(kSleepPlans[0]);
+
+Str wakeSourceText(battery::WakeSource source) {
+  switch (source) {
+    case battery::WakeSource::Timer: return Str::WakeTimer;
+    case battery::WakeSource::PowerKey: return Str::WakeButton;
+    case battery::WakeSource::Buttons: return Str::WakeKeys;
+    case battery::WakeSource::PowerOn: return Str::WakeReset;
+    default: return Str::WakeOther;
+  }
+}
 
 // "每 N 秒/分钟/小时/天"：整除时取最大单位。
 void formatEvery(uint32_t seconds, char* out, size_t cap) {
@@ -1188,8 +1253,9 @@ bool PanelApp::settingAdjustable(SettingId id) {
     case SettingId::IdleAfter:
     case SettingId::IdleRefresh:
     case SettingId::PowerMode:
-    case SettingId::BatteryPoll:
-    case SettingId::IdleSleep:
+    case SettingId::BatteryRefresh:
+    case SettingId::BatteryMaxStale:
+    case SettingId::BatteryInteractive:
     case SettingId::SleepPlan:
     case SettingId::Diagnostics:
     case SettingId::BleObserver:
@@ -1249,11 +1315,32 @@ bool PanelApp::adjustSettingRow(SettingId id, int dir, bool coarse, bool wrap) {
       next.power_mode = stepChoice(kModes, settings_.power_mode, step, true);
       break;
     }
-    case SettingId::BatteryPoll:
-      next.battery_poll_s = stepChoice(kBatteryPollSteps, settings_.battery_poll_s, step, wrap);
+    case SettingId::BatteryRefresh:
+      next.battery_refresh_min = stepChoice(eego::settings::kBatteryRefreshChoices,
+                                            settings_.battery_refresh_min, step, wrap);
+      // 最长不刷屏不得短于唤醒间隔：随之抬到第一个合法档。
+      if (next.battery_max_stale_min < next.battery_refresh_min) {
+        for (uint32_t choice : eego::settings::kBatteryMaxStaleChoices) {
+          if (choice >= next.battery_refresh_min) {
+            next.battery_max_stale_min = choice;
+            break;
+          }
+        }
+      }
       break;
-    case SettingId::IdleSleep:
-      next.idle_sleep_s = stepChoice(kIdleSleepSteps, settings_.idle_sleep_s, step, wrap);
+    case SettingId::BatteryMaxStale: {
+      uint32_t value = settings_.battery_max_stale_min;
+      for (size_t guard = 0; guard < 8; ++guard) {
+        value = stepChoice(eego::settings::kBatteryMaxStaleChoices, value, step, wrap);
+        if (value >= settings_.battery_refresh_min) break;
+      }
+      if (value < settings_.battery_refresh_min) value = settings_.battery_max_stale_min;
+      next.battery_max_stale_min = value;
+      break;
+    }
+    case SettingId::BatteryInteractive:
+      next.battery_interactive_timeout_s = stepChoice(
+          kBatteryInteractiveSteps, settings_.battery_interactive_timeout_s, step, wrap);
       break;
     case SettingId::SleepPlan: {
       size_t idx = kSleepPlanCount;  // 自定义计划（web 设置）视为不在预设表中
@@ -1647,7 +1734,7 @@ void PanelApp::activateSettingRow(SettingId id) {
       showBanner(tr(Str::FullRefreshQueued), 3000);
       break;
     case SettingId::NextWake: {
-      const uint64_t wake = nextWakeAt(nowMs());
+      const uint64_t wake = plannedWakeAt();
       if (wake == 0) showBanner(tr(Str::NotScheduled), 3000);
       else {
         char text[32];
@@ -1657,11 +1744,7 @@ void PanelApp::activateSettingRow(SettingId id) {
       break;
     }
     case SettingId::LastWake: {
-      Str text = Str::WakeOther;
-      if (wakeCause_ == ESP_SLEEP_WAKEUP_TIMER) text = Str::WakeTimer;
-      else if (wakeCause_ == ESP_SLEEP_WAKEUP_EXT0) text = Str::WakeButton;
-      else if (wakeCause_ == ESP_SLEEP_WAKEUP_UNDEFINED) text = Str::WakeReset;
-      showBanner(tr(text), 3000);
+      showBanner(tr(wakeSourceText(wakeSource_)), 3000);
       break;
     }
     case SettingId::Storage:
@@ -1709,7 +1792,7 @@ void PanelApp::doOpenRecovery() {
     showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), esp_err_to_name(err));
     return;
   }
-  awakeDeadlineMs_ = nowMs() + 600000;
+  noteInteraction(nowMs());  // 电池交互期：恢复热点开启期间不会深睡
   showBanner(tr(Str::RecoveryApStarted), 7000);
   markDirty(true);
 }
@@ -1747,7 +1830,7 @@ void PanelApp::doStartBleProvision() {
     }
   }
   lastBleProvRenderMs_ = nowMs();
-  awakeDeadlineMs_ = nowMs() + 180000;
+  noteInteraction(nowMs());
   showBanner(tr(Str::BleProvStarted), 7000);
   markDirty(true);
 }
@@ -2019,45 +2102,39 @@ void PanelApp::showBannerFmt(uint32_t ms, const char* fmt, ...) {
 // ── 电源模式 ────────────────────────────────────────────────────────────────
 
 bool PanelApp::computeMains() {
-  switch (settings_.power_mode) {
-    case PowerMode::Mains:
-      return true;
-    case PowerMode::Battery:
-      return false;
-    default:
-      // 无电池读数（台式/未装电池）视为常供电，避免误判进休眠
-      if (batCache_.millivolts == 0) return true;
-      return charging_ || batCache_.charging;
-  }
+  return battery::mainsPowered(static_cast<uint8_t>(settings_.power_mode),
+                               charging_ || batCache_.charging, batCache_.millivolts);
 }
 
 void PanelApp::onModeChange(bool mains) {
   mains_ = mains;
   configureRefreshPolicy();          // 电池模式不做空闲合并
   noteInteraction(nowMs());          // 插拔电源视为一次交互
-  dashboard_.setMains(mains);
   ESP_LOGI(TAG, "power mode -> %s", mains ? "mains" : "battery");
   NetStack::instance().wifi().setPowerSave(mains);  // 常供电 modem-sleep
   eego::ble::BleManager::instance().onPowerMode(mains);
   eego::ble::BleManager::instance().setBatteryScanWindow(false);
-  pollIdleWait_.active = false;
-  if (mains && sleepPending_ && !sleepScheduled_) {
-    sleepPending_ = false;  // 常供电不再走空闲休眠
-    sleepIdleWait_.active = false;
-  }
   if (mains) {
     battPhase_ = BattPhase::Mains;
-    batteryPollStarted_ = false;
+    // 常供电不再走电池深睡（夜间暂停仍由 service() 的窗口检查发起）。
+    sleepPending_ = false;
+    sleepIdleWait_.active = false;
     NetStack::instance().reconnectNow();
   } else {
-    battPhase_ = BattPhase::Polling;
-    batteryPollStarted_ = false;
-    cycleStartMs_ = nowMs();
-    pollDeadlineMs_ = cycleStartMs_ + kPollWaitMs;
-    showBanner(tr(Str::Polling), 5000);
-    NetStack::instance().reconnectNow();
+    enterInteractive(nowMs());  // 拔电时用户就在旁边：先保持交互，超时后对齐深睡
   }
+  dashboard_.setMains(dashboardLive());
   markDirty(true);
+}
+
+void PanelApp::enterInteractive(int64_t now) {
+  battPhase_ = BattPhase::Interactive;
+  phaseStartMs_ = now;
+  batchStarted_ = false;
+  noteInteraction(now);
+  dashboard_.setBatteryStatus("");
+  // BLE 被动扫描：电池模式每个交互窗口最多扫一轮（与旧 Serving 窗口一致）。
+  eego::ble::BleManager::instance().setBatteryScanWindow(true);
 }
 
 void PanelApp::startNetIdleWait(NetIdleWait& w, int64_t now, int64_t budgetMs) {
@@ -2086,186 +2163,324 @@ int PanelApp::pollNetIdle(NetIdleWait& w, int64_t now) {
   return 0;
 }
 
-void PanelApp::batteryFsm(int64_t now) {
-  if (admin::ProvisionPortal::instance().apActive() ||
-      eego::ble::BleManager::instance().provisioningActive()) {
-    if (battPhase_ == BattPhase::Serving) awakeDeadlineMs_ = now + 60000;
-    return;
-  }
+void PanelApp::batteryService(int64_t now) {
+  if (sleepPending_) return;
+  const bool wifi_up = wifiState_.load() == 2 /*Connected*/;
+  if (wifi_up) wifiSeen_ = true;
   switch (battPhase_) {
     case BattPhase::Mains:
       return;
-    case BattPhase::Polling: {
-      if (!batteryPollStarted_) {
-        if (wifiState_.load() == 2 /*Connected*/ || now > pollDeadlineMs_) {
-          ESP_LOGI(TAG, "battery poll cycle: refresh dashboard sources");
-          dashboard_.pollBattery();
-          batteryPollStarted_ = true;
-          pollIdleWait_.active = false;
-          pollDeadlineMs_ = now + kDashboardPollWaitMs;
-          markDirty(true);
-        }
+    case BattPhase::Fetching: {
+      // 定时唤醒：一批拉取全部到期源，硬预算 kFastWakeBudgetMs（自启动起），到点
+      // 无论结果如何都渲染已有数据并深睡。
+      if (!dashboard_.available()) {
+        requestSleep(now, "no dashboard");
         return;
       }
-
-      if (!pollIdleWait_.active) {
-        const bool dashboard_idle = dashboard_.networkIdle();
-        if (!dashboard_idle && now <= pollDeadlineMs_) return;
-        if (!dashboard_idle) {
-          ESP_LOGW(TAG, "battery poll: dashboard still busy, serving cached data");
+      if (!batchStarted_) {
+        const bool wifi_gave_up = wifiState_.load() == 4 /*OfflineMode*/;
+        if (wifi_up || wifi_gave_up || now >= kFastWakeWifiWaitMs) {
+          dashboard_.pollBattery(std::max<int64_t>(1000, kFastWakeBudgetMs - now));
+          batchStarted_ = true;
+          ESP_LOGI(TAG, "battery wake: fetch batch started (wifi=%d, t=%lldms)", wifi_up ? 1 : 0,
+                   static_cast<long long>(now));
         }
-        // 非阻塞等待 net_task 静默（预算 = 原 30s + 重试 10s），app_task 期间照常
-        // 处理输入与渲染。
-        startNetIdleWait(pollIdleWait_, now, kPollIdleBudgetMs);
+        if (now < kFastWakeBudgetMs) return;
       }
-      const int idle = pollNetIdle(pollIdleWait_, now);
-      if (idle == 0) return;
-      if (idle < 0) {
-        ESP_LOGW(TAG, "battery poll: net still not idle, serving with current data");
+      if (dashboard_.networkIdle()) {
+        requestSleep(now, "batch complete");
+      } else if (now >= kFastWakeBudgetMs) {
+        requestSleep(now, "wake budget exhausted");
       }
-      battPhase_ = BattPhase::Serving;
-      eego::ble::BleManager::instance().setBatteryScanWindow(true);
-      awakeDeadlineMs_ = now + static_cast<int64_t>(settings_.idle_sleep_s) * 1000;
-      markDirty(true);
       return;
     }
-    case BattPhase::Serving: {
-      if (settings_.idle_sleep_s == 0) return;
-      const int64_t idleMs = static_cast<int64_t>(settings_.idle_sleep_s) * 1000;
-      const int64_t hardCapMs = cycleStartMs_ + 600000;
-      if (now - lastInputMs_ < 15000 && now < hardCapMs) {
-        awakeDeadlineMs_ = now + idleMs;
-        if (awakeDeadlineMs_ > hardCapMs) awakeDeadlineMs_ = hardCapMs;
+    case BattPhase::Interactive: {
+      // 配网门户/恢复热点/BLE 配网期间不睡（用户正在用手机操作）。
+      if (admin::ProvisionPortal::instance().apActive() ||
+          eego::ble::BleManager::instance().sleepBlocked()) {
+        noteInteraction(now);
+        return;
       }
-      if (now > awakeDeadlineMs_) enterSleep(now);
+      if (!batchStarted_ && (wifi_up || now - phaseStartMs_ >= kInteractiveWifiWaitMs)) {
+        // 交互期 dashboard 按常供电节奏自行拉取；这里只记录批次起点用于失败计数。
+        batchStarted_ = true;
+      }
+      // 管理后台的已认证请求同样算「有人在用」（浏览 web 端时不深睡）。
+      const int64_t last = std::max(refreshPolicy_.lastInteractionMs(),
+                                    admin::lastAuthenticatedRequestMs());
+      if (now - last >= static_cast<int64_t>(settings_.battery_interactive_timeout_s) * 1000) {
+        requestSleep(now, "interactive timeout");
+      }
       return;
     }
   }
 }
 
-void PanelApp::deferSleep(int64_t now) {
-  sleepPending_ = false;
-  sleepIdleWait_.active = false;
-  battPhase_ = mains_ ? BattPhase::Mains : BattPhase::Serving;
-  awakeDeadlineMs_ = now + 30000;
-  lastScheduleCheckMs_ = now + 30000;
-  if (eego::FrontlightManager::instance().frontlightAvailable()) {
-    applySettings(eego::settings::kChangedFrontlight);
-  }
-  markDirty();
-}
-
-void PanelApp::enterSleep(int64_t now, int64_t durationMs) {
-  if (sleepPending_) return;  // 已在等待网络静默
-  ESP_LOGI(TAG, "sleep requested");
-  if (!dashboard_.networkIdle()) {
-    ESP_LOGW(TAG, "battery: dashboard work pending, sleep deferred");
-    deferSleep(now);
-    return;
-  }
-  // 1. 网络静默（非阻塞；预算 = 原 10s + 重试 5s；超时则中止本次休眠回 Serving，
-  //    30s 后重试——绝不带在途 HTTP 传输断电 WiFi）
+void PanelApp::requestSleep(int64_t now, const char* why) {
+  if (sleepPending_) return;
+  ESP_LOGI(TAG, "sleep requested: %s", why);
   sleepPending_ = true;
-  sleepScheduled_ = durationMs >= 0;
   sleepRequestedMs_ = now;
-  sleepDurationMs_ = durationMs;
-  startNetIdleWait(sleepIdleWait_, now, kSleepIdleBudgetMs);
-  serviceSleep(now);
+  // 停止取数：在途请求被取消，后续 tick 不再发起新请求（深睡前不带 HTTP 断电）。
+  dashboard_.cancelBatteryCycle();
+  startNetIdleWait(sleepIdleWait_, now, fastWake_ ? kFastSleepIdleBudgetMs : kSleepIdleBudgetMs);
 }
 
 void PanelApp::serviceSleep(int64_t now) {
   if (!sleepPending_) return;
-  // 电池交互窗口内（硬上限前）有新输入 → 取消本次空闲休眠，回 Serving 续期。
-  if (!sleepScheduled_ && lastInputMs_ > sleepRequestedMs_ &&
-      now < cycleStartMs_ + 600000) {
+  // 交互期内有新输入/管理请求 → 取消本次休眠（常供电夜间暂停/定时唤醒不受影响）。
+  if (battPhase_ == BattPhase::Interactive &&
+      std::max(refreshPolicy_.lastInteractionMs(), admin::lastAuthenticatedRequestMs()) >
+          sleepRequestedMs_) {
     ESP_LOGI(TAG, "sleep cancelled by input");
     sleepPending_ = false;
     sleepIdleWait_.active = false;
-    if (battPhase_ == BattPhase::Serving && settings_.idle_sleep_s > 0) {
-      awakeDeadlineMs_ = now + static_cast<int64_t>(settings_.idle_sleep_s) * 1000;
-    }
+    dashboard_.setMains(dashboardLive());  // 恢复取数
     return;
   }
   if (admin::ProvisionPortal::instance().apActive() ||
       eego::ble::BleManager::instance().provisioningActive()) {
-    ESP_LOGW(TAG, "recovery/provisioning became active, sleep deferred");
-    deferSleep(now);
+    ESP_LOGW(TAG, "recovery/provisioning active, sleep postponed");
+    sleepPending_ = false;
+    sleepIdleWait_.active = false;
+    lastScheduleCheckMs_ = now + 30000;
+    dashboard_.setMains(dashboardLive());
     return;
   }
   const int idle = pollNetIdle(sleepIdleWait_, now);
   if (idle == 0) return;
-  if (idle < 0) {
-    ESP_LOGW(TAG, "net not idle after retries, sleep aborted this round");
-    deferSleep(now);
-    return;
-  }
-  if (!dashboard_.networkIdle()) {
-    ESP_LOGW(TAG, "battery: dashboard work started while waiting, sleep deferred");
-    deferSleep(now);
-    return;
-  }
-  int64_t sleepMs = sleepDurationMs_;
-  if (sleepMs < 0) {
-    sleepMs = cycleStartMs_ + static_cast<int64_t>(settings_.battery_poll_s) * 1000 - now;
-  } else {
-    sleepMs -= now - sleepRequestedMs_;  // 计划睡眠：扣除等待静默耗时
-  }
-  sleepPending_ = false;
-  finishSleep(now, sleepMs);
+  if (idle < 0) ESP_LOGW(TAG, "net not idle within budget; sleeping anyway");
+  sleepNow();
 }
 
-void PanelApp::finishSleep(int64_t now, int64_t sleepMs) {
-  (void)now;
-  if (sleepMs < 10000) sleepMs = 10000;
-  if (eego::ble::BleManager::instance().beforeSleep() != ESP_OK) {
-    ESP_LOGW(TAG, "BLE stop failed; sleep aborted this round");
-    deferSleep(nowMs());
-    return;
+bool PanelApp::batchSucceeded() const {
+  if (!wifiSeen_) return false;
+  const int64_t since_ms = static_cast<int64_t>(wakeStartUnix_) * 1000;
+  size_t enabled = 0;
+  for (const DashboardSourceInfo& source : dashboard_.sources()) {
+    if (!source.enabled) continue;
+    ++enabled;
+    if (source.last_success_ms > 0 && source.last_success_ms >= since_ms) return true;
   }
-  ESP_LOGI(TAG, "entering deep sleep");
+  return enabled == 0;
+}
+
+void PanelApp::sleepNow() {
+  battery::RtcState& rtc = battery::rtcState();
+  charging_ = eego::PowerManager::instance().isCharging();
+  batCache_ = eego::PowerManager::instance().readBattery();
+  const uint64_t now_unix = TimeSource::valid() ? TimeSource::now() : 0;
+
+  // 失败退避：只有电池取数批次计数（夜间暂停/常供电不计）。
+  if (!mains_ && batchStarted_) {
+    if (batchSucceeded()) {
+      rtc.consecutive_failures = 0;
+      rtc.last_data_unix = now_unix;
+    } else if (rtc.consecutive_failures < 16) {
+      ++rtc.consecutive_failures;
+    }
+  }
+  const battery::WakePlan plan = battery::planNextWake(wakeInputs(now_unix));
+
+  // 无线先关（刷屏的数秒内 WiFi 不再耗电）；记录本次关联的 AP 供下次快连。
+  if (!fastWake_ && eego::ble::BleManager::instance().beforeSleep() != ESP_OK) {
+    ESP_LOGW(TAG, "BLE stop failed; deep sleep powers the radio down anyway");
+  }
   eego::FrontlightManager::instance().off();
+  const eego::net::ApHint ap = NetStack::instance().wifi().lastConnectedAp();
+  if (ap.valid) {
+    rtc.ap_valid = 1;
+    rtc.ap_channel = ap.channel;
+    memcpy(rtc.ap_bssid, ap.bssid, sizeof(rtc.ap_bssid));
+    snprintf(rtc.ap_ssid, sizeof(rtc.ap_ssid), "%s", ap.ssid.c_str());
+  } else if (fastWake_) {
+    rtc.ap_valid = 0;  // 提示没能连上：下次走常规扫描
+  }
   NetStack::instance().wifi().powerOff();
 
-  if (deps_.boot.displayReady && deps_.canvas != nullptr) {
-    eego::PortraitCanvas& c = *deps_.canvas;
-    c.clear();
-    c.useUiContentRect();
-    char wake[48];
-    const uint64_t wakeTs = nowUnix() + static_cast<uint64_t>(sleepMs / 1000);
-    struct tm tm_buf;
-    localTm(settings_, wakeTs, tm_buf);
-    snprintf(wake, sizeof(wake), "%02d-%02d %02d:%02d", tm_buf.tm_mon + 1, tm_buf.tm_mday,
-             tm_buf.tm_hour, tm_buf.tm_min);
-    // 标题 + 三行说明，整体在内容区垂直居中，左对齐于 kInnerX。
-    const int16_t titleLh = lineHeight(style::kTitle.scale);
-    const int16_t captionLh = lineHeight(style::kCaption.scale);
-    const int16_t blockH = static_cast<int16_t>(titleLh + 8 + 3 * captionLh);
-    int16_t y = static_cast<int16_t>((geom::kContentTop + geom::kContentBottom - blockH) / 2);
-    drawTextFit(c, geom::kInnerX, y, geom::kInnerW, tr(Str::Sleeping), style::kTitle.scale,
-                style::kTitle.bold, style::kTitle.gray);
-    y = static_cast<int16_t>(y + titleLh + 8);
-    drawTextFit(c, geom::kInnerX, y, geom::kInnerW, tr(Str::WakeHint), style::kCaption.scale,
-                style::kCaption.bold, style::kCaption.gray);
+  presentSleepFrame(plan, now_unix);
+
+  rtc.last_wake_unix = now_unix;
+  ++rtc.wakes;
+  battery::commitRtcState();
+  if (deps_.boot.displayReady && deps_.display != nullptr) deps_.display->deepSleep();
+
+  ESP_LOGI(TAG, "deep sleep: kind=%d interval=%umin wake=%llu failures=%u",
+           static_cast<int>(plan.kind), static_cast<unsigned>(plan.interval_min),
+           static_cast<unsigned long long>(plan.wake_unix),
+           static_cast<unsigned>(rtc.consecutive_failures));
+  // 电量过低：只留电源键（↑/↓ 误触会反复耗电）；其余情况电源键 + ↑/↓。
+  battery::deepSleep(plan.sleep_s, plan.kind != battery::WakeKind::CriticalBattery);
+}
+
+uint64_t PanelApp::frameHash() const {
+  const eego::Uc8279cDisplay& d = *deps_.display;
+  uint64_t h = battery::fnv1a64(d.framebuffer(), eego::FRAMEBUFFER_SIZE);
+  if (d.hasGrayContent() && d.grayMsbPlane() != nullptr && d.grayLsbPlane() != nullptr) {
+    h = battery::fnv1a64(d.grayMsbPlane(), eego::FRAMEBUFFER_SIZE, h);
+    h = battery::fnv1a64(d.grayLsbPlane(), eego::FRAMEBUFFER_SIZE, h);
+  }
+  return h;
+}
+
+std::string PanelApp::batteryStatusText(uint8_t bucket, uint64_t stamp,
+                                        uint32_t interval_min) const {
+  char buf[96];
+  if (stamp < battery::kMinValidUnix) {
+    snprintf(buf, sizeof(buf), tr(Str::BatStatusNoClockFmt), static_cast<unsigned>(bucket));
+    return buf;
+  }
+  battery::NightWindow night{settings_.sleep_start_min, settings_.sleep_end_min};
+  const uint64_t deadline =
+      battery::refreshDeadline(stamp, settings_.battery_max_stale_min,
+                               settings_.timezone_offset_min, interval_min, night);
+  int uh = 0;
+  int um = 0;
+  int dh = 0;
+  int dm = 0;
+  battery::localHourMinute(stamp, settings_.timezone_offset_min, uh, um);
+  battery::localHourMinute(deadline, settings_.timezone_offset_min, dh, dm);
+  snprintf(buf, sizeof(buf), tr(Str::BatStatusFmt), static_cast<unsigned>(bucket), uh, um, dh, dm);
+  return buf;
+}
+
+std::string PanelApp::nightPauseText(uint64_t resume_unix) const {
+  char buf[64];
+  int h = 0;
+  int m = 0;
+  battery::localHourMinute(resume_unix, settings_.timezone_offset_min, h, m);
+  snprintf(buf, sizeof(buf), tr(Str::NightPauseFmt), h, m);
+  return buf;
+}
+
+void PanelApp::drawNotice(const char* title, const char* line1, const char* line2,
+                          const char* line3) {
+  eego::PortraitCanvas& c = *deps_.canvas;
+  c.clear();
+  c.useUiContentRect();
+  // 标题 + 三行说明，整体在内容区垂直居中，左对齐于 kInnerX。
+  const int16_t titleLh = lineHeight(style::kTitle.scale);
+  const int16_t captionLh = lineHeight(style::kCaption.scale);
+  const int16_t blockH = static_cast<int16_t>(titleLh + 8 + 3 * captionLh);
+  int16_t y = static_cast<int16_t>((geom::kContentTop + geom::kContentBottom - blockH) / 2);
+  drawTextFit(c, geom::kInnerX, y, geom::kInnerW, title, style::kTitle.scale, style::kTitle.bold,
+              style::kTitle.gray);
+  y = static_cast<int16_t>(y + titleLh + 8);
+  for (const char* line : {line1, line2, line3}) {
+    if (line != nullptr && line[0] != '\0') {
+      drawTextFit(c, geom::kInnerX, y, geom::kInnerW, line, style::kCaption.scale,
+                  style::kCaption.bold, style::kCaption.gray);
+    }
     y = static_cast<int16_t>(y + captionLh);
-    drawTextFit(c, geom::kInnerX, y, geom::kInnerW, wake, style::kCaption.scale,
-                style::kCaption.bold, style::kCaption.gray);
-    y = static_cast<int16_t>(y + captionLh);
-    drawTextFit(c, geom::kInnerX, y, geom::kInnerW, tr(Str::DeepSleepOffline),
-                style::kCaption.scale, style::kCaption.bold, style::kCaption.gray);
-    c.requestFullRefresh();
-    c.display(eego::RefreshMode::Full);
-    c.waitRefreshComplete();
-    if (deps_.display != nullptr) deps_.display->deepSleep();
+  }
+  c.resetClip();
+}
+
+void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_unix) {
+  if (!deps_.boot.displayReady || deps_.canvas == nullptr || deps_.display == nullptr) return;
+  battery::RtcState& rtc = battery::rtcState();
+  battery::FrameRecord& rec = rtc.frame;
+  const bool critical = plan.kind == battery::WakeKind::CriticalBattery;
+  const bool night = plan.kind == battery::WakeKind::NightPause;
+  // 面板内容是否就是 rec 记录的帧：只有快速路径能保证（交互期刷过别的画面）。
+  const bool panel_known = fastWake_ && rec.valid != 0;
+  const uint32_t interval = plan.interval_min != 0 ? plan.interval_min : settings_.battery_refresh_min;
+  const uint8_t bucket = battery::batteryDisplayBucket(batCache_.percent, rtc.battery_bucket);
+  // 「更新于」：定时唤醒记为名义边界（吸收提前醒），其余记为当前分钟。
+  const uint64_t slot =
+      now_unix < battery::kMinValidUnix ? 0
+      : fastWake_ ? battery::nominalSlot(now_unix, settings_.timezone_offset_min, interval)
+                  : now_unix - now_unix % 60;
+
+  bool skip = false;
+  uint64_t hash = 0;
+  if (critical) {
+    char title[48];
+    char last[64];
+    char when[24];
+    snprintf(title, sizeof(title), tr(Str::LowBatteryTitle),
+             static_cast<unsigned>(batCache_.percent));
+    formatTs(rec.refresh_unix, when, sizeof(when));
+    snprintf(last, sizeof(last), tr(Str::LastDataFmt), when);
+    drawNotice(title, tr(Str::LowBatteryHint), last, tr(Str::WakeHint));
+    hash = frameHash();
+    skip = panel_known && rtc.low_battery_shown != 0 && hash == rec.hash;
+  } else if (dashboard_.available()) {
+    if (!fastWake_) {
+      // 交互期画面任意：回到 dashboard 主页并整帧重画。
+      page_ = Page::Dashboard;
+      dashboard_.home();
+      deps_.canvas->clear();
+      dashboard_.invalidateAll();
+    }
+    if (night) {
+      dashboard_.setBatteryStatus(nightPauseText(plan.wake_unix));
+      dashboard_.renderOffscreen();
+      hash = frameHash();
+      skip = panel_known && hash == rec.hash;
+    } else if (mains_) {
+      dashboard_.setBatteryStatus("");
+      dashboard_.renderOffscreen();
+      hash = frameHash();
+    } else {
+      // 先按上次的「更新于」渲染：数据不变 ⇒ 帧完全相同 ⇒ 不刷屏（时钟不会逼出刷新）。
+      if (panel_known) {
+        dashboard_.setBatteryStatus(batteryStatusText(bucket, rec.refresh_unix, interval));
+        dashboard_.renderOffscreen();
+        hash = frameHash();
+        skip = hash == rec.hash && !battery::frameStale(rec, now_unix, settings_.battery_max_stale_min);
+      }
+      if (!skip) {
+        dashboard_.setBatteryStatus(batteryStatusText(bucket, slot, interval));
+        dashboard_.renderOffscreen();
+        hash = frameHash();
+      }
+    }
+  } else {
+    // 未配置 dashboard：引导页上的地址深睡期间不可用，换成说明页。
+    drawNotice(tr(Str::Sleeping), tr(Str::WakeHint), "", tr(Str::DeepSleepOffline));
+    hash = frameHash();
+    skip = panel_known && hash == rec.hash;
+  }
+  if (skip) {
+    ESP_LOGI(TAG, "sleep frame unchanged: panel untouched");
+    return;
   }
 
-  gpio_hold_en(static_cast<gpio_num_t>(eego::POWER_LATCH));
-  gpio_deep_sleep_hold_en();
-  esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(sleepMs) * 1000ULL);
-  esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(eego::BUTTON_POWER), 1);
+  // 刷新方式：快速路径需把 SD 上的上一帧预载进 DTM1 才能 Fast；交互期控制器
+  // 本就持有当前面板内容（本次启动刷过屏）。
+  uint8_t* previous = nullptr;
+  bool previous_loaded = false;
+  if (fastWake_) {
+    if (rec.valid != 0) {
+      previous = static_cast<uint8_t*>(
+          heap_caps_malloc(eego::FRAMEBUFFER_SIZE, MALLOC_CAP_SPIRAM));
+      previous_loaded = previous != nullptr &&
+                        battery::loadStoredFrame(previous, eego::FRAMEBUFFER_SIZE, rec.hash);
+    }
+  } else {
+    previous_loaded = displayedThisBoot_;
+  }
+  const battery::RefreshAction action =
+      battery::refreshMode(rec, now_unix, previous_loaded, critical);
+  if (action == battery::RefreshAction::Fast && previous_loaded && previous != nullptr) {
+    deps_.display->setPreviousFrame(previous);
+  }
+  const bool full = action == battery::RefreshAction::Full;
+  ESP_LOGI(TAG, "sleep frame: %s refresh (fast_since_full=%u, previous=%d)",
+           full ? "full" : "fast", static_cast<unsigned>(rec.fast_since_full),
+           previous_loaded ? 1 : 0);
+  if (full) deps_.canvas->requestFullRefresh();
+  deps_.canvas->display(full ? eego::RefreshMode::Full : eego::RefreshMode::Fast);
+  deps_.canvas->waitRefreshComplete();
+  free(previous);
 
-  ESP_LOGI(TAG, "deep sleep %lld ms (timer + power key)", static_cast<long long>(sleepMs));
-  esp_deep_sleep_start();
-  __builtin_unreachable();
+  battery::noteRefreshed(rec, action, hash, slot, now_unix);
+  rtc.battery_bucket = static_cast<int16_t>(bucket);
+  rtc.low_battery_shown = critical ? 1 : 0;
+  if (!battery::storeFrame(deps_.display->framebuffer(), eego::FRAMEBUFFER_SIZE, hash)) {
+    ESP_LOGW(TAG, "frame not stored: next wake uses a full refresh");
+  }
 }
 
 // ── 配网窗口 ────────────────────────────────────────────────────────────────
@@ -3042,19 +3257,21 @@ void PanelApp::buildS4(S4Model& m) {
                    : settings_.power_mode == PowerMode::Battery ? Str::ModeBattery
                                                                 : Str::ModeAuto);
         break;
-      case SettingId::BatteryPoll:
-        label = Str::SetBatteryPoll;
-        formatEvery(settings_.battery_poll_s, buf, sizeof(buf));
+      case SettingId::BatteryRefresh:
+        label = Str::SetBatteryRefresh;
+        formatEvery(settings_.battery_refresh_min * 60, buf, sizeof(buf));
         value = buf;
         break;
-      case SettingId::IdleSleep:
-        label = Str::SetIdleSleep;
-        if (settings_.idle_sleep_s == 0) {
-          value = tr(Str::Off);
-        } else {
-          formatEvery(settings_.idle_sleep_s, buf, sizeof(buf));
-          value = buf;
-        }
+      case SettingId::BatteryMaxStale:
+        label = Str::SetBatteryMaxStale;
+        formatEvery(settings_.battery_max_stale_min * 60, buf, sizeof(buf));
+        value = buf;
+        break;
+      case SettingId::BatteryInteractive:
+        label = Str::SetBatteryInteractive;
+        snprintf(buf, sizeof(buf), tr(Str::TimeoutSecFmt),
+                 static_cast<unsigned>(settings_.battery_interactive_timeout_s));
+        value = buf;
         break;
       case SettingId::SleepPlan:
         label = Str::SetSleepPlan;
@@ -3069,7 +3286,7 @@ void PanelApp::buildS4(S4Model& m) {
         break;
       case SettingId::NextWake: {
         label = Str::SetNextWake;
-        const uint64_t wake = nextWakeAt(nowMs());
+        const uint64_t wake = plannedWakeAt();
         if (wake == 0) {
           value = tr(Str::NotScheduled);
         } else {
@@ -3080,11 +3297,7 @@ void PanelApp::buildS4(S4Model& m) {
       }
       case SettingId::LastWake: {
         label = Str::SetLastWake;
-        Str wake_reason = Str::WakeOther;
-        if (wakeCause_ == ESP_SLEEP_WAKEUP_TIMER) wake_reason = Str::WakeTimer;
-        else if (wakeCause_ == ESP_SLEEP_WAKEUP_EXT0) wake_reason = Str::WakeButton;
-        else if (wakeCause_ == ESP_SLEEP_WAKEUP_UNDEFINED) wake_reason = Str::WakeReset;
-        value = tr(wake_reason);
+        value = tr(wakeSourceText(wakeSource_));
         break;
       }
       case SettingId::Storage:

@@ -57,6 +57,7 @@ set(FW_SOURCES
   ${C}/admin/src/probe_mask.cpp
   ${C}/admin/src/input_binding_model.cpp
   ${FW_ROOT}/main/refresh_policy.cpp
+  ${FW_ROOT}/main/battery_policy.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs/net_request_host.cpp
 )
 add_library(fw_under_test STATIC ${FW_SOURCES})
@@ -72,13 +73,13 @@ target_include_directories(fw_under_test PUBLIC
   ${C}/admin/include
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs
 )
-# Pure-logic main/ units (refresh_policy) are compiled without the rest of main/.
+# Pure-logic main/ units (refresh_policy, battery_policy) are compiled without the rest of main/.
 target_include_directories(fw_under_test PRIVATE ${FW_ROOT}/main)
 target_compile_options(fw_under_test PRIVATE ${HT_WARN} ${HT_SAN})
 target_link_options(fw_under_test PUBLIC ${HT_SAN})
 
 set(TEST_SUITES dashboard layout expression pipeline gesture settings probe_mask alert_store atomic_file
-    refresh_policy)
+    refresh_policy battery_policy)
 add_executable(firmware_host_tests
   test_main.cpp
   test_dashboard.cpp
@@ -91,6 +92,7 @@ add_executable(firmware_host_tests
   test_alert_store.cpp
   test_atomic_file.cpp
   test_refresh_policy.cpp
+  test_battery_policy.cpp
 )
 target_include_directories(firmware_host_tests PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}

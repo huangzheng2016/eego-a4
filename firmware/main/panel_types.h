@@ -47,9 +47,11 @@ enum class SettingId : uint8_t {
   EpdNow,
   IdleAfter,    // 空闲判定：无交互多少分钟后进入空闲刷新节奏（0 = 关闭）
   IdleRefresh,  // 空闲刷新间隔：空闲时按本地墙钟整 N 分钟边界合并刷新
+  // 电池组：供电模式 → 电池唤醒间隔 → 最长不刷屏 → 交互超时 → 夜间暂停 → 下次唤醒/唤醒方式
   PowerMode,
-  BatteryPoll,
-  IdleSleep,
+  BatteryRefresh,
+  BatteryMaxStale,
+  BatteryInteractive,
   SleepPlan,
   NextWake,
   LastWake,
@@ -87,11 +89,11 @@ constexpr bool requiresPhysicalConfirm(ConfirmKind kind) {
          kind == ConfirmKind::BleUnbind;
 }
 
-// 电池模式阶段机。
+// 电池模式阶段机（README「电池模式」）。
 enum class BattPhase : uint8_t {
-  Mains = 0,  // 非常供电模式（FSM 不动作）
-  Polling,    // 重连 + 等待连接/超时 → 触发全源轮询
-  Serving,    // 交互窗口（输入延长，到点休眠）
+  Mains = 0,    // 常供电（不深睡；夜间暂停除外）
+  Fetching,     // 定时唤醒快速路径：WiFi 快连 → 一批取数（硬预算）→ 渲染/判定 → 深睡
+  Interactive,  // 按键/上电唤醒：完整应用（WiFi、管理 API）；无操作超时后深睡
 };
 
 }  // namespace panel

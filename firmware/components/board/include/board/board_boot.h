@@ -38,9 +38,20 @@ struct BootStatus {
     bool displayReady = false;     // UC8279C 初始化成功
 };
 
+// 启动变体（顺序合同不变，只跳过步骤）：
+//   * touch=false        跳过 GSLX680 固件上传（电池定时唤醒不处理触控，省 ~1 s I²C）；
+//   * clearDisplay=false 不做开机白屏 Full（深睡唤醒：面板保留上一帧）；
+//   * deferDisplay=true  控制器上电推迟到第一次刷新（见 Uc8279cDisplay::begin）。
+struct BootOptions {
+    bool touch = true;
+    bool clearDisplay = true;
+    bool deferDisplay = false;
+};
+
 // 按上述合同顺序初始化全部板级硬件并返回各项状态。
 // display / touch 由调用方持有（通常 app_main 的静态对象），本函数不接管所有权。
-BootStatus beginStandardHardware(Uc8279cDisplay& display, Gslx680Touch& touch);
+BootStatus beginStandardHardware(Uc8279cDisplay& display, Gslx680Touch& touch,
+                                 const BootOptions& options = BootOptions{});
 
 }  // namespace board
 }  // namespace eego

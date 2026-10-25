@@ -81,7 +81,7 @@ esp_err_t Uc8279cDisplay::beginOffscreen() {
     return ESP_OK;
 }
 
-esp_err_t Uc8279cDisplay::begin() {
+esp_err_t Uc8279cDisplay::begin(bool deferController) {
     if (offscreen_) return ESP_ERR_INVALID_STATE;
     // 诊断 PSRAM
     size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
@@ -113,6 +113,18 @@ esp_err_t Uc8279cDisplay::begin() {
     }
     ESP_LOGI(TAG_UC, "spi_ handle = %p", spi_);
 
+    if (deferController) {
+        // 电池定时唤醒：面板仍显示上一帧（墨水屏双稳态），控制器保持断电/深睡，
+        // 直到真正需要刷新时（display/displayGray）才上电初始化——帧不变则从不上电。
+        controllerPending_ = true;
+        fastRefreshesSinceFull_ = 0;
+        return ESP_OK;
+    }
+    powerUpController();
+    return ESP_OK;
+}
+
+void Uc8279cDisplay::powerUpController() {
     // 电源时序: POWER_ENABLE 拉高 → 等 100ms → RST 时序
     gpio_set_level(gn(EPD_POWER_ENABLE), 1);
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -120,8 +132,11 @@ esp_err_t Uc8279cDisplay::begin() {
 
     initController();
     fastRefreshesSinceFull_ = 0;
+    controllerPending_ = false;
+}
 
-    return ESP_OK;
+void Uc8279cDisplay::ensureController() {
+    if (controllerPending_) powerUpController();
 }
 
 void Uc8279cDisplay::end() {
@@ -362,6 +377,7 @@ bool Uc8279cDisplay::refresh(bool turnOff) {
 
 void Uc8279cDisplay::display(RefreshMode mode, bool turnOff) {
     if (offscreen_) return;  // 离屏实例没有面板
+    ensureController();
     // 仅在控制器仍忙时等待（阻塞刷新返回时已空闲，避免每帧白等 settle 窗口）
     waitIfBusy("pre-wait");
     const bool off = turnOff || autoPowerOff_;
@@ -373,10 +389,12 @@ void Uc8279cDisplay::display(RefreshMode mode, bool turnOff) {
     fullRequested_ = false;
     // 灰阶波形只用于 Full：Fast 请求一律走 B/W 快刷（fb_ 已是灰度的阈值版本）
     if (full && hasGrayContent()) {
+        prevFrame_ = nullptr;  // 灰阶帧自己写 DTM1/DTM2
         displayGrayFrame(off);
         return;
     }
     displayBw(full, off);
+    prevFrame_ = nullptr;
 }
 
 void Uc8279cDisplay::displayBw(bool full, bool turnOff) {
@@ -405,6 +423,11 @@ void Uc8279cDisplay::displayBw(bool full, bool turnOff) {
     cmdData(CMD_VCOM_DATA_INTERVAL, &interval, 1);
     if (fast) loadFastLut(); else loadFullLut();
 
+    // 跨控制器复位的 Fast：把面板上实际显示的上一帧写回 DTM1（复位后 DTM1 是全白），
+    // Fast LUT 才能只驱动变化像素且不留残影。连续刷新时控制器在刷新后自行把新帧
+    // 作为下一次的旧帧（mains 模式只写 DTM2 即依赖于此），无需重写。
+    const uint8_t* previous = fast ? prevFrame_ : nullptr;
+    if (previous != nullptr) writeFrame(CMD_DTM1, previous);
     writeFrame(CMD_DTM2, fb_);
     if (!refresh(turnOff)) {
         // 刷新命令被吞：RST 重置控制器并重推一帧
@@ -415,6 +438,7 @@ void Uc8279cDisplay::displayBw(bool full, bool turnOff) {
         ensurePowerOn();
         cmdData(CMD_VCOM_DATA_INTERVAL, &interval, 1);
         if (fast) loadFastLut(); else loadFullLut();
+        if (previous != nullptr) writeFrame(CMD_DTM1, previous);
         writeFrame(CMD_DTM2, fb_);
         if (!refresh(turnOff)) {
             ESP_LOGE(TAG_UC, "display: 重试仍失败，画面可能残留");
@@ -431,6 +455,8 @@ void Uc8279cDisplay::waitRefreshComplete() {
 
 void Uc8279cDisplay::displayGray(bool turnOff) {
     if (offscreen_) return;
+    ensureController();
+    prevFrame_ = nullptr;
     waitIfBusy("gray-pre-wait");
     fullRequested_ = false;
     const bool off = turnOff || autoPowerOff_;
@@ -475,6 +501,8 @@ void Uc8279cDisplay::displayGrayFrame(bool turnOff) {
 void Uc8279cDisplay::deepSleep() {
     if (offscreen_) return;
     fastRefreshesSinceFull_ = 0;
+    prevFrame_ = nullptr;
+    if (controllerPending_) return;  // 本次唤醒从未上电：控制器仍在上次的深睡中
     if (screenOn_) {
         sendCmd(CMD_POWER_OFF);
         waitBusy("power-off");

@@ -89,8 +89,16 @@ class DashboardRuntime {
   std::string title() const;
 
   void service(bool mains);
-  void pollBattery();
+  // 电池唤醒：一次性拉取全部到期数据源，budget_ms 后未完成的请求被取消。
+  void pollBattery(int64_t budget_ms);
+  // 结束电池取数批次（取消在途请求；深睡前调用）。
+  void cancelBatteryCycle();
   bool networkIdle() const;
+  // 电池深睡帧的状态行文字（替代常规的页码/时钟/数据源计数；告警横幅仍优先）。
+  // 空串恢复常规状态行。
+  void setBatteryStatus(const std::string& text);
+  // 只渲染进 framebuffer、不刷屏（调用方随后自行哈希/决定刷新方式）。
+  void renderOffscreen();
   void setMains(bool mains);
   void invalidateAll();
   bool needsRender() const;

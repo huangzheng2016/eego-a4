@@ -62,9 +62,10 @@ TEST(settings, json_round_trip) {
   Settings s;
   s.language = "en";
   s.power_mode = PowerMode::Battery;
-  s.battery_poll_s = 600;
   s.data_refresh_s = 120;
-  s.idle_sleep_s = 0;
+  s.battery_refresh_min = 30;
+  s.battery_max_stale_min = 120;
+  s.battery_interactive_timeout_s = 90;
   s.sleep_start_min = 23 * 60;
   s.sleep_end_min = 7 * 60;
   s.timezone_offset_min = -330;
@@ -140,10 +141,15 @@ TEST(settings, patch_rejects_bad_values) {
   } cases[] = {
       {R"({"language":"fr"})", "language"},
       {R"({"power_mode":"solar"})", "power_mode"},
-      {R"({"battery_poll_s":10})", "battery_poll_s"},
-      {R"({"battery_poll_s":"900"})", "battery_poll_s"},
+      {R"({"battery_poll_s":900})", "battery_poll_s"},  // removed field
+      {R"({"idle_sleep_s":90})", "idle_sleep_s"},        // removed field
+      {R"({"battery_refresh_min":7})", "battery_refresh_min"},
+      {R"({"battery_refresh_min":"15"})", "battery_refresh_min"},
+      {R"({"battery_max_stale_min":45})", "battery_max_stale_min"},
+      {R"({"battery_refresh_min":60,"battery_max_stale_min":30})", "battery_max_stale_min"},
+      {R"({"battery_interactive_timeout_s":10})", "battery_interactive_timeout_s"},
+      {R"({"battery_interactive_timeout_s":601})", "battery_interactive_timeout_s"},
       {R"({"data_refresh_s":5})", "data_refresh_s"},
-      {R"({"idle_sleep_s":5})", "idle_sleep_s"},
       {R"({"timezone_offset_min":481})", "timezone_offset_min"},
       {R"({"timezone_offset_min":900})", "timezone_offset_min"},
       {R"({"frontlight_brightness":0})", "frontlight_brightness"},
@@ -176,7 +182,7 @@ TEST(settings, patch_accepts_good_values) {
   Settings out;
   FieldErrors errors;
   CHECK_MSG(patchOk(base, R"({"schema_version":1,"language":"en","timezone_offset_min":-210,
-      "sleep_start_min":1380,"sleep_end_min":420,"idle_sleep_s":0,"data_refresh_s":30})",
+      "sleep_start_min":1380,"sleep_end_min":420,"data_refresh_s":30})",
                     out, errors),
             describe(errors));
   CHECK_EQ(out.timezone_offset_min, -210);
@@ -237,4 +243,32 @@ TEST(settings, idle_refresh_fields) {
   const std::string schema = schemaJson();
   for (const char* key : {"idle_after_min", "idle_refresh_min", "idle_critical_immediate"})
     CHECK_MSG(schema.find(key) != std::string::npos, key);
+}
+
+TEST(settings, battery_fields) {
+  const Settings base;
+  CHECK_EQ(base.battery_refresh_min, 15u);
+  CHECK_EQ(base.battery_max_stale_min, 60u);
+  CHECK_EQ(base.battery_interactive_timeout_s, 60u);
+  Settings out;
+  FieldErrors errors;
+  for (uint32_t minutes : {5u, 10u, 15u, 30u, 60u}) {
+    const std::string patch = "{\"battery_refresh_min\":" + std::to_string(minutes) + "}";
+    CHECK_MSG(patchOk(base, patch, out, errors), patch << " -> " << describe(errors));
+    CHECK_EQ(out.battery_refresh_min, minutes);
+  }
+  CHECK_MSG(patchOk(base, R"({"battery_max_stale_min":480,"battery_interactive_timeout_s":20})",
+                    out, errors),
+            describe(errors));
+  CHECK_EQ(changedFields(base, out), static_cast<uint32_t>(kChangedBattery));
+  CHECK((kChangedAll & kChangedBattery) != 0);
+  CHECK_MSG(patchOk(base, R"({"sleep_start_min":0,"sleep_end_min":360})", out, errors),
+            describe(errors));
+  CHECK_EQ(changedFields(base, out), static_cast<uint32_t>(kChangedSleep));
+  const std::string schema = schemaJson();
+  for (const char* key :
+       {"battery_refresh_min", "battery_max_stale_min", "battery_interactive_timeout_s"})
+    CHECK_MSG(schema.find(key) != std::string::npos, key);
+  CHECK(schema.find("battery_poll_s") == std::string::npos);
+  CHECK(schema.find("idle_sleep_s") == std::string::npos);
 }

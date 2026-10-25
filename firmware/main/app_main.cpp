@@ -25,9 +25,15 @@
 //   diag::service → admin::serviceCommands(0) → app.service()（事件归并/电源
 //   FSM/按需渲染）→ 等待输入唤醒信号量（最长 kIdleWaitMs）
 //
+// 电池定时唤醒快速路径（battery_mode.h / README「电池模式」）：跳过触控固件上传、
+// 开机白屏、BLE、管理 API、串口诊断与 alerts.db 启动压缩；显示控制器推迟到真正
+// 需要刷新时才上电；WiFi 用 RTC 内存中的 BSSID/信道快连。外接电源或有人按键时
+// esp_restart() 以完整应用重启（RTC 状态保持、面板不清屏）。
+//
 // 串口诊断入口：USB Serial/JTAG 115200，输入 help 查看命令。
 
 #include "atomic_file.h"
+#include "battery_mode.h"
 #include "board/board_boot.h"
 #include "eego_hal.h"
 #include "eego_ui.h"
@@ -49,6 +55,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -314,8 +321,22 @@ esp_err_t saveBleWifiCredentials(const char* ssid, const char* password, void* c
 extern "C" void app_main(void) {
   ESP_LOGI(TAG, "EEGO A4 monitoring panel boot");
 
+  // 0. 唤醒分类：定时唤醒 = 电池快速路径；任何深睡唤醒（及快速路径主动重启）都
+  //    保留面板上的上一帧（不做开机白屏）。
+  const panel::battery::WakeSource wake = panel::battery::wakeSource();
+  const bool fastWake = wake == panel::battery::WakeSource::Timer;
+  const bool keepPanel = panel::battery::deepSleepWake(wake) ||
+                         (esp_reset_reason() == ESP_RST_SW &&
+                          panel::battery::rtcState().frame.valid != 0);
+  ESP_LOGI(TAG, "wake=%s fast=%d keep_panel=%d", panel::battery::wakeSourceName(wake),
+           fastWake ? 1 : 0, keepPanel ? 1 : 0);
+
   // 1. 板级启动合同（顺序即合同，见 board_boot.h）
-  bootStatus = eego::board::beginStandardHardware(display, touch);
+  eego::board::BootOptions bootOptions;
+  bootOptions.touch = !fastWake;
+  bootOptions.clearDisplay = !keepPanel;
+  bootOptions.deferDisplay = fastWake;
+  bootStatus = eego::board::beginStandardHardware(display, touch, bootOptions);
 
   // 2. 统一时间源启动同步（M21）：RTC 有效而系统时间不可信 → 设置系统时间
   //    （SNTP 前的 TLS 证书校验/日志/摄入都依赖系统时间）
@@ -386,6 +407,18 @@ extern "C" void app_main(void) {
     }
   }
 #endif
+  if (fastWake) {
+    // 定时唤醒时已接上电源（或被强制为常供电）：以完整应用重启。
+    const eego::BatteryInfo bat = eego::PowerManager::instance().readBattery();
+    const bool charging = eego::PowerManager::instance().isCharging() || bat.charging;
+    if (panel::battery::mainsPowered(
+            static_cast<uint8_t>(deviceSettings.snapshot().values.power_mode), charging,
+            bat.millivolts)) {
+      ESP_LOGI(TAG, "timer wake on external power: restarting into the full app");
+      panel::battery::commitRtcState();
+      esp_restart();
+    }
+  }
   eego::FrontlightManager::instance().setOverride(
       toFrontlightOverride(deviceSettings.snapshot().values.frontlight_hardware));
   eego::settings::Capabilities capabilities;
@@ -423,7 +456,9 @@ extern "C" void app_main(void) {
     const size_t loaded = store.loadFrom(alertDb);
     ESP_LOGI(TAG, "alerts.db restored: %u record(s), %u dead line(s)",
              static_cast<unsigned>(loaded), static_cast<unsigned>(alertDb.deadLines()));
-    if (alertDb.deadLines() > 0) {
+    if (alertDb.deadLines() > 0 && fastWake) {
+      ESP_LOGI(TAG, "alerts.db boot compaction skipped on battery wake");
+    } else if (alertDb.deadLines() > 0) {
       // 压缩已是逐条流式写 + 分块回读校验（不整份复制），但仍需几十 KB 内部
       // RAM（CONFIG_SPIRAM_USE_CAPS_ALLOC：malloc 只走内部堆）。堆紧张时跳过，
       // 交给 net_task 按策略稍后压缩。另以标记文件防"压缩中崩溃 → 重启 → 再压缩
@@ -459,6 +494,18 @@ extern "C" void app_main(void) {
 
   // 6. net_task 启动（快照发布 + expire 巡检由 net_task 承担；统一时间源 +
   //    RTC 回写注入，M21）
+  // WiFi 快连：上次关联的 BSSID + 信道（RTC 内存；不含密码），首次连接跳过全信道扫描。
+  if (panel::battery::deepSleepWake(wake)) {
+    const panel::battery::RtcState& rtc = panel::battery::rtcState();
+    if (rtc.ap_valid != 0) {
+      eego::net::ApHint hint;
+      hint.valid = true;
+      hint.ssid = rtc.ap_ssid;
+      memcpy(hint.bssid, rtc.ap_bssid, sizeof(hint.bssid));
+      hint.channel = rtc.ap_channel;
+      eego::net::WifiManager::instance().setFastConnectHint(hint);
+    }
+  }
   eego::net::NetStackConfig netCfg;
   netCfg.snapshot_publisher = &publisher;
   netCfg.rtc_write_fn = &panel::TimeSource::writeRtc;
@@ -469,9 +516,12 @@ extern "C" void app_main(void) {
   if (netErr != ESP_OK) {
     ESP_LOGE(TAG, "net_task start failed: %s", esp_err_to_name(netErr));
   }
-  const esp_err_t bleErr = eego::ble::BleManager::instance().init(&saveBleWifiCredentials, nullptr);
-  if (bleErr != ESP_OK) {
-    ESP_LOGE(TAG, "BLE manager init failed: %s", esp_err_to_name(bleErr));
+  if (!fastWake) {
+    const esp_err_t bleErr =
+        eego::ble::BleManager::instance().init(&saveBleWifiCredentials, nullptr);
+    if (bleErr != ESP_OK) {
+      ESP_LOGE(TAG, "BLE manager init failed: %s", esp_err_to_name(bleErr));
+    }
   }
 
   // 6b. 静音规则恢复（M21）：config.mute_rules → net_task（重估已恢复记录的
@@ -527,8 +577,11 @@ extern "C" void app_main(void) {
   });
   net.setEventCallback(&onNetEvent, &app);
 
-  // 8. 设备模式判定（M13 bootstrap）：无管理密码 → 配网门户；否则管理 API
-  if (!admin::AuthManager::instance().hasPassword()) {
+  // 8. 设备模式判定（M13 bootstrap）：无管理密码 → 配网门户；否则管理 API。
+  //    电池定时唤醒不启动 httpd（无人访问；按键唤醒后才可用）。
+  if (fastWake) {
+    ESP_LOGI(TAG, "battery wake: admin API not started");
+  } else if (!admin::AuthManager::instance().hasPassword()) {
     ESP_LOGI(TAG, "no admin password: opening provisioning portal");
     if (admin::ProvisionPortal::instance().open() == ESP_OK) {
       app.enterProvision();
@@ -557,7 +610,7 @@ extern "C" void app_main(void) {
   hooks.lang = [](const char* arg) { app.diagLang(arg); };
   hooks.page = [](const char* arg) { app.diagPage(arg); };
   hooks.dashboard = [](const char* arg) { app.diagDashboard(arg); };
-  if (!diag::start(hooks)) {
+  if (!fastWake && !diag::start(hooks)) {
     ESP_LOGW(TAG, "diag start failed (serial diagnostics unavailable)");
   }
 
@@ -568,6 +621,7 @@ extern "C" void app_main(void) {
   deps.boot = bootStatus;
   deps.publisher = &publisher;
   deps.registry = &registry;
+  deps.fastWake = fastWake;
   app.begin(deps);
 
   // 10. app_task 主循环（唯一 UI 属主；input/net/httpd/serial 只经队列/快照交互）

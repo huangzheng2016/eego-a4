@@ -365,9 +365,10 @@ JsonValue toJson(const Settings& s) {
       {"schema_version", JsonValue::makeInt(kSchemaVersion)},
       {"language", JsonValue::makeString(s.language)},
       {"power_mode", JsonValue::makeString(powerModeName(s.power_mode))},
-      {"battery_poll_s", JsonValue::makeInt(s.battery_poll_s)},
       {"data_refresh_s", JsonValue::makeInt(s.data_refresh_s)},
-      {"idle_sleep_s", JsonValue::makeInt(s.idle_sleep_s)},
+      {"battery_refresh_min", JsonValue::makeInt(s.battery_refresh_min)},
+      {"battery_max_stale_min", JsonValue::makeInt(s.battery_max_stale_min)},
+      {"battery_interactive_timeout_s", JsonValue::makeInt(s.battery_interactive_timeout_s)},
       {"sleep_start_min", JsonValue::makeInt(s.sleep_start_min)},
       {"sleep_end_min", JsonValue::makeInt(s.sleep_end_min)},
       {"timezone_offset_min", JsonValue::makeInt(s.timezone_offset_min)},
@@ -395,14 +396,21 @@ void validate(const Settings& s, FieldErrors& errors) {
   if (static_cast<uint8_t>(s.power_mode) > static_cast<uint8_t>(PowerMode::Battery)) {
     addError(errors, "power_mode", "must be one of auto|mains|battery");
   }
-  if (s.battery_poll_s < 60 || s.battery_poll_s > 21600) {
-    addError(errors, "battery_poll_s", "must be in [60, 21600]");
-  }
   if (s.data_refresh_s != 0 && (s.data_refresh_s < 30 || s.data_refresh_s > 86400)) {
     addError(errors, "data_refresh_s", "must be 0 (source schedules) or in [30, 86400]");
   }
-  if (s.idle_sleep_s != 0 && (s.idle_sleep_s < 30 || s.idle_sleep_s > 600)) {
-    addError(errors, "idle_sleep_s", "must be 0 (disabled) or in [30, 600]");
+  if (!validBatteryRefreshMin(s.battery_refresh_min)) {
+    addError(errors, "battery_refresh_min", "must be one of 5|10|15|30|60");
+  }
+  if (!validBatteryMaxStaleMin(s.battery_max_stale_min)) {
+    addError(errors, "battery_max_stale_min", "must be one of 15|30|60|120|240|480");
+  } else if (validBatteryRefreshMin(s.battery_refresh_min) &&
+             s.battery_max_stale_min < s.battery_refresh_min) {
+    addError(errors, "battery_max_stale_min", "must be >= battery_refresh_min");
+  }
+  if (s.battery_interactive_timeout_s < kBatteryInteractiveMinS ||
+      s.battery_interactive_timeout_s > kBatteryInteractiveMaxS) {
+    addError(errors, "battery_interactive_timeout_s", "must be in [20, 600]");
   }
   const bool startOff = s.sleep_start_min == -1;
   const bool endOff = s.sleep_end_min == -1;
@@ -554,8 +562,9 @@ bool mergePatch(const Settings& current, const JsonValue& patch, Settings& out,
           next.frontlight_hardware = mode;
         }
       }
-    } else if (key == "battery_poll_s" || key == "data_refresh_s" ||
-               key == "idle_sleep_s" || key == "sleep_start_min" ||
+    } else if (key == "data_refresh_s" || key == "battery_refresh_min" ||
+               key == "battery_max_stale_min" || key == "battery_interactive_timeout_s" ||
+               key == "sleep_start_min" ||
                key == "sleep_end_min" || key == "timezone_offset_min" ||
                key == "frontlight_brightness" || key == "frontlight_warmth" ||
                key == "epd_full_refresh_s" || key == "ble_observer_window_s" ||
@@ -566,14 +575,16 @@ bool mergePatch(const Settings& current, const JsonValue& patch, Settings& out,
         continue;
       }
       const int64_t number = value.intValue();
-      if ((key == "battery_poll_s" || key == "data_refresh_s" || key == "idle_sleep_s" ||
+      if ((key == "data_refresh_s" || key == "battery_refresh_min" ||
+           key == "battery_max_stale_min" || key == "battery_interactive_timeout_s" ||
            key == "epd_full_refresh_s" || key == "ble_observer_window_s" ||
            key == "ble_observer_interval_s" || key == "ble_observer_dedup_ms" ||
            key == "idle_after_min" || key == "idle_refresh_min") &&
           number >= 0 && number <= UINT32_MAX) {
-        if (key == "battery_poll_s") next.battery_poll_s = static_cast<uint32_t>(number);
-        else if (key == "data_refresh_s") next.data_refresh_s = static_cast<uint32_t>(number);
-        else if (key == "idle_sleep_s") next.idle_sleep_s = static_cast<uint32_t>(number);
+        if (key == "data_refresh_s") next.data_refresh_s = static_cast<uint32_t>(number);
+        else if (key == "battery_refresh_min") next.battery_refresh_min = static_cast<uint32_t>(number);
+        else if (key == "battery_max_stale_min") next.battery_max_stale_min = static_cast<uint32_t>(number);
+        else if (key == "battery_interactive_timeout_s") next.battery_interactive_timeout_s = static_cast<uint32_t>(number);
         else if (key == "epd_full_refresh_s") next.epd_full_refresh_s = static_cast<uint32_t>(number);
         else if (key == "ble_observer_window_s") next.ble_observer_window_s = static_cast<uint32_t>(number);
         else if (key == "ble_observer_interval_s") next.ble_observer_interval_s = static_cast<uint32_t>(number);
@@ -616,8 +627,11 @@ bool mergePatch(const Settings& current, const JsonValue& patch, Settings& out,
 uint32_t changedFields(const Settings& a, const Settings& b) {
   uint32_t changed = 0;
   if (a.language != b.language) changed |= kChangedLanguage;
-  if (a.power_mode != b.power_mode || a.battery_poll_s != b.battery_poll_s) {
-    changed |= kChangedPower;
+  if (a.power_mode != b.power_mode) changed |= kChangedPower;
+  if (a.battery_refresh_min != b.battery_refresh_min ||
+      a.battery_max_stale_min != b.battery_max_stale_min ||
+      a.battery_interactive_timeout_s != b.battery_interactive_timeout_s) {
+    changed |= kChangedBattery;
   }
   if (a.frontlight_enabled != b.frontlight_enabled ||
       a.frontlight_brightness != b.frontlight_brightness ||
@@ -631,8 +645,7 @@ uint32_t changedFields(const Settings& a, const Settings& b) {
       a.idle_critical_immediate != b.idle_critical_immediate) {
     changed |= kChangedIdleRefresh;
   }
-  if (a.idle_sleep_s != b.idle_sleep_s || a.sleep_start_min != b.sleep_start_min ||
-      a.sleep_end_min != b.sleep_end_min) {
+  if (a.sleep_start_min != b.sleep_start_min || a.sleep_end_min != b.sleep_end_min) {
     changed |= kChangedSleep;
   }
   if (a.timezone_offset_min != b.timezone_offset_min) changed |= kChangedTimezone;
@@ -649,6 +662,20 @@ uint32_t changedFields(const Settings& a, const Settings& b) {
 
 bool validIdleRefreshMin(uint32_t minutes) {
   for (uint32_t choice : kIdleRefreshChoices) {
+    if (choice == minutes) return true;
+  }
+  return false;
+}
+
+bool validBatteryRefreshMin(uint32_t minutes) {
+  for (uint32_t choice : kBatteryRefreshChoices) {
+    if (choice == minutes) return true;
+  }
+  return false;
+}
+
+bool validBatteryMaxStaleMin(uint32_t minutes) {
+  for (uint32_t choice : kBatteryMaxStaleChoices) {
     if (choice == minutes) return true;
   }
   return false;
@@ -695,11 +722,12 @@ const char* schemaJson() {
   "fields": {
     "language": {"type":"string","enum":["zh","en"],"default":"zh","group":"time_language"},
     "power_mode": {"type":"string","enum":["auto","mains","battery"],"default":"auto","group":"power"},
-    "battery_poll_s": {"type":"int","range":[60,21600],"default":900,"group":"power"},
     "data_refresh_s": {"type":"int","range":[0,86400],"minimum_nonzero":30,"default":0,"group":"refresh"},
-    "idle_sleep_s": {"type":"int","range":[0,600],"minimum_nonzero":30,"default":90,"group":"power"},
-    "sleep_start_min": {"type":"int","range":[-1,1439],"default":-1,"group":"power"},
-    "sleep_end_min": {"type":"int","range":[-1,1439],"default":-1,"group":"power"},
+    "battery_refresh_min": {"type":"int","enum":[5,10,15,30,60],"default":15,"note":"battery mode wakes on local wall-clock multiples of this interval (doubled below 20% battery)","group":"battery"},
+    "battery_max_stale_min": {"type":"int","enum":[15,30,60,120,240,480],"default":60,"note":"unchanged frames are not redrawn until this age; must be >= battery_refresh_min","group":"battery"},
+    "battery_interactive_timeout_s": {"type":"int","range":[20,600],"default":60,"note":"after a button wake, return to deep sleep after this long without interaction","group":"battery"},
+    "sleep_start_min": {"type":"int","range":[-1,1439],"default":-1,"note":"night pause: no wakes and no network inside the window","group":"battery"},
+    "sleep_end_min": {"type":"int","range":[-1,1439],"default":-1,"group":"battery"},
     "timezone_offset_min": {"type":"int","range":[-840,840],"step":15,"default":480,"group":"time_language"},
     "frontlight_enabled": {"type":"bool","default":false,"capability":"frontlight","group":"display"},
     "frontlight_brightness": {"type":"int","range":[1,100],"default":60,"capability":"frontlight","group":"display"},

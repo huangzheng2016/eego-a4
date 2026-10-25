@@ -52,6 +52,9 @@ struct AdminConfig {
 // 门户开启期间拒绝启动（80 端口互斥，防御性检查）。
 esp_err_t startAdminApi(const AdminConfig& cfg);
 bool adminApiRunning();
+// 最近一次通过认证的管理 API 请求（esp_timer 毫秒；0 = 从未）。电池交互期据此
+// 判定「仍有人在用管理后台」，不在浏览中途深睡。线程安全（原子）。
+int64_t lastAuthenticatedRequestMs();
 
 // ---- 依赖注入（M18 组合根；M20 提供 net_stack 实现后告警读写全通）----
 void setAlertSnapshotSource(AlertSnapshotSource src);

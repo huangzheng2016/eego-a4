@@ -25,7 +25,10 @@ public:
     Uc8279cDisplay();
     ~Uc8279cDisplay();
 
-    esp_err_t begin();        // 初始化 SPI + GPIO + 控制器
+    // 初始化 SPI + GPIO + 控制器。deferController=true（电池定时唤醒）：只分配
+    // framebuffer 并初始化 SPI/GPIO，控制器上电/复位/初始化推迟到第一次
+    // display()/displayGray()；从未刷新则 deepSleep() 为空操作，面板保持上一帧。
+    esp_err_t begin(bool deferController = false);
     // 离屏实例（例如管理 API 的渲染预览）：只分配 PSRAM framebuffer，不初始化
     // SPI/GPIO/控制器；display()/displayGray()/deepSleep() 为空操作，end()/析构
     // 只释放缓冲区（不释放实屏占用的 SPI 总线）。不得在实屏实例上调用。
@@ -62,6 +65,12 @@ public:
     // 显式四级灰阶刷新：MSB→DTM1, LSB→DTM2，加载灰阶 LUT。无灰阶平面时回退为 B/W Full。
     void displayGray(bool turnOff = false);
 
+    // 跨控制器复位的 Fast 刷新：nativeFrame（与 framebuffer() 同布局，768×552 1bpp，
+    // 须保持有效直到下一次 display() 返回）是面板上实际显示的上一帧。下一次 B/W
+    // Fast 刷新先把它写入 DTM1（旧帧）再写 DTM2，使深睡/复位后也能做 Fast 刷新。
+    // 仅作用于下一次 display()；Full/灰阶刷新忽略它。
+    void setPreviousFrame(const uint8_t* nativeFrame) { prevFrame_ = nativeFrame; }
+
     // 刷新策略
     void requestFullRefresh() { fullRequested_ = true; }  // 下一次 display() 走 Full
     void setFastRefreshLimit(uint8_t n) { fastRefreshLimit_ = n; }  // 0=不自动升级
@@ -77,12 +86,18 @@ public:
     static constexpr uint16_t HEIGHT = LOGICAL_HEIGHT; // 768
 
     uint8_t* framebuffer() { return fb_; }
+    const uint8_t* framebuffer() const { return fb_; }
+    // 灰阶平面（帧含灰度时有效，否则 nullptr）：与 framebuffer() 一起决定帧内容哈希。
+    const uint8_t* grayMsbPlane() const { return planesActive_ ? fbGrayMsb_ : nullptr; }
+    const uint8_t* grayLsbPlane() const { return planesActive_ ? fbGrayLsb_ : nullptr; }
 
 private:
     esp_err_t spiInit();
     void gpioInit();
     void hardwareReset();
     void initController(bool grayMode = false);
+    void powerUpController();
+    void ensureController();
     void ensurePowerOn();
     void fillControllerRam(uint8_t cmd, uint8_t fill);
     void loadFullLut();
@@ -112,6 +127,8 @@ private:
     bool screenOn_ = false;
     bool grayControllerMode_ = false; // 控制器当前是否处于灰阶模式
     bool fullRequested_ = false;
+    bool controllerPending_ = false;  // begin(true)：控制器尚未上电初始化
+    const uint8_t* prevFrame_ = nullptr;
     bool autoPowerOff_ = true;
     uint8_t fastRefreshesSinceFull_ = 0;
     uint8_t fastRefreshLimit_ = DEFAULT_FAST_REFRESH_LIMIT;

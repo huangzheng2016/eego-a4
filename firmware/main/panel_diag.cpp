@@ -59,6 +59,16 @@ void PanelApp::diagBattery() {
   const eego::BatteryInfo bat = eego::PowerManager::instance().readBattery();
   printf("battery: %u mV, %u%%, charging=%d\n", bat.millivolts, bat.percent,
          bat.charging ? 1 : 0);
+  // 电池模式跨深睡状态（硬件测试：唤醒次数/失败退避/上次刷屏/快连缓存）。
+  const battery::RtcState& rtc = battery::rtcState();
+  printf("battery-mode: wake=%s wakes=%u failures=%u frame_valid=%d refreshed=%llu "
+         "full=%llu fast_since_full=%u bucket=%d ap=%d ch=%u\n",
+         battery::wakeSourceName(wakeSource_), static_cast<unsigned>(rtc.wakes),
+         static_cast<unsigned>(rtc.consecutive_failures), rtc.frame.valid,
+         static_cast<unsigned long long>(rtc.frame.refresh_unix),
+         static_cast<unsigned long long>(rtc.frame.full_unix),
+         static_cast<unsigned>(rtc.frame.fast_since_full), rtc.battery_bucket, rtc.ap_valid,
+         static_cast<unsigned>(rtc.ap_channel));
 }
 
 void PanelApp::diagRtc() {
@@ -247,9 +257,11 @@ void PanelApp::diagSmoke() {
   // 8. DeviceSettings 快照 + store 静音规则数
   std::vector<alert_core::MuteRule> mute_rules;
   eego::net::NetStack::instance().queryMuteRules(mute_rules);
-  printf("[PASS] settings: lang=%s pmode=%d bpoll=%us mute_rules=%u\n",
+  printf("[PASS] settings: lang=%s pmode=%d battery=%umin/stale %umin mute_rules=%u\n",
          settings_.language.c_str(), static_cast<int>(settings_.power_mode),
-         static_cast<unsigned>(settings_.battery_poll_s), static_cast<unsigned>(mute_rules.size()));
+         static_cast<unsigned>(settings_.battery_refresh_min),
+         static_cast<unsigned>(settings_.battery_max_stale_min),
+         static_cast<unsigned>(mute_rules.size()));
   pass++;
 
   if (dashboard_.available()) {

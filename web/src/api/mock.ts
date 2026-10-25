@@ -20,11 +20,12 @@ const SETTINGS_SCHEMA = {
   fields: {
     language: { type: 'string', enum: ['zh', 'en'], default: 'zh', group: 'time_language' },
     power_mode: { type: 'string', enum: ['auto', 'mains', 'battery'], default: 'auto', group: 'power' },
-    battery_poll_s: { type: 'int', range: [60, 21600], default: 900, group: 'power' },
     data_refresh_s: { type: 'int', range: [0, 86400], minimum_nonzero: 30, default: 0, group: 'refresh' },
-    idle_sleep_s: { type: 'int', range: [0, 600], minimum_nonzero: 30, default: 90, group: 'power' },
-    sleep_start_min: { type: 'int', range: [-1, 1439], default: -1, group: 'power' },
-    sleep_end_min: { type: 'int', range: [-1, 1439], default: -1, group: 'power' },
+    battery_refresh_min: { type: 'int', enum: [5, 10, 15, 30, 60], default: 15, group: 'battery' },
+    battery_max_stale_min: { type: 'int', enum: [15, 30, 60, 120, 240, 480], default: 60, group: 'battery' },
+    battery_interactive_timeout_s: { type: 'int', range: [20, 600], default: 60, group: 'battery' },
+    sleep_start_min: { type: 'int', range: [-1, 1439], default: -1, group: 'battery' },
+    sleep_end_min: { type: 'int', range: [-1, 1439], default: -1, group: 'battery' },
     timezone_offset_min: { type: 'int', range: [-840, 840], step: 15, default: 480, group: 'time_language' },
     frontlight_enabled: { type: 'bool', default: false, capability: 'frontlight', group: 'display' },
     frontlight_brightness: { type: 'int', range: [1, 100], default: 60, capability: 'frontlight', group: 'display' },
@@ -250,6 +251,9 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
         else if (f.enum && !f.enum.includes(v as string | number)) fields[k] = `must be one of ${f.enum.join('|')}`;
         else if (f.range && typeof v === 'number' && (v < f.range[0] || v > f.range[1])) fields[k] = `must be in [${f.range[0]}, ${f.range[1]}]`;
       }
+      const next = { ...state.settings, ...b };
+      if (!fields.battery_max_stale_min && Number(next.battery_max_stale_min) < Number(next.battery_refresh_min))
+        fields.battery_max_stale_min = 'must be >= battery_refresh_min';
       if (Object.keys(fields).length) return err(400, 'validation_failed', 'settings validation failed', fields);
       Object.assign(state.settings, b);
       return handle('GET', 'settings', headers, null);

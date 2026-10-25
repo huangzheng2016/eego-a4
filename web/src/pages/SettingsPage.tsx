@@ -8,7 +8,7 @@ import { useToast } from '../state/toast';
 import { errorText, fieldMap } from '../state/errors';
 import { Button, Card, Checkbox, NumberInput, Select, TextArea, TextInput, Icon, PageHeader, SkeletonCard } from '../ui';
 
-const GROUP_ORDER = ['hardware', 'display', 'display_refresh', 'refresh', 'power', 'time_language', 'ble', 'diagnostics', 'other'];
+const GROUP_ORDER = ['hardware', 'display', 'display_refresh', 'refresh', 'power', 'battery', 'time_language', 'ble', 'diagnostics', 'other'];
 /** Client-side regrouping (schema groups are firmware-defined). */
 const GROUP_OVERRIDE: Record<string, string> = { frontlight_hardware: 'hardware' };
 /** Group-level capability gates in addition to per-field `capability`. */
@@ -149,7 +149,7 @@ export function SettingsPage() {
           key={key}
           {...common}
           type="time"
-          hint={t('set.minutes_disabled')}
+          hint={help ? `${help} · ${t('set.minutes_disabled')}` : t('set.minutes_disabled')}
           value={minutesToHHMM(v)}
           onChange={(x) => {
             const m = hhmmToMinutes(x);

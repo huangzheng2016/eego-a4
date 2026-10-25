@@ -106,7 +106,16 @@ enum class Lang : uint8_t {
   X(ApFallback, "兜底AP", "AP FALLBACK") \
   X(SetLanguage, "语言", "LANGUAGE") \
   X(SetPowerMode, "供电模式", "POWER MODE") \
-  X(SetBatteryPoll, "电池刷新周期", "BATTERY POLL") \
+  X(SetBatteryRefresh, "电池唤醒间隔", "BATTERY WAKE EVERY") \
+  X(SetBatteryMaxStale, "最长不刷屏", "MAX UNCHANGED") \
+  X(SetBatteryInteractive, "按键唤醒后保持", "AWAKE AFTER KEY") \
+  X(TimeoutSecFmt, "%u 秒无操作", "%uS NO INPUT") \
+  X(BatStatusFmt, "电量 %u%% · 更新于 %02d:%02d · 最迟 %02d:%02d", "BAT %u%% · UPDATED %02d:%02d · BY %02d:%02d") \
+  X(BatStatusNoClockFmt, "电量 %u%% · 时间不可用", "BAT %u%% · NO CLOCK") \
+  X(NightPauseFmt, "夜间暂停 · %02d:%02d 恢复", "NIGHT PAUSE · RESUMES %02d:%02d") \
+  X(LowBatteryTitle, "电量过低（%u%%）", "BATTERY LOW (%u%%)") \
+  X(LowBatteryHint, "已停止自动更新，请充电", "AUTO UPDATES STOPPED; PLEASE CHARGE") \
+  X(LastDataFmt, "最后更新 %s", "LAST UPDATE %s") \
   X(SetFrontlight, "前光", "FRONTLIGHT") \
   X(SetMutes, "静音列表", "MUTED LIST") \
   X(SetPollNow, "立即刷新数据", "REFRESH NOW") \
@@ -125,7 +134,6 @@ enum class Lang : uint8_t {
   X(Busy, "忙，请稍后重试", "BUSY; TRY AGAIN") \
   X(Sleeping, "电池供电：休眠中", "BATTERY: SLEEPING") \
   X(WakeHint, "按电源键唤醒", "PRESS POWER TO WAKE") \
-  X(Polling, "正在刷新...", "REFRESHING...") \
   X(OnbOpen, "在浏览器中打开", "OPEN IN A BROWSER") \
   X(OnbNoAddress, "等待网络连接…", "WAITING FOR NETWORK…") \
   X(OnbStep1, "1. 电脑或手机连接与本机相同的网络", "1. Join the same network as this device") \
@@ -157,11 +165,10 @@ enum class Lang : uint8_t {
   X(SetDataRefresh, "数据刷新周期", "DATA REFRESH") \
   X(SetEpdFull, "墨水屏全刷周期", "EPD FULL INTERVAL") \
   X(SetEpdNow, "立即全屏刷新", "EPD FULL NOW") \
-  X(SetIdleSleep, "自动休眠", "IDLE SLEEP") \
   X(SetIdleAfter, "空闲判定", "IDLE AFTER") \
   X(SetIdleRefresh, "空闲刷新间隔", "IDLE REFRESH") \
   X(IdleAfterFmt, "%u 分钟无操作", "%uMIN NO INPUT") \
-  X(SetSleepPlan, "定时休眠", "SLEEP SCHEDULE") \
+  X(SetSleepPlan, "夜间暂停", "NIGHT PAUSE") \
   X(SetNextWake, "下次唤醒时间", "NEXT WAKE") \
   X(SetLastWake, "唤醒方式", "LAST WAKE") \
   X(SetStorage, "SD 卡状态", "STORAGE") \
@@ -173,7 +180,7 @@ enum class Lang : uint8_t {
   X(SourceSchedules, "跟随源", "SOURCE SCHEDULES") \
   X(ManualOnly, "仅手动", "MANUAL ONLY") \
   X(NotScheduled, "未排程", "NOT SCHEDULED") \
-  X(DeepSleepOffline, "深睡时无法联网", "NO HTTP/BLE IN DEEP SLEEP") \
+  X(DeepSleepOffline, "暂停期间不联网、不更新", "NO NETWORK OR UPDATES WHILE PAUSED") \
   X(ConfirmPhysicalHold, "按住实体电源键 0.7 秒确认", "HOLD POWER BUTTON 0.7S TO CONFIRM") \
   X(RecoveryApStarted, "恢复热点：EEGO-A4-Setup / 192.168.4.1", "AP: EEGO-A4-Setup / 192.168.4.1") \
   X(WifiResetDone, "WiFi 已重置，恢复热点已开启", "WIFI RESET; RECOVERY AP OPEN") \
@@ -181,6 +188,7 @@ enum class Lang : uint8_t {
   X(FullRefreshQueued, "已请求全屏刷新", "FULL REFRESH QUEUED") \
   X(WakeTimer, "定时器", "TIMER") \
   X(WakeButton, "电源键", "POWER BUTTON") \
+  X(WakeKeys, "↑/↓ 键", "UP/DOWN KEY") \
   X(WakeReset, "复位/上电", "RESET/POWER ON") \
   X(WakeOther, "其他", "OTHER") \
   X(SecuritySet, "已设置管理密码", "PASSWORD SET") \

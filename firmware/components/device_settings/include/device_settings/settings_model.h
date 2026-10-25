@@ -37,13 +37,20 @@ enum Change : uint32_t {
   kChangedBle = 1u << 8,
   kChangedFrontlightHardware = 1u << 9,
   kChangedIdleRefresh = 1u << 10,  // idle_after_min / idle_refresh_min / idle_critical_immediate
+  kChangedBattery = 1u << 11,      // battery_refresh_min / battery_max_stale_min / battery_interactive_timeout_s
   kChangedRefresh = kChangedDataRefresh | kChangedEpdRefresh,
-  kChangedAll = (1u << 11) - 1,
+  kChangedAll = (1u << 12) - 1,
 };
 
 // 空闲显示刷新间隔（分钟）允许值：均整除 60，使边界落在整点对齐的墙钟时刻。
 inline constexpr uint32_t kIdleRefreshChoices[] = {2, 5, 10, 15, 30, 60};
 inline constexpr uint32_t kIdleAfterMaxMin = 1440;
+
+// 电池模式：唤醒间隔（分钟，均整除 60，唤醒对齐本地墙钟边界）与最长不刷屏时长。
+inline constexpr uint32_t kBatteryRefreshChoices[] = {5, 10, 15, 30, 60};
+inline constexpr uint32_t kBatteryMaxStaleChoices[] = {15, 30, 60, 120, 240, 480};
+inline constexpr uint32_t kBatteryInteractiveMinS = 20;
+inline constexpr uint32_t kBatteryInteractiveMaxS = 600;
 
 inline constexpr size_t kMaxBleObserverRules = 4;
 inline constexpr size_t kMaxBleObserverFields = 4;
@@ -81,9 +88,14 @@ struct BleObserverRule {
 struct Settings {
   std::string language = "zh";
   PowerMode power_mode = PowerMode::Auto;
-  uint32_t battery_poll_s = 900;
   uint32_t data_refresh_s = 0;
-  uint32_t idle_sleep_s = 90;
+  // 电池模式：每 battery_refresh_min 分钟（本地墙钟对齐）定时唤醒取数一次；帧内容
+  // 不变时最长 battery_max_stale_min 分钟不刷屏（须 ≥ battery_refresh_min）；按键
+  // 唤醒后 battery_interactive_timeout_s 秒无操作回到深睡。
+  uint32_t battery_refresh_min = 15;
+  uint32_t battery_max_stale_min = 60;
+  uint32_t battery_interactive_timeout_s = 60;
+  // 夜间暂停（本地分钟，-1 = 禁用）：窗口内不唤醒、不联网。
   int sleep_start_min = -1;
   int sleep_end_min = -1;
   int timezone_offset_min = 480;
@@ -135,6 +147,8 @@ bool mergePatch(const Settings& current, const alert_core::JsonValue& patch,
 uint32_t changedFields(const Settings& before, const Settings& after);
 
 bool validIdleRefreshMin(uint32_t minutes);
+bool validBatteryRefreshMin(uint32_t minutes);
+bool validBatteryMaxStaleMin(uint32_t minutes);
 
 // Daily local-time deep-sleep window, including overnight windows. A disabled
 // schedule or invalid `now_unix` returns false. The wake timestamp is exact

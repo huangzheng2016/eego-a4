@@ -27,6 +27,7 @@
 #include <cstring>
 #include <ctime>
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <strings.h>
@@ -325,6 +326,8 @@ bool ingestKeyPresented(httpd_req_t* req) {
   return headerValue(req, "X-Ingest-Key", key) && !key.empty();
 }
 
+std::atomic<int64_t> g_last_authenticated_ms{0};
+
 // Bearer 端点统一认证。失败时已回 401/403。
 bool requireBearer(httpd_req_t* req, std::string& token_out) {
   if (ingestKeyPresented(req)) {
@@ -337,6 +340,7 @@ bool requireBearer(httpd_req_t* req, std::string& token_out) {
     return false;
   }
   token_out = std::move(token);
+  g_last_authenticated_ms.store(esp_timer_get_time() / 1000, std::memory_order_relaxed);
   return true;
 }
 
@@ -406,6 +410,10 @@ bool runCommand(httpd_req_t* req, const AdminCommand& cmd, AdminResult& res) {
 }
 
 }  // namespace
+
+int64_t lastAuthenticatedRequestMs() {
+  return g_last_authenticated_ms.load(std::memory_order_relaxed);
+}
 
 }  // namespace eego::admin
 

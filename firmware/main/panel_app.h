@@ -23,10 +23,14 @@
 //   * 跨任务入口只有 notifyNetEvent / notifyAdminEvent：只做原子置位与小
 //     信箱投递，短平快，绝不做渲染/IO。
 //
-// 电源双策略（M13/M18）：
+// 电源双策略（M13/M18；电池模式详见 README「电池模式」与 battery_policy.h）：
 //   * 常供电：WiFi modem-sleep（setPowerSave(true)）常驻，http_push 即时可达；
-//   * 电池：唤醒 → 重连 → dashboard 全源拉取 → 渲染 → 短暂交互窗口 → 安全深睡
-//     （GPIO4 锁存保持 + 定时唤醒 + 电源键 EXT0 唤醒）；唤醒=重启，循环。
+//   * 电池·定时唤醒（Fetching）：最小初始化 → WiFi 快连 → 一批拉取全部到期源
+//     （硬预算）→ 离屏渲染 + 帧哈希 → 不变则不碰屏，否则 Fast（预载上一帧）/Full
+//     → 深睡到下一个本地墙钟对齐边界；
+//   * 电池·按键唤醒（Interactive）：完整应用，battery_interactive_timeout_s 无操作
+//     后同样渲染深睡帧并对齐深睡；
+//   * 夜间暂停（两种模式）：窗口内不唤醒，进入前状态行一次性显示恢复时刻。
 //   模式判定：DeviceSettings Auto = 充电状态（无电池读数回退常供电），S4 可强制。
 //
 // 静音（store 级）：外部告警详情静音 = 指纹规则经 net_task 落入 AlertStore
@@ -40,6 +44,7 @@
 #include <vector>
 
 #include "alert_core/snapshot.h"
+#include "battery_mode.h"
 #include "alert_core/type_registry.h"
 #include "board/board_boot.h"
 #include "dashboard_runtime.h"
@@ -75,6 +80,8 @@ class PanelApp {
     eego::board::BootStatus boot;
     alert_core::SnapshotPublisher* publisher = nullptr;  // 必须 outlive PanelApp
     alert_core::TypeRegistry* registry = nullptr;        // 必须 outlive PanelApp
+    // 电池定时唤醒快速路径（app_main 已跳过触控/BLE/管理 API，显示控制器延迟上电）。
+    bool fastWake = false;
   };
 
   PanelApp() = default;
@@ -197,7 +204,9 @@ class PanelApp {
   void applySettings(uint32_t changed);
   static void onSettingsChanged(const eego::settings::Settings& values, uint32_t changed,
                                 void* ctx);
-  uint64_t nextWakeAt(int64_t nowMs) const;
+  // 电池模式下次唤醒（设置页「下次唤醒」）；常供电/无计划返回 0。
+  uint64_t plannedWakeAt();
+  battery::WakeInputs wakeInputs(uint64_t nowUnix) const;
   uint64_t currentSnapshotEpoch() const;
   void armConfirm(ConfirmKind kind);
   void armDashboardConfirm(const DashboardConfirmRequest& request);
@@ -208,16 +217,24 @@ class PanelApp {
   void showBannerFmt(uint32_t ms, const char* fmt, ...)
       __attribute__((format(printf, 3, 4)));
 
-  // ---- 电源模式 ----
+  // ---- 电源模式 / 电池阶段机 ----
   bool computeMains();
   void onModeChange(bool mains);
-  void batteryFsm(int64_t nowMs);
-  // durationMs < 0 使用电池轮询周期；计划睡眠传入明确的窗口剩余时长。
-  // 非阻塞：只登记休眠请求；serviceSleep() 轮询网络静默后才真正入睡。
-  void enterSleep(int64_t nowMs, int64_t durationMs = -1);
+  bool dashboardLive() const { return mains_ || battPhase_ == BattPhase::Interactive; }
+  void enterInteractive(int64_t nowMs);
+  void batteryService(int64_t nowMs);
+  // 非阻塞：取消在途取数并登记休眠；serviceSleep() 等网络静默（有预算）后 sleepNow()。
+  void requestSleep(int64_t nowMs, const char* why);
   void serviceSleep(int64_t nowMs);
-  void deferSleep(int64_t nowMs);
-  void finishSleep(int64_t nowMs, int64_t sleepMs);
+  // 计算唤醒计划 → 渲染/判定/刷新深睡帧 → 持久化 → 深睡（不返回）。
+  [[noreturn]] void sleepNow();
+  // 深睡帧：离屏渲染、帧哈希、跳过/Fast/Full、保存到 SD 与 RTC。
+  void presentSleepFrame(const battery::WakePlan& plan, uint64_t nowUnix);
+  std::string batteryStatusText(uint8_t bucket, uint64_t stamp, uint32_t intervalMin) const;
+  std::string nightPauseText(uint64_t resumeUnix) const;
+  void drawNotice(const char* title, const char* line1, const char* line2, const char* line3);
+  uint64_t frameHash() const;
+  bool batchSucceeded() const;
 
   // 非阻塞网络静默等待：按退避间隔发短超时 waitIdle 探测（单次 ≤ ~200ms），
   // 预算耗尽返回 -1；静默返回 1；尚未确定返回 0。
@@ -279,7 +296,6 @@ class PanelApp {
   DashboardRuntime dashboard_;
   eego::settings::Settings settings_;
   int settingsSubscription_ = -1;
-  int wakeCause_ = 0;
 
   // 页面/导航状态（仅 app_task 上下文读写）
   Page page_ = Page::Onboarding;
@@ -371,21 +387,23 @@ class PanelApp {
   int64_t lastDoublePressSyncMs_ = -100000;
   bool doublePressSynced_ = false;
 
-  // 非阻塞网络静默等待（电池轮询收尾 / 休眠前）
-  NetIdleWait pollIdleWait_;
+  // 非阻塞网络静默等待（休眠前）
   NetIdleWait sleepIdleWait_;
   bool sleepPending_ = false;
-  bool sleepScheduled_ = false;      // 计划睡眠（duration 明确）
   int64_t sleepRequestedMs_ = 0;
-  int64_t sleepDurationMs_ = -1;
 
-  // 电源模式状态
+  // 电源模式 / 电池阶段机状态
   bool mains_ = true;
   BattPhase battPhase_ = BattPhase::Mains;
-  int64_t cycleStartMs_ = 0;
-  int64_t pollDeadlineMs_ = 0;
-  bool batteryPollStarted_ = false;
-  int64_t awakeDeadlineMs_ = 0;
+  battery::WakeSource wakeSource_ = battery::WakeSource::PowerOn;
+  bool fastWake_ = false;
+  bool restartRequested_ = false;    // 快速路径中按键：重启进完整应用
+  int64_t phaseStartMs_ = 0;
+  bool batchStarted_ = false;        // 本次唤醒的取数批次已发起
+  bool wifiSeen_ = false;            // 本次唤醒 WiFi 曾连上
+  uint64_t wakeStartUnix_ = 0;
+  bool displayedThisBoot_ = false;   // 本次启动已刷过屏（控制器 DTM1 = 面板内容）
+  int64_t wakePressGuardUntilMs_ = 0;  // 按键唤醒：唤醒那一下不当作操作
   int64_t lastInputMs_ = 0;
   bool fallbackArmed_ = false;
 };

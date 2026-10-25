@@ -10,7 +10,8 @@
 namespace eego {
 namespace board {
 
-BootStatus beginStandardHardware(Uc8279cDisplay& display, Gslx680Touch& touch) {
+BootStatus beginStandardHardware(Uc8279cDisplay& display, Gslx680Touch& touch,
+                                 const BootOptions& options) {
     BootStatus st;
 
     // 1. GPIO4 电源锁存 — 系统启动后首项硬件操作
@@ -18,7 +19,7 @@ BootStatus beginStandardHardware(Uc8279cDisplay& display, Gslx680Touch& touch) {
     st.powerLatched = true;
 
     // 2. 触控（GSLX680 固件上传，共享 I2C_NUM_0）+ 三键轮询任务
-    st.touchReady = (touch.begin(I2C_NUM_0) == ESP_OK);
+    st.touchReady = options.touch && (touch.begin(I2C_NUM_0) == ESP_OK);
     st.buttonsReady = (ButtonManager::instance().begin() == ESP_OK);
 
     // 3. 前光安全探测（LM3630A 缺席时 GPIO12 已回低电平）
@@ -38,8 +39,8 @@ BootStatus beginStandardHardware(Uc8279cDisplay& display, Gslx680Touch& touch) {
 
     // 7. UC8279C 显示（独立 SPI3_HOST，PSRAM framebuffer）— 最后初始化。
     //    先全白 Full 刷一帧：清残影并尽早证明显示链路健康。
-    st.displayReady = (display.begin() == ESP_OK);
-    if (st.displayReady) {
+    st.displayReady = (display.begin(options.deferDisplay) == ESP_OK);
+    if (st.displayReady && options.clearDisplay && !options.deferDisplay) {
         display.clear();
         display.display(RefreshMode::Full);
         display.waitRefreshComplete();

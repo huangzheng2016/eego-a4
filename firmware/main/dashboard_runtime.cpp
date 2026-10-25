@@ -58,7 +58,6 @@ constexpr int64_t kStatusPeriodMs = 30000;       // 时钟来源（SNTP/RTC）�
 constexpr int64_t kStatusCheckMs = 1000;         // 状态行文本变化检查周期（仅文本变化才重绘）
 constexpr int64_t kStoreCheckMs = 2000;          // DashboardStore 已提交修订号检查周期
 constexpr int64_t kCarouselPeriodMs = 15000;
-constexpr int64_t kBatteryCycleMs = 130000;
 
 int64_t monotonicMs() { return esp_timer_get_time() / 1000; }
 int64_t pipelineMs() { return static_cast<int64_t>(TimeSource::now()) * 1000; }
@@ -326,6 +325,8 @@ struct DashboardRuntime::Impl {
   dp::TickResult last_tick;
   ui::RenderResult last_render;
   std::string message;
+  // 电池深睡帧的状态行（电量/更新于/最迟，或夜间暂停）；空 = 常规状态行。
+  std::string battery_status;
   int64_t message_deadline_ms = 0;
   size_t render_count = 0;
   size_t skipped_render_count = 0;
@@ -2077,13 +2078,27 @@ struct DashboardRuntime::Impl {
     }
   }
 
-  void pollBattery() {
+  void pollBattery(int64_t budget_ms) {
     if (!dashboardPipelineReady(ready, pipeline.get())) return;
     battery_cycle_active = true;
     battery_cycle_cancelled = false;
-    battery_cycle_deadline_ms = monotonicMs() + kBatteryCycleMs;
+    battery_cycle_deadline_ms = monotonicMs() + budget_ms;
     pipeline->resumeAsync();
     tick();
+  }
+
+  void cancelBatteryCycle() {
+    if (!dashboardPipelineReady(ready, pipeline.get())) return;
+    pipeline->cancelAsync();  // 取消在途请求并挂起：直到 resumeAsync 不再发起新请求
+    battery_cycle_active = false;
+    battery_cycle_cancelled = true;
+  }
+
+  void setBatteryStatus(const std::string& text) {
+    if (text == battery_status) return;
+    battery_status = text;
+    status_dirty = true;
+    dirty = true;
   }
 
   bool networkIdle() const {
@@ -2204,6 +2219,7 @@ struct DashboardRuntime::Impl {
       banner_id = dashboardEventIdentity(*event);
       return std::string(dash::severityName(event->severity)) + " " + event->title + "  >";
     }
+    if (!battery_status.empty()) return battery_status;
     const std::vector<const dash::Page*> pages = visiblePages();
     size_t number = 0;
     for (size_t i = 0; i < pages.size(); ++i) {
@@ -2288,7 +2304,8 @@ struct DashboardRuntime::Impl {
     return ready && dirty && monotonicMs() - last_render_ms >= kRenderThrottleMs;
   }
 
-  void render() {
+  // push=false：只画进 framebuffer（电池模式先算帧哈希再决定是否/如何刷屏）。
+  void render(bool push = true) {
     if (!ready || deps.canvas == nullptr) return;
     rebuildLayout();
     ui::RenderOptions options;
@@ -2302,7 +2319,9 @@ struct DashboardRuntime::Impl {
     drawFocus();
     drawStatus();
     deps.canvas->resetClip();
-    if (dashboardShouldDisplay(last_render.refresh_needed, status_dirty)) {
+    if (!push) {
+      ++skipped_render_count;
+    } else if (dashboardShouldDisplay(last_render.refresh_needed, status_dirty)) {
       const eego::RefreshMode mode = force_full ? eego::RefreshMode::Full : last_render.refresh_mode;
       deps.canvas->display(mode);
       deps.canvas->waitRefreshComplete();
@@ -2602,8 +2621,17 @@ std::string DashboardRuntime::title() const {
 void DashboardRuntime::service(bool mains) {
   if (impl_ != nullptr) impl_->service(mains);
 }
-void DashboardRuntime::pollBattery() {
-  if (impl_ != nullptr) impl_->pollBattery();
+void DashboardRuntime::pollBattery(int64_t budget_ms) {
+  if (impl_ != nullptr) impl_->pollBattery(budget_ms);
+}
+void DashboardRuntime::cancelBatteryCycle() {
+  if (impl_ != nullptr) impl_->cancelBatteryCycle();
+}
+void DashboardRuntime::setBatteryStatus(const std::string& text) {
+  if (impl_ != nullptr) impl_->setBatteryStatus(text);
+}
+void DashboardRuntime::renderOffscreen() {
+  if (impl_ != nullptr) impl_->render(false);
 }
 bool DashboardRuntime::networkIdle() const {
   return impl_ == nullptr || impl_->networkIdle();

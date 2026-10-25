@@ -10,6 +10,8 @@
 # time_source.*    统一时间源（SNTP 系统时间 > RTC > 不可用；M21）
 # input_merge.*    触控/实体键同批时间戳归并（DP8 R1）
 # refresh_policy.* 空闲感知刷新节奏（纯逻辑，主机单测）
+# battery_policy.* 电池模式决策：对齐唤醒/夜间暂停/低电量/退避、刷屏判定、帧编码（纯逻辑，主机单测）
+# battery_mode.*   电池模式设备胶水：RTC 内存状态、SD 上一帧、深睡唤醒源
 idf_component_register(
     SRCS
         "app_main.cpp"
@@ -23,6 +25,8 @@ idf_component_register(
         "input_navigation.cpp"
         "input_merge.cpp"
         "refresh_policy.cpp"
+        "battery_policy.cpp"
+        "battery_mode.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         board

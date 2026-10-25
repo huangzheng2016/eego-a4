@@ -16,6 +16,7 @@ static const char* TAG = "net.wifi";
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
 #define WIFI_MAX_RETRIES 3  // 每个 SSID 最多重试次数
+static constexpr uint32_t kFastConnectTimeoutMs = 6000;
 
 const char* wifiStateName(WifiState s) {
   switch (s) {
@@ -103,6 +104,11 @@ void WifiManager::wifiEventHandler(void* arg, esp_event_base_t base, int32_t id,
         wifi_event_sta_connected_t* evt = (wifi_event_sta_connected_t*)data;
         self->current_ssid_.assign((const char*)evt->ssid,
                                    strnlen((const char*)evt->ssid, 32));
+        // 快连缓存：sys_evt 上下文只做小拷贝（读取方在连接完成后才读）。
+        self->last_ap_.ssid = self->current_ssid_;
+        memcpy(self->last_ap_.bssid, evt->bssid, sizeof(self->last_ap_.bssid));
+        self->last_ap_.channel = evt->channel;
+        self->last_ap_.valid = evt->channel != 0;
         break;
       }
       case WIFI_EVENT_STA_DISCONNECTED: {
@@ -127,15 +133,21 @@ void WifiManager::wifiEventHandler(void* arg, esp_event_base_t base, int32_t id,
   }
 }
 
-WifiState WifiManager::connect(const WifiAccount& acc, uint32_t timeout_ms) {
+void WifiManager::setFastConnectHint(const ApHint& hint) { fast_hint_ = hint; }
+
+ApHint WifiManager::lastConnectedAp() const { return last_ap_; }
+
+WifiState WifiManager::connect(const WifiAccount& acc, uint32_t timeout_ms, const ApHint* hint) {
   if (!initialized_ && init() != ESP_OK) {
     setState(WifiState::Failed);
     return state_;
   }
 
+  const bool fast = hint != nullptr && hint->valid && hint->channel != 0;
   esp_wifi_disconnect();
-  // 等底层完成断开，避免紧随其后的 esp_wifi_connect() 触发驱动竞态（weread 实证）
-  vTaskDelay(pdMS_TO_TICKS(200));
+  // 等底层完成断开，避免紧随其后的 esp_wifi_connect() 触发驱动竞态（weread 实证）。
+  // 快连只发生在本次启动的首次连接（之前从未关联），无断开可等。
+  if (!fast) vTaskDelay(pdMS_TO_TICKS(200));
   xEventGroupClearBits(event_group_, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
   last_reason_ = 0;
 
@@ -144,6 +156,13 @@ WifiState WifiManager::connect(const WifiAccount& acc, uint32_t timeout_ms) {
   strncpy((char*)cfg.sta.password, acc.password.c_str(), sizeof(cfg.sta.password) - 1);
   // 认证阈值 WPA_PSK：接受 WPA/WPA2/WPA3 常用加密（阈值不是开关，不能设 OPEN）
   cfg.sta.threshold.authmode = WIFI_AUTH_WPA_PSK;
+  if (fast) {
+    // 固定 BSSID + 信道：驱动只在该信道探测该 AP，跳过全信道扫描。
+    cfg.sta.bssid_set = true;
+    memcpy(cfg.sta.bssid, hint->bssid, sizeof(cfg.sta.bssid));
+    cfg.sta.channel = hint->channel;
+    cfg.sta.scan_method = WIFI_FAST_SCAN;
+  }
 
   esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
   if (err != ESP_OK) {
@@ -192,6 +211,19 @@ WifiState WifiManager::connectMulti(const std::vector<WifiAccount>& accounts) {
     ESP_LOGW(TAG, "no wifi account configured, offline mode");
     setState(WifiState::OfflineMode);
     return state_;
+  }
+
+  // 快连（电池定时唤醒）：一次固定 BSSID/信道的短超时尝试；失败回退常规路径。
+  if (fast_hint_.valid) {
+    const ApHint hint = fast_hint_;
+    fast_hint_ = ApHint{};
+    for (const WifiAccount& account : accounts) {
+      if (account.ssid != hint.ssid) continue;
+      ESP_LOGI(TAG, "fast connect %s (ch %u)", account.ssid.c_str(), (unsigned)hint.channel);
+      if (connect(account, kFastConnectTimeoutMs, &hint) == WifiState::Connected) return state_;
+      ESP_LOGW(TAG, "fast connect failed; falling back to scan");
+      break;
+    }
   }
 
   esp_wifi_disconnect();
