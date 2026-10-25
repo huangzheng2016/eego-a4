@@ -14,6 +14,12 @@ class ButtonGestureFsm {
   std::vector<ButtonEvent> sample(ButtonId id, bool pressed, int64_t now_us);
   std::vector<ButtonEvent> tick(int64_t now_us);
 
+  // 双击检测默认关闭：短按在释放时立即发出 ShortPress。仅当存在双击绑定时
+  // 为 Up/Down 开启（开启后 ShortPress 延迟 kInputDoublePressUs 以等待第二击）。
+  // Power 永不等待双击，此设置对其无效。
+  void setDoublePressEnabled(ButtonId id, bool enabled);
+  bool doublePressEnabled(ButtonId id) const;
+
  private:
   struct State {
     bool down = false;
@@ -34,6 +40,7 @@ class ButtonGestureFsm {
   }
 
   State states_[3]{};
+  bool double_enabled_[3]{};
 };
 
 enum class TouchContact : uint8_t { None, Screen, Front };
@@ -46,6 +53,7 @@ class TouchGestureFsm {
   std::vector<TouchEvent> invalidate(int64_t now_us);
   std::vector<TouchEvent> tick(int64_t now_us);
   bool screenPressed() const { return active_ == TouchContact::Screen; }
+  bool active() const { return active_ != TouchContact::None; }
 
  private:
   void start(TouchContact contact, uint16_t x, uint16_t y, int64_t now_us,

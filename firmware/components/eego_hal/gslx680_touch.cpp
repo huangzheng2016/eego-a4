@@ -9,6 +9,7 @@
 #include "gslx680_touch.h"
 #include "gslx680_firmware.h"
 
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,6 +18,12 @@
 namespace eego {
 
 namespace {
+constexpr uint32_t kTouchPollPeriodMs = 10;   // 采样周期（100Hz tick 下 = 1 tick）
+constexpr UBaseType_t kTouchQueueLen = 64;
+constexpr UBaseType_t kMoveReserveSlots = 16;  // 队列余量不足时丢弃 Move，保留关键事件
+constexpr uint32_t kTouchTaskStack = 4096;
+constexpr UBaseType_t kTouchTaskPriority = 3;  // 高于 app_task(1)/按键(2)，I²C 读 <1ms
+
 // 最少 1 个 tick 的毫秒延时（兼容 100Hz tick 配置下 pdMS_TO_TICKS 小于 1 的情况）
 void delayMs(uint32_t ms) {
     TickType_t ticks = pdMS_TO_TICKS(ms);
@@ -190,25 +197,20 @@ esp_err_t Gslx680Touch::begin(i2c_port_t port) {
 
 void Gslx680Touch::end() {
     enabled_ = false;
+    // 任务仍存活时它还在使用 gestures_/pressed_：不得重置，留给任务退出后。
+    if (!stopPolling()) return;
     gestures_.reset();
     pending_.clear();
+    pressed_.store(false);
     // 不卸载共享 I²C 总线（与 PCF8563 共用 I2C_NUM_0）
 }
 
-// --- 轮询 ---
-// 每 8ms 调用一次。读 0x80 的 24 字节帧：
+// --- 采样 ---
+// 读 0x80 的 24 字节帧：
 //   frame[0] = 触点数；point0 的 raw_y 在 bytes[4-5]、raw_x 在 bytes[6-7]（小端）。
 // 屏下电容键 sentinel：raw_x==0x03a0 且 raw_y==0x1020。
 
-TouchEvent Gslx680Touch::poll() {
-    if (!pending_.empty()) {
-        const TouchEvent out = pending_.front();
-        pending_.erase(pending_.begin());
-        return out;
-    }
-
-    TouchEvent none;
-    if (!enabled_) return none;
+std::vector<TouchEvent> Gslx680Touch::sampleFrame() {
     const int64_t now = esp_timer_get_time();
     uint8_t frame[24] = {};
     std::vector<TouchEvent> events;
@@ -233,6 +235,109 @@ TouchEvent Gslx680Touch::poll() {
                                       rawTouchToLogicalY(rawX), now);
         }
     }
+    pressed_.store(gestures_.screenPressed());
+    return events;
+}
+
+// --- 后台采样任务 ---
+
+esp_err_t Gslx680Touch::startPolling(SemaphoreHandle_t wake) {
+    if (!enabled_) return ESP_ERR_INVALID_STATE;
+    if (running_.load()) return ESP_OK;
+    if (!taskExited_.load()) return ESP_ERR_INVALID_STATE;  // 上一个任务尚未退出
+    wake_ = wake;
+    if (queue_ == nullptr) {
+        queue_ = xQueueCreate(kTouchQueueLen, sizeof(TouchEvent));
+        if (queue_ == nullptr) return ESP_ERR_NO_MEM;
+    }
+    pending_.clear();  // 同步模式残留事件不再交付
+    running_.store(true);
+    taskExited_.store(false);
+    if (xTaskCreate(&Gslx680Touch::pollTask, "eego_touch", kTouchTaskStack, this,
+                    kTouchTaskPriority, &task_) != pdPASS) {
+        running_.store(false);
+        taskExited_.store(true);
+        task_ = nullptr;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+bool Gslx680Touch::stopPolling() {
+    if (taskExited_.load()) {
+        running_.store(false);
+        return true;
+    }
+    running_.store(false);
+    // 让任务自行退出（不可外部删除：它可能正持有 I²C 端口锁，或阻塞在与
+    // RTC/前光共享的 I²C 事务上）。等到 taskExited_ 置位，上限 3 s。
+    for (int i = 0; i < 300 && !taskExited_.load(); ++i) delayMs(10);
+    if (!taskExited_.load()) {
+        ESP_LOGE("gslx680", "touch task did not exit; sampling state left untouched");
+        return false;
+    }
+    return true;
+}
+
+void Gslx680Touch::pollTask(void* arg) {
+    Gslx680Touch* self = static_cast<Gslx680Touch*>(arg);
+    TickType_t period = pdMS_TO_TICKS(kTouchPollPeriodMs);
+    if (period == 0) period = 1;
+    TickType_t lastWake = xTaskGetTickCount();
+    while (self->running_.load()) {
+        const std::vector<TouchEvent> events = self->sampleFrame();
+        bool sent = false;
+        for (const TouchEvent& ev : events) {
+            if (ev.type == TouchEventType::Move &&
+                uxQueueSpacesAvailable(self->queue_) < kMoveReserveSlots) {
+                self->dropped_.fetch_add(1);  // 消费者落后：Move 可合并丢弃
+                continue;
+            }
+            if (xQueueSend(self->queue_, &ev, 0) == pdTRUE) {
+                sent = true;
+            } else {
+                self->dropped_.fetch_add(1);
+            }
+        }
+        if (sent && self->wake_ != nullptr) xSemaphoreGive(self->wake_);
+        vTaskDelayUntil(&lastWake, period);
+    }
+    self->task_ = nullptr;
+    self->taskExited_.store(true);
+    vTaskDelete(nullptr);
+}
+
+// --- 消费者接口 ---
+
+bool Gslx680Touch::hasPending() const {
+    if (pollingActive() || (!taskExited_.load() && queue_ != nullptr))
+        return uxQueueMessagesWaiting(queue_) > 0;
+    return !pending_.empty();
+}
+
+TouchEvent Gslx680Touch::poll() {
+    TouchEvent none;
+    if (pollingActive()) {
+        TouchEvent ev;
+        if (xQueueReceive(queue_, &ev, 0) == pdTRUE) return ev;
+        return none;
+    }
+
+    // 任务已被要求停止但尚未退出：不能同步采样（与任务并发访问手势 FSM/I²C）。
+    // 只交付任务已排队的事件。
+    if (!taskExited_.load()) {
+        TouchEvent ev;
+        if (queue_ != nullptr && xQueueReceive(queue_, &ev, 0) == pdTRUE) return ev;
+        return none;
+    }
+
+    if (!pending_.empty()) {
+        const TouchEvent out = pending_.front();
+        pending_.erase(pending_.begin());
+        return out;
+    }
+    if (!enabled_) return none;
+    std::vector<TouchEvent> events = sampleFrame();
     if (events.empty()) return none;
     pending_ = std::move(events);
     const TouchEvent out = pending_.front();

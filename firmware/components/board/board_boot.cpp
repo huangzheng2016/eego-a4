@@ -22,7 +22,7 @@ BootStatus beginStandardHardware(Uc8279cDisplay& display, Gslx680Touch& touch) {
     st.buttonsReady = (ButtonManager::instance().begin() == ESP_OK);
 
     // 3. 前光安全探测（LM3630A 缺席时 GPIO12 已回低电平）
-    st.frontlightPresent = FrontlightManager::instance().present();
+    st.frontlightPresent = FrontlightManager::instance().lm3630aChipPresent();
 
     // 4. 充电状态极性随前光在位与否：
     //    LM3630A 在位 → GPIO11 active-high（下拉），缺席 → active-low（上拉）。

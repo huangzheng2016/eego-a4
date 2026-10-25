@@ -204,7 +204,14 @@ bool DeviceSettings::update(const Settings& candidate, uint32_t* changed, std::s
     xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
     return true;
   }
-  if ((mask & kChangedFrontlight) != 0 && !capabilities_.frontlight) {
+  // Judge frontlight availability by the candidate's hardware override, not by
+  // capabilities_.frontlight: that is only refreshed by the change callback
+  // after this update, so it is stale when the override changes together with
+  // the frontlight fields.
+  bool frontlight_allowed = capabilities_.frontlight_chip;
+  if (candidate.frontlight_hardware == FrontlightHardware::Present) frontlight_allowed = true;
+  if (candidate.frontlight_hardware == FrontlightHardware::Absent) frontlight_allowed = false;
+  if ((mask & kChangedFrontlight) != 0 && !frontlight_allowed) {
     error = "frontlight hardware is unavailable";
     xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
     return false;

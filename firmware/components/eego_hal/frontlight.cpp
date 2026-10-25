@@ -39,9 +39,15 @@ static bool flBusInstalled() {
            flProbeAck(eego::PCF8563_ADDRESS) == ESP_OK;
 }
 
-// 确保共享 I2C 总线可用（与 GSLX680 / PCF8563 / LM3630A 共用 I2C_NUM_0）
+// 确保共享 I2C 总线可用（与 GSLX680 / PCF8563 / LM3630A 共用 I2C_NUM_0）。
+// 成功后缓存：避免之后探测偶发失败时对正在使用的总线重新 i2c_param_config。
+static bool s_flBusReady = false;
 static esp_err_t flEnsureI2cBus() {
-    if (flBusInstalled()) return ESP_OK;  // 复用已装好的共享总线
+    if (s_flBusReady) return ESP_OK;
+    if (flBusInstalled()) {  // 复用已装好的共享总线
+        s_flBusReady = true;
+        return ESP_OK;
+    }
     i2c_config_t conf;
     memset(&conf, 0, sizeof(conf));
     conf.mode = I2C_MODE_MASTER;
@@ -54,8 +60,16 @@ static esp_err_t flEnsureI2cBus() {
     if (err != ESP_OK) return err;
     err = i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
+    s_flBusReady = true;
     return ESP_OK;
 }
+
+// 探测重试参数
+static constexpr int kProbeAttempts = 3;
+static constexpr uint32_t kProbeRetryDelayMs = 8;
+// 写/回读校验用寄存器：Brightness A (0x03)。LED bank 使能位复位为 0，写入不点亮。
+static constexpr uint8_t kProbeReg = 0x03;
+static constexpr uint8_t kProbePattern = 0x5a;
 
 namespace eego {
 
@@ -64,7 +78,28 @@ FrontlightManager& FrontlightManager::instance() {
     return inst;
 }
 
-bool FrontlightManager::present() {
+bool FrontlightManager::probeOnce() {
+    // 拉低→拉高→delay 2ms→ACK→写/回读校验→恢复原值；调用者负责最终拉低 enable
+    gpio_set_level(static_cast<gpio_num_t>(FRONTLIGHT_ENABLE), 0);
+    flDelayMs(1);
+    gpio_set_level(static_cast<gpio_num_t>(FRONTLIGHT_ENABLE), 1);
+    flDelayMs(2);
+    if (flProbeAck(eego::LM3630A_ADDRESS) != ESP_OK) return false;
+
+    uint8_t original = 0;
+    if (lm3630aRead(kProbeReg, &original) != ESP_OK) return false;
+    const uint8_t pattern = original == kProbePattern
+                                ? static_cast<uint8_t>(~kProbePattern)
+                                : kProbePattern;
+    uint8_t readback = 0;
+    const bool ok = lm3630aWrite(kProbeReg, pattern) == ESP_OK &&
+                    lm3630aRead(kProbeReg, &readback) == ESP_OK &&
+                    readback == pattern;
+    lm3630aWrite(kProbeReg, original);  // 恢复（失败亦尽力恢复）
+    return ok;
+}
+
+bool FrontlightManager::lm3630aChipPresent() {
     // 已探测过则直接返回缓存，不再 toggle GPIO12（非破坏性）
     if (_presentCached_) return _present_;
 
@@ -78,26 +113,37 @@ bool FrontlightManager::present() {
     io_conf.intr_type = GPIO_INTR_DISABLE;
     gpio_config(&io_conf);
 
-    if (flEnsureI2cBus() != ESP_OK) {
-        gpio_set_level(static_cast<gpio_num_t>(FRONTLIGHT_ENABLE), 0);
-        _presentCached_ = true;
-        _present_ = false;
-        return false;
+    bool present = false;
+    if (flEnsureI2cBus() == ESP_OK) {
+        for (int attempt = 0; attempt < kProbeAttempts && !present; ++attempt) {
+            if (attempt > 0) flDelayMs(kProbeRetryDelayMs);
+            present = probeOnce();
+            if (!present) {
+                ESP_LOGD(FL_TAG, "LM3630A probe attempt %d failed", attempt + 1);
+            }
+        }
     }
-
-    // 拉低→拉高→delay 2ms→写地址看 ACK（与厂商一致，仅 probe 地址字节）→拉低
     gpio_set_level(static_cast<gpio_num_t>(FRONTLIGHT_ENABLE), 0);
-    gpio_set_level(static_cast<gpio_num_t>(FRONTLIGHT_ENABLE), 1);
-    flDelayMs(2);
-
-    // 原厂探测方式：仅发送设备地址字节，检查是否 ACK
-    bool present = (flProbeAck(eego::LM3630A_ADDRESS) == ESP_OK);
-
-    gpio_set_level(static_cast<gpio_num_t>(FRONTLIGHT_ENABLE), 0);
+    _i2cConfigured = false;  // enable 拉低后芯片寄存器复位
 
     _presentCached_ = true;
     _present_ = present;
+    ESP_LOGI(FL_TAG, "LM3630A %s", present ? "detected" : "not detected");
     return present;
+}
+
+bool FrontlightManager::frontlightAvailable() {
+    switch (_override) {
+        case FrontlightOverride::Present: return true;
+        case FrontlightOverride::Absent: return false;
+        case FrontlightOverride::Auto: break;
+    }
+    return lm3630aChipPresent();
+}
+
+void FrontlightManager::setOverride(FrontlightOverride mode) {
+    _override = mode;
+    if (!frontlightAvailable()) off();
 }
 
 esp_err_t FrontlightManager::lm3630aWrite(uint8_t reg, uint8_t value) {
@@ -178,6 +224,7 @@ void FrontlightManager::setBrightness(uint8_t percent) {
         off();
         return;
     }
+    if (!frontlightAvailable()) return;
     if (flEnsureI2cBus() != ESP_OK) return;
     applyLm3630a();
 }
@@ -185,7 +232,7 @@ void FrontlightManager::setBrightness(uint8_t percent) {
 void FrontlightManager::setWarm(uint8_t warmPercent) {
     if (warmPercent > 100) warmPercent = 100;
     _warmPercent = warmPercent;
-    if (_brightness > 0) applyLm3630a();
+    if (_brightness > 0 && frontlightAvailable()) applyLm3630a();
 }
 
 void FrontlightManager::off() {
@@ -199,6 +246,7 @@ void FrontlightManager::off() {
 
 void FrontlightManager::on() {
     if (_brightness == 0) _brightness = 50;  // 恢复上一次亮度，若无则默认 50
+    if (!frontlightAvailable()) return;
     if (flEnsureI2cBus() != ESP_OK) return;
     applyLm3630a();
 }

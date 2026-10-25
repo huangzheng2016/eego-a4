@@ -256,6 +256,22 @@ bool powerModeFromString(const std::string& name, PowerMode& out) {
   return true;
 }
 
+const char* frontlightHardwareName(FrontlightHardware mode) {
+  switch (mode) {
+    case FrontlightHardware::Present: return "present";
+    case FrontlightHardware::Absent: return "absent";
+    default: return "auto";
+  }
+}
+
+bool frontlightHardwareFromString(const std::string& name, FrontlightHardware& out) {
+  if (name == "auto") out = FrontlightHardware::Auto;
+  else if (name == "present") out = FrontlightHardware::Present;
+  else if (name == "absent") out = FrontlightHardware::Absent;
+  else return false;
+  return true;
+}
+
 bool operator==(const BleFieldMap& a, const BleFieldMap& b) {
   return a.name == b.name && a.offset == b.offset && a.type == b.type && a.scale == b.scale;
 }
@@ -358,6 +374,7 @@ JsonValue toJson(const Settings& s) {
       {"frontlight_enabled", JsonValue::makeBool(s.frontlight_enabled)},
       {"frontlight_brightness", JsonValue::makeInt(s.frontlight_brightness)},
       {"frontlight_warmth", JsonValue::makeInt(s.frontlight_warmth)},
+      {"frontlight_hardware", JsonValue::makeString(frontlightHardwareName(s.frontlight_hardware))},
       {"epd_full_refresh_s", JsonValue::makeInt(s.epd_full_refresh_s)},
       {"diagnostics_enabled", JsonValue::makeBool(s.diagnostics_enabled)},
       {"ble_observer_enabled", JsonValue::makeBool(s.ble_observer_enabled)},
@@ -408,6 +425,10 @@ void validate(const Settings& s, FieldErrors& errors) {
   }
   if (s.frontlight_warmth > 100) {
     addError(errors, "frontlight_warmth", "must be in [0, 100]");
+  }
+  if (static_cast<uint8_t>(s.frontlight_hardware) >
+      static_cast<uint8_t>(FrontlightHardware::Absent)) {
+    addError(errors, "frontlight_hardware", "must be one of auto|present|absent");
   }
   if (s.epd_full_refresh_s != 0 &&
       (s.epd_full_refresh_s < 3600 || s.epd_full_refresh_s > 604800)) {
@@ -514,6 +535,16 @@ bool mergePatch(const Settings& current, const JsonValue& patch, Settings& out,
           next.power_mode = mode;
         }
       }
+    } else if (key == "frontlight_hardware") {
+      std::string text;
+      if (readString(value, key.c_str(), text, errors)) {
+        FrontlightHardware mode;
+        if (!frontlightHardwareFromString(text, mode)) {
+          addError(errors, key, "must be one of auto|present|absent");
+        } else {
+          next.frontlight_hardware = mode;
+        }
+      }
     } else if (key == "battery_poll_s" || key == "data_refresh_s" ||
                key == "idle_sleep_s" || key == "sleep_start_min" ||
                key == "sleep_end_min" || key == "timezone_offset_min" ||
@@ -578,6 +609,7 @@ uint32_t changedFields(const Settings& a, const Settings& b) {
       a.frontlight_warmth != b.frontlight_warmth) {
     changed |= kChangedFrontlight;
   }
+  if (a.frontlight_hardware != b.frontlight_hardware) changed |= kChangedFrontlightHardware;
   if (a.data_refresh_s != b.data_refresh_s) changed |= kChangedDataRefresh;
   if (a.epd_full_refresh_s != b.epd_full_refresh_s) changed |= kChangedEpdRefresh;
   if (a.idle_sleep_s != b.idle_sleep_s || a.sleep_start_min != b.sleep_start_min ||
@@ -674,6 +706,7 @@ const char* schemaJson() {
     "frontlight_enabled": {"type":"bool","default":false,"capability":"frontlight","group":"display"},
     "frontlight_brightness": {"type":"int","range":[1,100],"default":60,"capability":"frontlight","group":"display"},
     "frontlight_warmth": {"type":"int","range":[0,100],"default":50,"capability":"frontlight","group":"display"},
+    "frontlight_hardware": {"type":"string","enum":["auto","present","absent"],"default":"auto","note":"auto uses LM3630A detection; present/absent override it and gate the frontlight capability","group":"display"},
     "epd_full_refresh_s": {"type":"int","range":[0,604800],"minimum_nonzero":3600,"default":86400,"group":"refresh"},
     "diagnostics_enabled": {"type":"bool","default":true,"group":"diagnostics"},
     "ble_observer_enabled": {"type":"bool","default":false,"capability":"ble_observer","group":"ble"},

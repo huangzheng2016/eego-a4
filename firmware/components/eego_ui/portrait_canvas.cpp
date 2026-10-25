@@ -61,7 +61,6 @@ void PortraitCanvas::useUiContentRect() {
 void PortraitCanvas::clear() {
     // 背景允许覆盖整个物理面板，不受裁剪限制
     display_.clear();
-    display_.clearGray();  // 重置灰阶状态，下次绘制重新同步 fb_
 }
 
 // ── 像素 ────────────────────────────────────────────────────────────────────
@@ -341,20 +340,13 @@ void PortraitCanvas::drawTextRight(int16_t x, int16_t y, int16_t w, const char* 
 // ── 刷新 ────────────────────────────────────────────────────────────────────
 
 void PortraitCanvas::display(RefreshMode mode) {
-    // 当前帧含灰度内容时走原生四级灰阶刷新；否则走 BW 刷新
-    if (display_.hasGrayContent()) {
-        display_.displayGray(false, false);
-    } else {
-        display_.display(mode);
-    }
+    // 刷新策略在驱动层：Fast → B/W 快刷（灰度已阈值化进 fb_）；
+    // Full / 周期升级 / requestFullRefresh → 帧含灰度时走四级灰阶波形。
+    display_.display(mode);
 }
 
-void PortraitCanvas::displayAsync(RefreshMode mode) {
-    if (display_.hasGrayContent()) {
-        display_.displayGray(false, true);
-    } else {
-        display_.displayAsync(mode);
-    }
+void PortraitCanvas::requestFullRefresh() {
+    display_.requestFullRefresh();
 }
 
 void PortraitCanvas::waitRefreshComplete() {

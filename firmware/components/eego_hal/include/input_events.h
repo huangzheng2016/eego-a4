@@ -10,7 +10,10 @@ inline constexpr int64_t kInputDoublePressUs = 280000;
 inline constexpr int64_t kInputChordWindowUs = 140000;
 inline constexpr int64_t kInputActionMaxAgeUs = 750000;
 inline constexpr int kTouchSlopPx = 24;
-inline constexpr int kTouchSwipeMinPx = 80;
+inline constexpr int kTouchSwipeMinPx = 60;
+// 主方向位移须 >= 次方向位移 × 1.5（以整数 2*major >= 3*minor 判定）。
+inline constexpr int kTouchSwipeRatioNum = 3;
+inline constexpr int kTouchSwipeRatioDen = 2;
 inline constexpr int64_t kTouchSwipeMaxUs = 1200000;
 
 enum class ButtonId : uint8_t { Up = 0, Down, Power };
@@ -39,6 +42,8 @@ enum class TouchEventType : uint8_t {
   Hold,
   SwipeLeft,
   SwipeRight,
+  SwipeUp,    // 手指向上划（y 减小）
+  SwipeDown,  // 手指向下划（y 增大）
   FrontPress,
   FrontRelease,
   FrontShort,

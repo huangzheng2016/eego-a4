@@ -19,8 +19,9 @@
 //   9. diag::start（串口命令钩子全部在 app_task 上下文执行）+ PanelApp.begin
 //
 // app_task 主循环（唯一 UI 属主）：
-//   触控帧 + 按键队列按时间戳归并 → diag::service → admin::serviceCommands(0) →
-//   app.service()（事件归并/电源 FSM/按需渲染）→ vTaskDelay(8ms)
+//   排空触控队列（eego_touch 任务 10ms 采样）+ 按键队列，按时间戳归并 →
+//   diag::service → admin::serviceCommands(0) → app.service()（事件归并/电源
+//   FSM/按需渲染）→ 等待输入唤醒信号量（最长 kIdleWaitMs）
 //
 // 串口诊断入口：USB Serial/JTAG 115200，输入 help 查看命令。
 
@@ -33,6 +34,7 @@
 #include <strings.h>  // strcasecmp
 
 #include "admin/admin.h"
+#include "admin/display_snapshot.h"
 #include "alert_core/persistence.h"
 #include "alert_core/store.h"
 #include "alert_core/type_registry.h"
@@ -43,6 +45,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "net_stack/net_stack.h"
 #include "net_stack/sd_alert_file_io.h"
@@ -61,7 +64,50 @@ namespace {
 
 const char* TAG = "app";
 
-constexpr uint32_t kTouchPollMs = 8;  // GSLX680 轮询周期（触控合同）
+// 无输入时主循环的最长休眠；触控/按键任务入队后 give 唤醒信号量立即唤醒。
+// 至少 1 tick（100Hz tick 下 pdMS_TO_TICKS(8)==0 会退化为忙等并饿死 idle 任务）。
+constexpr uint32_t kIdleWaitMs = 20;
+// 同步触控模式（采样任务未启动）时须每 tick 轮询一次。
+constexpr uint32_t kSyncTouchPollMs = 10;
+constexpr size_t kMaxTouchEventsPerLoop = 64;
+
+TickType_t ticksAtLeastOne(uint32_t ms) {
+  const TickType_t ticks = pdMS_TO_TICKS(ms);
+  return ticks == 0 ? 1 : ticks;
+}
+
+eego::FrontlightOverride toFrontlightOverride(eego::settings::FrontlightHardware mode) {
+  switch (mode) {
+    case eego::settings::FrontlightHardware::Present:
+      return eego::FrontlightOverride::Present;
+    case eego::settings::FrontlightHardware::Absent:
+      return eego::FrontlightOverride::Absent;
+    case eego::settings::FrontlightHardware::Auto:
+      break;
+  }
+  return eego::FrontlightOverride::Auto;
+}
+
+// frontlight_hardware 覆盖热生效：更新 FrontlightManager 与 capabilities.frontlight
+// （web admin 依 capability 门控前光字段）。回调在 DeviceSettings::update 调用者
+// 上下文（app_task）执行，update 已释放设置互斥后才通知。
+void onDeviceSettingsChanged(const eego::settings::Settings& values, uint32_t changed,
+                             void* ctx) {
+  (void)ctx;
+  if ((changed & eego::settings::kChangedFrontlightHardware) == 0) return;
+  eego::FrontlightManager& frontlight = eego::FrontlightManager::instance();
+  frontlight.setOverride(toFrontlightOverride(values.frontlight_hardware));
+  auto& settings = eego::settings::DeviceSettings::instance();
+  eego::settings::Capabilities caps = settings.snapshot().capabilities;
+  caps.frontlight = frontlight.frontlightAvailable();
+  settings.setCapabilities(caps);
+  if (caps.frontlight) {
+    frontlight.setWarm(values.frontlight_warmth);
+    frontlight.setBrightness(values.frontlight_enabled ? values.frontlight_brightness : 0);
+  } else {
+    frontlight.off();
+  }
+}
 
 #if defined(EEGO_LOCAL_WIFI_SSID) || defined(EEGO_LOCAL_ADMIN_PASSWORD)
 void seedLocalCredentials() {
@@ -338,8 +384,11 @@ extern "C" void app_main(void) {
     }
   }
 #endif
+  eego::FrontlightManager::instance().setOverride(
+      toFrontlightOverride(deviceSettings.snapshot().values.frontlight_hardware));
   eego::settings::Capabilities capabilities;
-  capabilities.frontlight = eego::FrontlightManager::instance().present();
+  capabilities.frontlight = eego::FrontlightManager::instance().frontlightAvailable();
+  capabilities.frontlight_chip = eego::FrontlightManager::instance().lm3630aChipPresent();
   capabilities.battery = eego::PowerManager::instance().readBattery().millivolts > 0;
   capabilities.bluetooth = eego::ble::BleManager::compiled();
   capabilities.ble_provisioning = eego::ble::BleManager::compiled();
@@ -348,6 +397,9 @@ extern "C" void app_main(void) {
   capabilities.sd = bootStatus.sdReady;
   capabilities.rtc = bootStatus.rtcReady;
   deviceSettings.setCapabilities(capabilities);
+  if (deviceSettings.subscribe(&onDeviceSettingsChanged, nullptr) < 0) {
+    ESP_LOGW(TAG, "settings subscription table full (frontlight override needs reboot)");
+  }
   const esp_err_t inputErr = admin::InputBindings::instance().init();
   if (inputErr != ESP_OK) {
     ESP_LOGE(TAG, "input bindings init failed: %s; using safe defaults",
@@ -460,6 +512,18 @@ extern "C" void app_main(void) {
       });
   admin::setAdminCommandHandler(&admin::defaultCommandHandler, nullptr);
   admin::setAdminEventCallback(&onAdminEvent, &app);
+  // GET /api/v1/display/snapshot.bmp：在 httpd 任务读取当前帧缓冲（只读，渲染中可能撕裂，
+  // 不影响显示）。未就绪时返回 503。
+  admin::setDisplaySnapshotProvider([](uint8_t* rows, size_t stride) {
+    if (!bootStatus.displayReady) return false;
+    for (int16_t y = 0; y < static_cast<int16_t>(admin::kSnapshotHeight); ++y) {
+      uint8_t* row = rows + static_cast<size_t>(y) * stride;
+      for (int16_t x = 0; x < static_cast<int16_t>(admin::kSnapshotWidth); ++x) {
+        if (display.getPixel(x, y)) row[x / 8] |= static_cast<uint8_t>(0x80 >> (x & 7));
+      }
+    }
+    return true;
+  });
   net.setEventCallback(&onNetEvent, &app);
 
   // 8. 设备模式判定（M13 bootstrap）：无管理密码 → 配网门户；否则管理 API
@@ -506,18 +570,32 @@ extern "C" void app_main(void) {
   app.begin(deps);
 
   // 10. app_task 主循环（唯一 UI 属主；input/net/httpd/serial 只经队列/快照交互）
+  //     触控在 eego_touch 任务中持续采样（渲染阻塞 app_task 时手势不丢），
+  //     触控/按键任务入队后 give inputWake 唤醒本循环。
+  SemaphoreHandle_t inputWake = xSemaphoreCreateBinary();
+  eego::ButtonManager::instance().setWakeSemaphore(inputWake);
+  if (bootStatus.touchReady) {
+    const esp_err_t touchErr = touch.startPolling(inputWake);
+    if (touchErr != ESP_OK) {
+      ESP_LOGW(TAG, "touch task start failed (%s); polling synchronously",
+               esp_err_to_name(touchErr));
+    }
+  }
   ESP_LOGI(TAG, "app_task running");
   eego::ButtonEvent bevt;
   panel::InputEventBatch inputEvents;
   while (true) {
-    // 每轮只读取一次新触控帧，随后排空该帧事件与全部实体键；在任一
-    // handler 可执行危险动作前，先按统一 esp_timer 时间戳归并两个来源。
+    // 排空当前全部可观测输入；在任一 handler 可执行危险动作前，先按统一
+    // esp_timer 时间戳归并两个来源。同步模式下每轮只读一帧新触控。
+    // 本轮从阻塞（上一轮渲染/命令处理/空闲等待）恢复：此前排队的手势按此刻起算年龄。
+    app.noteInputResume();
     inputEvents.clear();
-    while (true) {
+    const bool touchTask = touch.pollingActive();
+    for (size_t n = 0; n < kMaxTouchEventsPerLoop; ++n) {
       const eego::TouchEvent tev = touch.poll();
       if (tev.type == eego::TouchEventType::None) break;
       inputEvents.add(tev);
-      if (!touch.hasPending()) break;
+      if (!touchTask && !touch.hasPending()) break;
     }
     while (eego::ButtonManager::instance().poll(&bevt, 0)) {
       inputEvents.add(bevt);
@@ -533,6 +611,13 @@ extern "C" void app_main(void) {
     // 应用主服务（事件归并/电源 FSM/按需渲染；电池模式可能在此深睡不返回）
     app.service();
 
-    vTaskDelay(pdMS_TO_TICKS(kTouchPollMs));
+    // 有待处理输入则立即下一轮；否则阻塞等待输入唤醒（至少 1 tick，让出 CPU）
+    if (touch.hasPending()) continue;
+    const TickType_t wait = ticksAtLeastOne(touchTask ? kIdleWaitMs : kSyncTouchPollMs);
+    if (inputWake != nullptr) {
+      xSemaphoreTake(inputWake, wait);
+    } else {
+      vTaskDelay(wait);
+    }
   }
 }

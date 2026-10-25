@@ -15,6 +15,9 @@ namespace eego::settings {
 
 struct Capabilities {
   bool frontlight = false;
+  // LM3630A chip detected by the hardware probe, independent of the
+  // frontlight_hardware override (used to resolve FrontlightHardware::Auto).
+  bool frontlight_chip = false;
   bool battery = false;
   bool bluetooth = false;
   bool ble_provisioning = false;

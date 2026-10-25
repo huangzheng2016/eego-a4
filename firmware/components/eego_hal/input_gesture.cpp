@@ -20,6 +20,15 @@ size_t ButtonGestureFsm::index(ButtonId id) {
   return 0;
 }
 
+void ButtonGestureFsm::setDoublePressEnabled(ButtonId id, bool enabled) {
+  if (!isUpDown(id)) return;
+  double_enabled_[index(id)] = enabled;
+}
+
+bool ButtonGestureFsm::doublePressEnabled(ButtonId id) const {
+  return isUpDown(id) && double_enabled_[index(id)];
+}
+
 void ButtonGestureFsm::reset(int64_t now_us, uint8_t pressed_mask,
                              bool wake_release_gate) {
   for (size_t i = 0; i < 3; ++i) {
@@ -113,6 +122,12 @@ std::vector<ButtonEvent> ButtonGestureFsm::sample(ButtonId id, bool pressed,
     out.push_back({id, ButtonAction::DoublePress, now_us});
     return out;
   }
+  if (!doublePressEnabled(id)) {
+    // 无双击绑定（或 Power）：立即发出短按，不引入 280ms 延迟
+    current.pending_short_deadline_us = 0;
+    out.push_back({id, ButtonAction::ShortPress, now_us});
+    return out;
+  }
   current.pending_short_deadline_us = now_us + kInputDoublePressUs;
   return out;
 }
@@ -167,9 +182,14 @@ void TouchGestureFsm::release(int64_t now_us, std::vector<TouchEvent>& out) {
       const int dy = static_cast<int>(last_y_) - static_cast<int>(start_y_);
       const int ax = absolute(dx);
       const int ay = absolute(dy);
-      if (ax >= kTouchSwipeMinPx && ax >= ay * 2 &&
-          now_us - down_since_us_ <= kTouchSwipeMaxUs) {
+      const bool quick = now_us - down_since_us_ <= kTouchSwipeMaxUs;
+      if (quick && ax >= kTouchSwipeMinPx &&
+          ax * kTouchSwipeRatioDen >= ay * kTouchSwipeRatioNum) {
         out.push_back({dx < 0 ? TouchEventType::SwipeLeft : TouchEventType::SwipeRight,
+                       last_x_, last_y_, now_us});
+      } else if (quick && ay >= kTouchSwipeMinPx &&
+                 ay * kTouchSwipeRatioDen >= ax * kTouchSwipeRatioNum) {
+        out.push_back({dy < 0 ? TouchEventType::SwipeUp : TouchEventType::SwipeDown,
                        last_x_, last_y_, now_us});
       } else if (!moved_) {
         out.push_back({TouchEventType::Tap, last_x_, last_y_, now_us});
@@ -251,7 +271,8 @@ std::vector<TouchEvent> TouchGestureFsm::sample(TouchContact contact, uint16_t x
         absolute(static_cast<int>(y) - static_cast<int>(start_y_)) > kTouchSlopPx) {
       moved_ = true;
     }
-    out.push_back({TouchEventType::Move, x, y, now_us});
+    // 只在越过 slop 后发 Move：slop 内的抖动不应取消按住确认（hold-to-confirm）
+    if (moved_) out.push_back({TouchEventType::Move, x, y, now_us});
   }
   expireHold(now_us, out);
   return out;

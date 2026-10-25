@@ -18,6 +18,13 @@ enum class PowerMode : uint8_t {
   Battery = 2,
 };
 
+// 前光硬件覆盖：auto=按 LM3630A 探测；present/absent=强制可用/不可用。
+enum class FrontlightHardware : uint8_t {
+  Auto = 0,
+  Present = 1,
+  Absent = 2,
+};
+
 enum Change : uint32_t {
   kChangedLanguage = 1u << 0,
   kChangedPower = 1u << 1,
@@ -28,8 +35,9 @@ enum Change : uint32_t {
   kChangedDiagnostics = 1u << 6,
   kChangedEpdRefresh = 1u << 7,
   kChangedBle = 1u << 8,
+  kChangedFrontlightHardware = 1u << 9,
   kChangedRefresh = kChangedDataRefresh | kChangedEpdRefresh,
-  kChangedAll = (1u << 9) - 1,
+  kChangedAll = (1u << 10) - 1,
 };
 
 inline constexpr size_t kMaxBleObserverRules = 4;
@@ -77,6 +85,7 @@ struct Settings {
   bool frontlight_enabled = false;
   uint8_t frontlight_brightness = 60;
   uint8_t frontlight_warmth = 50;
+  FrontlightHardware frontlight_hardware = FrontlightHardware::Auto;
   uint32_t epd_full_refresh_s = 86400;
   bool diagnostics_enabled = true;
   bool ble_observer_enabled = false;
@@ -102,6 +111,8 @@ using FieldErrors = std::vector<FieldError>;
 
 const char* powerModeName(PowerMode mode);
 bool powerModeFromString(const std::string& name, PowerMode& out);
+const char* frontlightHardwareName(FrontlightHardware mode);
+bool frontlightHardwareFromString(const std::string& name, FrontlightHardware& out);
 
 alert_core::JsonValue toJson(const Settings& settings);
 void validate(const Settings& settings, FieldErrors& errors);

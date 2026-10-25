@@ -124,7 +124,7 @@ void Uc8279cDisplay::end() {
         free(fbGrayLsb_);
         fbGrayLsb_ = nullptr;
     }
-    hasGray_ = false;
+    planesActive_ = false;
     if (spi_) {
         spi_bus_remove_device(spi_);
         spi_ = nullptr;
@@ -347,41 +347,54 @@ bool Uc8279cDisplay::refresh(bool turnOff) {
 }
 
 void Uc8279cDisplay::display(RefreshMode mode, bool turnOff) {
-    // 先等待上一帧刷新真正完成（避免打断正在进行的刷新）
-    waitBusy("pre-wait");
+    // 仅在控制器仍忙时等待（阻塞刷新返回时已空闲，避免每帧白等 settle 窗口）
+    waitIfBusy("pre-wait");
+    const bool off = turnOff || autoPowerOff_;
+    bool full = (mode == RefreshMode::Full) || fullRequested_;
+    // Fast 限流：连续 fastRefreshLimit_ 次 Fast 后本次升级为 Full（清残影）
+    if (!full && fastRefreshLimit_ != 0 && fastRefreshesSinceFull_ >= fastRefreshLimit_) {
+        full = true;
+    }
+    fullRequested_ = false;
+    // 灰阶波形只用于 Full：Fast 请求一律走 B/W 快刷（fb_ 已是灰度的阈值版本）
+    if (full && hasGrayContent()) {
+        displayGrayFrame(off);
+        return;
+    }
+    displayBw(full, off);
+}
+
+void Uc8279cDisplay::displayBw(bool full, bool turnOff) {
     // 从灰阶模式恢复到 BW 模式：需重新初始化控制器（RST 脉冲，不断电）
     if (grayControllerMode_) {
         hardwareReset();
         initController(false);
+        // initController(false) fills DTM1 (the "old" frame the Fast LUT diffs
+        // against) with white, but the panel still shows the grey frame and the
+        // driver keeps no B/W copy of it. A Fast refresh here would only drive
+        // pixels that differ from white, leaving a ghost of the previous image
+        // (e.g. the old highlight). The first B/W refresh after a grey frame
+        // must therefore use the Full waveform.
+        full = true;
     }
     ensurePowerOn();
 
-    bool fast = (mode == RefreshMode::Fast);
-    // Fast 限流: 连续 4 次后第 5 次升级为 Full
-    if (fast && fastRefreshesSinceFull_ >= MAX_CONSECUTIVE_FAST) {
-        fast = false;
-    }
+    const bool fast = !full;
     if (fast) {
-        ++fastRefreshesSinceFull_;
+        if (fastRefreshesSinceFull_ < 0xff) ++fastRefreshesSinceFull_;
     } else {
         fastRefreshesSinceFull_ = 0;
     }
 
     const uint8_t interval = fast ? 0xd7 : 0x97;
     cmdData(CMD_VCOM_DATA_INTERVAL, &interval, 1);
-
-    if (fast) {
-        loadFastLut();
-    } else {
-        // Half 和 Full 都用完整 LUT
-        loadFullLut();
-    }
+    if (fast) loadFastLut(); else loadFullLut();
 
     writeFrame(CMD_DTM2, fb_);
     if (!refresh(turnOff)) {
         // 刷新命令被吞：RST 重置控制器并重推一帧
         ESP_LOGW(TAG_UC, "display: 刷新未启动，重置控制器重试");
-        waitBusy("retry-wait");
+        waitIfBusy("retry-wait");
         hardwareReset();
         initController(false);
         ensurePowerOn();
@@ -394,52 +407,25 @@ void Uc8279cDisplay::display(RefreshMode mode, bool turnOff) {
     }
 }
 
-void Uc8279cDisplay::displayAsync(RefreshMode mode) {
-    // 先等待上一帧刷新完成，再重置控制器（避免打断进行中的刷新）
-    waitBusy("pre-wait");
-    // 从灰阶模式恢复到 BW 模式：需重新初始化控制器
-    if (grayControllerMode_) {
-        hardwareReset();
-        initController(false);
-    }
-    ensurePowerOn();
-
-    bool fast = (mode == RefreshMode::Fast);
-    if (fast && fastRefreshesSinceFull_ >= MAX_CONSECUTIVE_FAST) {
-        fast = false;
-    }
-    if (fast) {
-        ++fastRefreshesSinceFull_;
-    } else {
-        fastRefreshesSinceFull_ = 0;
-    }
-
-    const uint8_t interval = fast ? 0xd7 : 0x97;
-    cmdData(CMD_VCOM_DATA_INTERVAL, &interval, 1);
-
-    if (fast) {
-        loadFastLut();
-    } else {
-        loadFullLut();
-    }
-
-    writeFrame(CMD_DTM2, fb_);
-    sendCmd(CMD_DISPLAY_REFRESH);
-    // 不等待 BUSY — 非阻塞
-}
-
 void Uc8279cDisplay::waitRefreshComplete() {
-    waitBusy("refresh");
+    waitIfBusy("refresh");
 }
 
 // ── 四级灰阶刷新 ─────────────────────────────────────────────────────────────
 
-void Uc8279cDisplay::displayGray(bool turnOff, bool async) {
-    // 未分配灰阶平面（无灰度内容）时直接返回，保留当前 BW 画面
-    if (!fbGrayMsb_ || !fbGrayLsb_) return;
+void Uc8279cDisplay::displayGray(bool turnOff) {
+    waitIfBusy("gray-pre-wait");
+    fullRequested_ = false;
+    const bool off = turnOff || autoPowerOff_;
+    // 无灰阶平面（无灰度内容）时退化为 B/W 完整刷新
+    if (!planesActive_ || !fbGrayMsb_ || !fbGrayLsb_) {
+        displayBw(true, off);
+        return;
+    }
+    displayGrayFrame(off);
+}
 
-    // 先等待上一帧刷新完成（避免打断正在进行的刷新）
-    waitBusy("gray-pre-wait");
+void Uc8279cDisplay::displayGrayFrame(bool turnOff) {
     // 灰阶模式需要重新初始化控制器（grayMode=true，RST 脉冲，不断电）
     hardwareReset();
     initController(true);
@@ -449,28 +435,22 @@ void Uc8279cDisplay::displayGray(bool turnOff, bool async) {
     writeFrame(CMD_DTM2, fbGrayLsb_);
     loadGrayLut();
 
-    if (async) {
-        // 仅发起刷新，不等待 BUSY；turnOff 在异步路径下忽略
-        sendCmd(CMD_DISPLAY_REFRESH);
-    } else {
+    if (!refresh(turnOff)) {
+        // 刷新命令被吞：RST 重置控制器并重推一帧
+        ESP_LOGW(TAG_UC, "displayGray: 刷新未启动，重置控制器重试");
+        waitIfBusy("retry-wait");
+        hardwareReset();
+        initController(true);
+        writeFrame(CMD_DTM1, fbGrayMsb_);
+        writeFrame(CMD_DTM2, fbGrayLsb_);
+        loadGrayLut();
         if (!refresh(turnOff)) {
-            // 刷新命令被吞：RST 重置控制器并重推一帧
-            ESP_LOGW(TAG_UC, "displayGray: 刷新未启动，重置控制器重试");
-            waitBusy("retry-wait");
-            hardwareReset();
-            initController(true);
-            writeFrame(CMD_DTM1, fbGrayMsb_);
-            writeFrame(CMD_DTM2, fbGrayLsb_);
-            loadGrayLut();
-            if (!refresh(turnOff)) {
-                ESP_LOGE(TAG_UC, "displayGray: 重试仍失败，画面可能残留");
-            }
+            ESP_LOGE(TAG_UC, "displayGray: 重试仍失败，画面可能残留");
         }
     }
-    // 灰阶刷新后强制下一帧 BW 刷新用 Full LUT（升级判定从 4 次提前到立刻）：
-    // 灰阶内容的残影需要用完整驱动波形才能彻底清除，
-    // 否则翻到下一页（Fast LUT）时上一页图片内容会以"残影"残留
-    fastRefreshesSinceFull_ = MAX_CONSECUTIVE_FAST;
+    // 灰阶帧本身是完整波形：重置 Fast 计数。紧随其后的第一次 B/W 刷新由
+    // displayBw() 强制为 Full（控制器复位后 DTM1 为全白，Fast 会留残影）。
+    fastRefreshesSinceFull_ = 0;
 }
 
 // ── 深睡眠 ───────────────────────────────────────────────────────────────────
@@ -516,6 +496,11 @@ void Uc8279cDisplay::waitBusy(const char* tag) {
         }
         vTaskDelay(pdMS_TO_TICKS(1));
     }
+}
+
+void Uc8279cDisplay::waitIfBusy(const char* tag) {
+    if (gpio_get_level(gn(EPD_BUSY)) != 0) return;  // 空闲：不必等待 settle 窗口
+    waitBusy(tag);
 }
 
 // ── SPI 底层传输 ─────────────────────────────────────────────────────────────
@@ -569,6 +554,8 @@ void Uc8279cDisplay::clear() {
     if (fb_) {
         memset(fb_, 0xff, FRAMEBUFFER_SIZE);  // 全白
     }
+    // 全白帧无灰度：停用灰阶平面，下一个灰度像素时再从 fb_ 同步
+    planesActive_ = false;
 }
 
 void Uc8279cDisplay::drawPixel(int16_t x, int16_t y, uint8_t color) {
@@ -588,9 +575,9 @@ void Uc8279cDisplay::drawPixel(int16_t x, int16_t y, uint8_t color) {
         fb_[byteIdx] &= ~(1 << bit);   // 0 = 黑
     }
 
-    // 灰阶模式已激活时同步更新灰阶平面（黑→00, 白→11），保持 BW 与灰阶一致
-    if (hasGray_) {
-        drawPixelGray(x, y, color ? 15 : 0);
+    // 灰阶平面激活时同步更新（黑→00, 白→11），保持 BW 与灰阶一致
+    if (planesActive_) {
+        setGrayPlanes(byteIdx, bit, color ? 3 : 0);
     }
 }
 
@@ -627,33 +614,38 @@ void Uc8279cDisplay::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_
 // ── 四级灰阶 framebuffer 操作 (逻辑 portrait 坐标) ─────────────────────────
 
 void Uc8279cDisplay::ensureGrayBuffers() {
+    if (planesActive_) return;
     if (!fbGrayMsb_) {
         fbGrayMsb_ = static_cast<uint8_t*>(heap_caps_malloc(FRAMEBUFFER_SIZE, MALLOC_CAP_SPIRAM));
     }
     if (!fbGrayLsb_) {
         fbGrayLsb_ = static_cast<uint8_t*>(heap_caps_malloc(FRAMEBUFFER_SIZE, MALLOC_CAP_SPIRAM));
     }
-    if (!hasGray_) {
-        // 首次使用灰度：把 fb_ 同步到灰阶平面
-        // fb_ bit=0(黑) → MSB=0,LSB=0(黑); fb_ bit=1(白) → MSB=1,LSB=1(白)
-        if (fbGrayMsb_) memcpy(fbGrayMsb_, fb_, FRAMEBUFFER_SIZE);
-        if (fbGrayLsb_) memcpy(fbGrayLsb_, fb_, FRAMEBUFFER_SIZE);
-        hasGray_ = true;
+    if (!fb_ || !fbGrayMsb_ || !fbGrayLsb_) return;  // PSRAM 分配失败，放弃灰阶
+    // 从 fb_ 同步：bit=0(黑) → MSB=0,LSB=0；bit=1(白) → MSB=1,LSB=1
+    memcpy(fbGrayMsb_, fb_, FRAMEBUFFER_SIZE);
+    memcpy(fbGrayLsb_, fb_, FRAMEBUFFER_SIZE);
+    planesActive_ = true;
+}
+
+void Uc8279cDisplay::setGrayPlanes(uint32_t byteIdx, uint8_t bit, uint8_t level) {
+    const uint8_t mask = static_cast<uint8_t>(1u << bit);
+    if (level & 0x2) {
+        fbGrayMsb_[byteIdx] |= mask;
+    } else {
+        fbGrayMsb_[byteIdx] &= static_cast<uint8_t>(~mask);
+    }
+    if (level & 0x1) {
+        fbGrayLsb_[byteIdx] |= mask;
+    } else {
+        fbGrayLsb_[byteIdx] &= static_cast<uint8_t>(~mask);
     }
 }
 
 void Uc8279cDisplay::drawPixelGray(int16_t x, int16_t y, uint8_t gray) {
     if (!fb_) return;
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
-
-    ensureGrayBuffers();
-    if (!fbGrayMsb_ || !fbGrayLsb_) return;  // PSRAM 分配失败，放弃灰阶
-
     if (gray > 15) gray = 15;
-    // 16 级 → 4 级: 0-3=黑(00), 4-7=深灰(01), 8-11=浅灰(10), 12-15=白(11)
-    const uint8_t val = gray >> 2;  // 0-3
-    const uint8_t msb = (val >> 1) & 1;
-    const uint8_t lsb = val & 1;
 
     // 与 drawPixel 相同的 portrait→native 旋转
     const uint16_t nativeX = static_cast<uint16_t>(y);
@@ -661,21 +653,36 @@ void Uc8279cDisplay::drawPixelGray(int16_t x, int16_t y, uint8_t gray) {
     const uint32_t byteIdx = static_cast<uint32_t>(nativeY) * PANEL_ROW_BYTES + (nativeX >> 3);
     const uint8_t bit = 7 - (nativeX & 0x7);
 
-    if (msb) {
-        fbGrayMsb_[byteIdx] |= (1 << bit);
+    // B/W 平面：灰度阈值化（Fast 刷新显示此版本）
+    if (grayToBw(gray)) {
+        fb_[byteIdx] |= static_cast<uint8_t>(1u << bit);
     } else {
-        fbGrayMsb_[byteIdx] &= ~(1 << bit);
+        fb_[byteIdx] &= static_cast<uint8_t>(~(1u << bit));
     }
-    if (lsb) {
-        fbGrayLsb_[byteIdx] |= (1 << bit);
-    } else {
-        fbGrayLsb_[byteIdx] &= ~(1 << bit);
+
+    // 16 级 → 4 级: 0-3=黑(00), 4-7=深灰(01), 8-11=浅灰(10), 12-15=白(11)
+    const uint8_t level = gray >> 2;
+    if (!planesActive_) {
+        // 纯黑/纯白不需要灰阶平面（fb_ 已精确表示）
+        if (level == 0 || level == 3) return;
+        ensureGrayBuffers();  // 同步自 fb_（已含本像素的阈值版本）
+        if (!planesActive_) return;
     }
+    setGrayPlanes(byteIdx, bit, level);
 }
 
 void Uc8279cDisplay::clearGray() {
-    // 仅重置灰阶状态；缓冲内容在下次 drawPixelGray 时由 fb_ 重新同步
-    hasGray_ = false;
+    // 丢弃灰阶平面；帧内容保持 fb_ 中的 B/W（阈值）版本
+    planesActive_ = false;
+}
+
+bool Uc8279cDisplay::hasGrayContent() const {
+    if (!planesActive_ || !fbGrayMsb_ || !fbGrayLsb_) return false;
+    // 灰度像素即 MSB != LSB（01 深灰 / 10 浅灰）
+    for (uint32_t i = 0; i < FRAMEBUFFER_SIZE; ++i) {
+        if ((fbGrayMsb_[i] ^ fbGrayLsb_[i]) != 0) return true;
+    }
+    return false;
 }
 
 }  // namespace eego

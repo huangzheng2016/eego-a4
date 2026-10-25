@@ -32,7 +32,7 @@ struct BootStatus {
     bool powerLatched = false;     // GPIO4 锁存已拉起
     bool touchReady = false;       // GSLX680 固件上传并校验通过
     bool buttonsReady = false;     // 三键轮询任务已启动
-    bool frontlightPresent = false;// LM3630A 在位
+    bool frontlightPresent = false;// LM3630A 芯片在位（不含用户覆盖；可用性见 FrontlightManager::frontlightAvailable）
     bool rtcReady = false;         // PCF8563 应答正常
     bool sdReady = false;          // SD 卡挂载成功
     bool displayReady = false;     // UC8279C 初始化成功

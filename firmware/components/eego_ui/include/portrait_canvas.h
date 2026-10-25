@@ -44,7 +44,8 @@ public:
     void drawTextRight(int16_t x, int16_t y, int16_t w, const char* text, int16_t scale, bool bold);
 
     // 灰度值(0-15, 0=黑/15=白)写入驱动 MSB/LSB 灰阶平面（原生四级灰阶）
-    // 0-3=黑, 4-7=深灰, 8-11=浅灰, 12-15=白；含灰度内容的帧刷新时走 displayGray
+    // 0-3=黑, 4-7=深灰, 8-11=浅灰, 12-15=白。同时写入 B/W 平面（<8 黑，>=8 白）：
+    // Fast 刷新显示 B/W 版本，Full 刷新且帧含灰度时显示四级灰阶。
     void drawPixelGray(int16_t x, int16_t y, uint8_t gray);
 
     // 安全区裁剪
@@ -52,9 +53,12 @@ public:
     void resetClip();           // 恢复到全屏 (0,0,552,768)
     void useUiContentRect();    // 使用 UI 矩形区 (28,28,496×712)
 
-    // 刷新
+    // 刷新（阻塞）。Fast=B/W 快速波形（灰度阈值为黑/白，不闪）；Full=完整波形，
+    // 帧含灰度时走四级灰阶。驱动每 N 次 Fast 自动插入一次 Full（见
+    // Uc8279cDisplay::setFastRefreshLimit）。
     void display(RefreshMode mode = RefreshMode::Fast);
-    void displayAsync(RefreshMode mode = RefreshMode::Fast);
+    // 让下一次 display() 无论请求何种模式都走 Full（例如页面切换）。
+    void requestFullRefresh();
     void waitRefreshComplete();
 
     // 几何常量

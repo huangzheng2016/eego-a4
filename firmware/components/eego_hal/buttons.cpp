@@ -2,7 +2,7 @@
 // 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
 // EEGO A4 按键管理实现
 // 三键: GPIO5(Up, active-low), GPIO7(Down, active-low), GPIO8(Power, active-high)
-// 5ms 去抖 + 时间戳边沿/短按/长按/双击/chord + 唤醒释放门控
+// 连续采样去抖 + 时间戳边沿/短按/长按/可选双击/chord + 唤醒释放门控
 #include "buttons.h"
 #include "eego_pins.h"
 
@@ -14,10 +14,11 @@
 
 static const char* BTN_TAG = "eego_btn";
 
-// 轮询周期
-static constexpr uint32_t POLL_PERIOD_MS = 15;
-// 去抖延时
-static constexpr uint32_t DEBOUNCE_MS = 5;
+// 轮询周期（100Hz tick 下取整为 1 tick = 10ms；至少 1 tick）
+static constexpr uint32_t POLL_PERIOD_MS = 10;
+// 去抖：原始电平需连续 N 次采样一致（与当前稳定态不同）才接受边沿。
+// 2 次 × 10ms 轮询 ≈ 10-20ms 去抖窗口。
+static constexpr uint8_t DEBOUNCE_SAMPLES = 2;
 // 原始边沿与手势共用队列，保留双击/chord 的额外事件空间。
 static constexpr uint32_t QUEUE_LEN = 64;
 // 任务栈大小
@@ -117,40 +118,77 @@ bool ButtonManager::poll(ButtonEvent* event, uint32_t timeoutMs) {
     return xQueueReceive(queue_, event, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
 }
 
+void ButtonManager::setDoublePressEnabled(ButtonId id, bool enabled) {
+    if (id == ButtonId::Power) return;
+    const uint8_t bit = static_cast<uint8_t>(1u << static_cast<uint8_t>(id));
+    if (enabled) {
+        doubleMask_.fetch_or(bit);
+    } else {
+        doubleMask_.fetch_and(static_cast<uint8_t>(~bit));
+    }
+}
+
+bool ButtonManager::doublePressEnabled(ButtonId id) const {
+    if (id == ButtonId::Power) return false;
+    return (doubleMask_.load() & (1u << static_cast<uint8_t>(id))) != 0;
+}
+
+static bool readPressed(size_t i) {
+    const int level = gpio_get_level(static_cast<gpio_num_t>(kButtons[i].pin));
+    return kButtons[i].activeHigh ? level == 1 : level == 0;
+}
+
 void ButtonManager::pollTask(void* arg) {
     ButtonManager* self = static_cast<ButtonManager*>(arg);
     ButtonGestureFsm gestures;
     uint8_t initialMask = 0;
+    bool stable[kButtonCount];
+    uint8_t diffCount[kButtonCount] = {};
     for (size_t i = 0; i < kButtonCount; i++) {
-        const int level = gpio_get_level(static_cast<gpio_num_t>(kButtons[i].pin));
-        const bool pressed = kButtons[i].activeHigh ? level == 1 : level == 0;
-        if (pressed) initialMask |= static_cast<uint8_t>(1u << i);
+        stable[i] = readPressed(i);
+        if (stable[i]) initialMask |= static_cast<uint8_t>(1u << i);
     }
     gestures.reset(esp_timer_get_time(), initialMask,
                    esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0);
 
-    while (self->running_) {
-        bool sample1[kButtonCount];
-        for (size_t i = 0; i < kButtonCount; i++) {
-            const int level = gpio_get_level(static_cast<gpio_num_t>(kButtons[i].pin));
-            sample1[i] = kButtons[i].activeHigh ? level == 1 : level == 0;
-        }
-        vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
+    TickType_t period = pdMS_TO_TICKS(POLL_PERIOD_MS);
+    if (period == 0) period = 1;
+    TickType_t lastWake = xTaskGetTickCount();
+    uint8_t appliedDoubleMask = 0xff;  // 强制首轮同步
 
-        bool sample2[kButtonCount];
-        for (size_t i = 0; i < kButtonCount; i++) {
-            const int level = gpio_get_level(static_cast<gpio_num_t>(kButtons[i].pin));
-            sample2[i] = kButtons[i].activeHigh ? level == 1 : level == 0;
+    while (self->running_.load()) {
+        const uint8_t doubleMask = self->doubleMask_.load();
+        if (doubleMask != appliedDoubleMask) {
+            for (size_t i = 0; i < kButtonCount; i++) {
+                gestures.setDoublePressEnabled(kButtons[i].id,
+                                               (doubleMask & (1u << i)) != 0);
+            }
+            appliedDoubleMask = doubleMask;
         }
+
         const int64_t now = esp_timer_get_time();
+        bool sent = false;
         for (size_t i = 0; i < kButtonCount; i++) {
-            if (sample1[i] != sample2[i]) continue;
-            const auto events = gestures.sample(kButtons[i].id, sample2[i], now);
+            const bool raw = readPressed(i);
+            if (raw != stable[i]) {
+                if (++diffCount[i] >= DEBOUNCE_SAMPLES) {
+                    stable[i] = raw;
+                    diffCount[i] = 0;
+                }
+            } else {
+                diffCount[i] = 0;
+            }
+            // 每轮都喂 FSM（稳定态不变时仅推进长按/短按超时）
+            const auto events = gestures.sample(kButtons[i].id, stable[i], now);
             for (const ButtonEvent& event : events) {
-                xQueueSend(self->queue_, &event, 0);
+                if (xQueueSend(self->queue_, &event, 0) == pdTRUE) sent = true;
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(POLL_PERIOD_MS));
+        if (sent) {
+            SemaphoreHandle_t wake = self->wake_.load();
+            if (wake != nullptr) xSemaphoreGive(wake);
+        }
+        vTaskDelayUntil(&lastWake, period);
     }
 
     self->task_ = nullptr;

@@ -83,7 +83,7 @@ void PowerManager::initAdc() {
 void PowerManager::detectLm3630a() {
     // 读取 FrontlightManager 缓存的前光存在性（首次探测由 FrontlightManager
     // 完成并缓存，此处非破坏性读取，不再 toggle GPIO12，避免关闭前光）
-    lm3630aPresent_ = FrontlightManager::instance().present();
+    lm3630aPresent_ = FrontlightManager::instance().lm3630aChipPresent();
 
     // LM3630A 在位 → 充电状态 active-high（INPUT_PULLDOWN）
     // LM3630A 不在位 → 充电状态 active-low（INPUT_PULLUP）
