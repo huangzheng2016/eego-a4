@@ -148,7 +148,7 @@ DELETE /api/v1/sources/credentials   {"key":"weather"}
 ```
 
 中文显示可将自备的 Noto Sans CJK 小尺寸字体放到
-`firmware/components/eego_ui/fonts/NotoSansCJKsc_5.cpfont` 后重新构建；该文件被
+`firmware/components/eego_ui/fonts/NotoSansCJKsc_6.cpfont` 后重新构建；该文件被
 `.gitignore` 排除，会在构建时嵌入固件，无需取出 SD。没有嵌入文件时仍按 SD 根目录
 字体或内置 ASCII 回退处理。字体由使用者自备并遵守其许可（Noto 为 SIL OFL 1.1）。
 
