@@ -65,6 +65,10 @@ const std::vector<InputBinding>& defaultInputBindings();
 
 bool inputBindingsFromJson(const alert_core::JsonValue& root, bool require_revision,
                            InputBindingSet& out, InputBindingErrors& errors);
+// Parses the persisted NVS record (JSON text). False when it is unparsable or
+// no longer valid for this firmware (e.g. a page or builtin name was removed);
+// `reason` then names the first problem. The caller falls back to defaults.
+bool parseStoredInputBindings(const std::string& text, InputBindingSet& out, std::string& reason);
 alert_core::JsonValue inputBindingToJson(const InputBinding& binding);
 alert_core::JsonValue inputBindingListToJson(const std::vector<InputBinding>& bindings);
 alert_core::JsonValue inputBindingsToJson(const InputBindingSet& set);

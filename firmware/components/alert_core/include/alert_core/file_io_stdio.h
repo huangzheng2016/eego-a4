@@ -22,6 +22,9 @@ class StdioFileIo : public IAlertFileIo {
   bool remove(const std::string& path) override;
   bool rename(const std::string& from, const std::string& to) override;
   bool fileSize(const std::string& path, size_t& out) const override;
+  bool writeStream(const std::string& path,
+                   const std::function<bool(const ChunkSink& sink)>& producer) override;
+  bool readStream(const std::string& path, const ChunkSink& sink) override;
 };
 
 }  // namespace alert_core

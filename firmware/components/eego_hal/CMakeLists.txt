@@ -15,6 +15,7 @@ idf_component_register(
         "pcf8563_rtc.cpp"
         "buttons.cpp"
         "input_gesture.cpp"
+        "atomic_file.cpp"
     INCLUDE_DIRS "include"
     # 公共头文件 (uc8279c_display.h / power_manager.h / pcf8563_rtc.h /
     # gslx680_touch.h / sd_card.h) 直接 include driver/* 与 esp_adc/、sdmmc_cmd.h，

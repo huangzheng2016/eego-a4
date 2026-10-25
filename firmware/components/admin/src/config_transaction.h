@@ -8,10 +8,8 @@ namespace eego::admin::internal {
 
 struct ConfigTransactionHooks {
   std::function<bool(std::string&)> commit_config;
-  std::function<bool(std::string&)> apply_settings;
   std::function<bool(std::string&)> apply_runtime;
   std::function<bool(std::string&)> rollback_config;
-  std::function<bool(std::string&)> rollback_settings;
   std::function<bool(std::string&)> rollback_runtime;
 };
 

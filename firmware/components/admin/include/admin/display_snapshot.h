@@ -58,4 +58,44 @@ inline void writeSnapshotBmpHeader(uint8_t* out) {
   out[58] = out[59] = out[60] = 0xFF;
 }
 
+// ── Render preview (POST /api/v1/dashboard/render-preview) ─────────────────
+// 4-bpp top-down BMP with a 4-entry gray palette: palette index = panel gray
+// level (0 black, 1 dark gray, 2 light gray, 3 white), i.e. exactly the four
+// levels a full (grayscale) refresh shows. Pixel (x, y) is the high nibble of
+// rows[y * stride + x / 2] for even x, the low nibble for odd x.
+inline constexpr size_t kPreviewStride = ((kSnapshotWidth * 4 + 31) / 32) * 4;  // 276
+inline constexpr uint32_t kPreviewPaletteEntries = 4;
+inline constexpr size_t kPreviewHeaderBytes = 14 + 40 + 4 * kPreviewPaletteEntries;  // 70
+inline constexpr size_t kPreviewFileBytes = kPreviewHeaderBytes + kPreviewStride * kSnapshotHeight;
+inline constexpr uint8_t kPreviewPaletteGray[kPreviewPaletteEntries] = {0x00, 0x55, 0xAA, 0xFF};
+
+inline void writePreviewBmpHeader(uint8_t* out) {
+  auto le16 = [&](size_t at, uint32_t v) {
+    out[at] = static_cast<uint8_t>(v);
+    out[at + 1] = static_cast<uint8_t>(v >> 8);
+  };
+  auto le32 = [&](size_t at, uint32_t v) {
+    for (size_t i = 0; i < 4; ++i) out[at + i] = static_cast<uint8_t>(v >> (8 * i));
+  };
+  for (size_t i = 0; i < kPreviewHeaderBytes; ++i) out[i] = 0;
+  out[0] = 'B';
+  out[1] = 'M';
+  le32(2, static_cast<uint32_t>(kPreviewFileBytes));
+  le32(10, static_cast<uint32_t>(kPreviewHeaderBytes));
+  le32(14, 40);
+  le32(18, kSnapshotWidth);
+  le32(22, static_cast<uint32_t>(-static_cast<int32_t>(kSnapshotHeight)));  // top-down
+  le16(26, 1);
+  le16(28, 4);  // 4 bpp
+  le32(34, static_cast<uint32_t>(kPreviewStride * kSnapshotHeight));
+  le32(38, 3780);
+  le32(42, 3780);
+  le32(46, kPreviewPaletteEntries);
+  le32(50, kPreviewPaletteEntries);
+  for (size_t i = 0; i < kPreviewPaletteEntries; ++i) {
+    const uint8_t g = kPreviewPaletteGray[i];
+    out[54 + i * 4] = out[55 + i * 4] = out[56 + i * 4] = g;  // B, G, R, 0
+  }
+}
+
 }  // namespace eego::admin

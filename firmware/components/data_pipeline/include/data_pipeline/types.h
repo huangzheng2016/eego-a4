@@ -36,8 +36,6 @@ const char* windowKindName(WindowKind kind);
 bool windowKindFromString(std::string_view text, WindowKind& out);
 
 enum class Aggregation : uint8_t { Sum = 0, Avg, Min, Max, Delta, Rate };
-const char* aggregationName(Aggregation aggregation);
-bool aggregationFromString(std::string_view text, Aggregation& out);
 
 struct FieldMapping {
   std::string name;

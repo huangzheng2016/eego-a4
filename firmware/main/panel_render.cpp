@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// S0–S4 与状态栏/软键栏绘制实现（见 panel_render.h 布局与边界契约）。
+// 设备本地屏幕与状态栏/软键栏绘制实现（见 panel_render.h 布局与边界契约）。
 #include "panel_render.h"
 
 #include <algorithm>
@@ -559,87 +559,12 @@ void drawSoftKeys(PortraitCanvas& c, const SoftKeyModel* keys, size_t n, size_t 
   }
 }
 
-// ── S0 总览 ─────────────────────────────────────────────────────────────────
+// ── 告警详情 ────────────────────────────────────────────────────────────────
 
-void drawS0(PortraitCanvas& c, const S0Model& m) {
-  drawPageTitle(c, Str::PageOverview);
-  const int16_t x = geom::kContentX;
-  const int16_t w = geom::kContentW;
-
+void drawAlertDetail(PortraitCanvas& c, const AlertDetailModel& m) {
+  int16_t y = geom::kTitleY;
   if (m.empty) {
-    // 空态：双圆环 + 居中提示（正文区垂直居中略偏上）
-    const int16_t cx = static_cast<int16_t>(x + w / 2);
-    const int16_t cy = static_cast<int16_t>((geom::kBodyTop + geom::kContentBottom) / 2 - 48);
-    c.drawCircle(cx, cy, 60, 0);
-    c.drawCircle(cx, cy, 44, 0);
-    textCentered(c, geom::kInnerX, geom::kInnerW, static_cast<int16_t>(cy + 60 + 24),
-                 tr(Str::NoAlerts), style::kHeadline);
-  } else {
-    struct Card {
-      size_t count;
-      Str label;
-      uint8_t sev;
-    };
-    const Card cards[3] = {{m.critical, Str::SevCritical, 2},
-                           {m.warning, Str::SevWarning, 1},
-                           {m.info, Str::SevInfo, 0}};
-    int16_t y = geom::kOverviewCardsTop;
-    for (const Card& card : cards) {
-      c.fillRoundRectGray(x, y, w, geom::kCardH, 12, severityFillGray(card.sev));
-      const uint8_t ink = severityTextGray(card.sev);
-      TextStyle num = style::kDisplay;
-      num.gray = ink;
-      if (fontH(num.scale) > geom::kCardH - 8) num.scale = 4;
-      char cnt[16];
-      snprintf(cnt, sizeof(cnt), "%u", static_cast<unsigned>(card.count));
-      const int16_t right = static_cast<int16_t>(x + w - geom::kCardPadX);
-      const int16_t numW = styleW(cnt, num);
-      textRight(c, right, centerY(y, geom::kCardH, num.scale), numW, cnt, num);
-      TextStyle label = style::kHeadline;
-      label.gray = ink;
-      textFit(c, static_cast<int16_t>(x + geom::kCardPadX), centerY(y, geom::kCardH, label.scale),
-              static_cast<int16_t>(w - 2 * geom::kCardPadX - numW - 16), tr(card.label), label);
-      y = static_cast<int16_t>(y + geom::kCardH + geom::kCardGap);
-    }
-    char line[96];
-    snprintf(line, sizeof(line), "%s %u · %s %u · %s %u", tr(Str::ActiveTotal),
-             static_cast<unsigned>(m.activeTotal), tr(Str::AckedCount),
-             static_cast<unsigned>(m.acked), tr(Str::MutedCount),
-             static_cast<unsigned>(m.muted));
-    y = static_cast<int16_t>(geom::kOverviewCardsBottom + 12);
-    textFit(c, geom::kInnerX, y, geom::kInnerW, line, style::kCaptionStrong);
-    snprintf(line, sizeof(line), "%s %u/%u", tr(Str::SourcesHealthy),
-             static_cast<unsigned>(m.sourcesOk), static_cast<unsigned>(m.sourcesTotal));
-    textFit(c, geom::kInnerX, static_cast<int16_t>(y + lineHeight(style::kCaption.scale)),
-            geom::kInnerW, line, style::kCaption);
-  }
-
-  // 更新时间（空态/非空态都画在正文区底部）
-  if (m.updatedText[0] != '\0') {
-    char upd[48];
-    snprintf(upd, sizeof(upd), "%s %s", tr(Str::UpdatedAt), m.updatedText);
-    textFit(c, geom::kInnerX,
-            static_cast<int16_t>(geom::kContentBottom - fontH(style::kCaption.scale) - 4),
-            geom::kInnerW, upd, style::kCaption);
-  }
-}
-
-// ── S1 表格 ─────────────────────────────────────────────────────────────────
-
-void drawS1(PortraitCanvas& c, const S1Model& m) {
-  const int16_t x = geom::kContentX;
-  const int16_t w = geom::kContentW;
-  char pg[32];
-  snprintf(pg, sizeof(pg), tr(Str::PageFmt), static_cast<unsigned>(m.page + 1),
-           static_cast<unsigned>(m.pageCount));
-  const int16_t pgW = std::min<int16_t>(styleW(pg, style::kCaption), 160);
-  textRight(c, geom::kInnerRight, centerY(geom::kTitleY, geom::kTitleH, style::kCaption.scale),
-            pgW, pg, style::kCaption);
-  char head[48];
-  snprintf(head, sizeof(head), tr(Str::AlertsCountFmt), static_cast<unsigned>(m.total));
-  drawTitleText(c, head, static_cast<int16_t>(geom::kInnerW - pgW - 16));
-
-  if (m.rows.empty()) {
+    drawPageTitle(c, Str::PageDetail);
     textCentered(c, geom::kInnerX, geom::kInnerW,
                  centerY(geom::kBodyTop, static_cast<int16_t>(geom::kContentBottom - geom::kBodyTop),
                          style::kBodyMuted.scale),
@@ -647,61 +572,18 @@ void drawS1(PortraitCanvas& c, const S1Model& m) {
     return;
   }
 
-  const int16_t boxX = static_cast<int16_t>(x + 2);
-  const int16_t boxW = static_cast<int16_t>(w - 4);
-  const int16_t boxH = static_cast<int16_t>(geom::kRowH - 4);
-  const int16_t titleH = fontH(style::kBodyStrong.scale);
-  const int16_t subH = fontH(style::kCaption.scale);
-  const int16_t blockGap = 6;
-  const int16_t blockH = static_cast<int16_t>(titleH + blockGap + subH);
-  const int16_t textX = static_cast<int16_t>(boxX + geom::kRowPadX + geom::kSevChip + 16);
-  const int16_t right = static_cast<int16_t>(boxX + boxW - geom::kRowPadX);
-
-  for (size_t i = 0; i < m.rows.size() && i < static_cast<size_t>(geom::kRowsPerPage); i++) {
-    const S1RowModel& row = m.rows[i];
-    const bool sel = (i == m.selected);
-    const int16_t y = static_cast<int16_t>(geom::kTableRowTop + static_cast<int16_t>(i) * geom::kRowH);
-    if (sel) {
-      c.fillRoundRectGray(boxX, y, boxW, boxH, 8, 11);
-      c.drawRoundRect(boxX, y, boxW, boxH, 8, 0);
-    }
-    drawSevChip(c, static_cast<int16_t>(boxX + geom::kRowPadX),
-                static_cast<int16_t>(y + (boxH - geom::kSevChip) / 2), row.severity);
-    const int16_t ty = static_cast<int16_t>(y + (boxH - blockH) / 2);
-    const int16_t sy = static_cast<int16_t>(ty + titleH + blockGap);
-
-    // 右列：状态（与标题行垂直居中）+ 相对时间（与副标题行对齐）
-    const TextStyle stateSt = row.state == 0 ? style::kCaptionStrong : style::kCaption;
-    const int16_t rightW = std::min<int16_t>(
-        static_cast<int16_t>(std::max(styleW(stateLabel(row.state), stateSt),
-                                      styleW(row.age, style::kCaption))),
-        140);
-    textRight(c, right, static_cast<int16_t>(ty + (titleH - subH) / 2), rightW,
-              stateLabel(row.state), stateSt);
-    textRight(c, right, sy, rightW, row.age, style::kCaption);
-
-    const int16_t textMaxW = static_cast<int16_t>(right - rightW - 16 - textX);
-    textFit(c, textX, ty, textMaxW, row.title.c_str(), style::kBodyStrong);
-    textFit(c, textX, sy, textMaxW, row.subtitle.c_str(), style::kCaption);
-    if (!sel) {
-      hline(c, static_cast<int16_t>(boxX + geom::kRowPadX),
-            static_cast<int16_t>(y + geom::kRowH - 2),
-            static_cast<int16_t>(boxW - 2 * geom::kRowPadX), kDividerGray);
-    }
-  }
-}
-
-// ── S2 详情 ─────────────────────────────────────────────────────────────────
-
-void drawS2(PortraitCanvas& c, const S2Model& m) {
-  int16_t y = geom::kTitleY;
-
   // 头部：严重度芯片 + 类型名（正文粗体，垂直居中于芯片）+ 右侧状态
   drawSevChip(c, geom::kInnerX, y, m.severity);
   const TextStyle stateSt = style::kCaption;
-  const int16_t stateW = std::min<int16_t>(styleW(stateLabel(m.state), stateSt), 140);
-  textRight(c, geom::kInnerRight, centerY(y, geom::kSevChip, stateSt.scale), stateW,
-            stateLabel(m.state), stateSt);
+  char stateText[48];
+  if (m.position[0] != '\0') {
+    snprintf(stateText, sizeof(stateText), "%s · %s", stateLabel(m.state), m.position);
+  } else {
+    snprintf(stateText, sizeof(stateText), "%s", stateLabel(m.state));
+  }
+  const int16_t stateW = std::min<int16_t>(styleW(stateText, stateSt), 180);
+  textRight(c, geom::kInnerRight, centerY(y, geom::kSevChip, stateSt.scale), stateW, stateText,
+            stateSt);
   const int16_t typeX = static_cast<int16_t>(geom::kInnerX + geom::kSevChip + 12);
   textFit(c, typeX, centerY(y, geom::kSevChip, style::kBodyStrong.scale),
           static_cast<int16_t>(geom::kInnerRight - stateW - 16 - typeX), m.typeName.c_str(),
@@ -757,10 +639,14 @@ void drawS2(PortraitCanvas& c, const S2Model& m) {
   }
 }
 
-// ── S3 状态 ─────────────────────────────────────────────────────────────────
+// ── 状态 ────────────────────────────────────────────────────────────────────
 
-void drawS3(PortraitCanvas& c, const S3Model& m) {
+void drawStatus(PortraitCanvas& c, const KvModel& m) {
   drawPageTitle(c, Str::PageStatus);
+  if (m.pageText[0] != '\0') {
+    textRight(c, geom::kInnerRight, centerY(geom::kTitleY, geom::kTitleH, style::kCaption.scale),
+              120, m.pageText, style::kCaption);
+  }
   const int16_t y = drawKvList(c, m.rows, geom::kBodyTop);
   const int16_t stripH = static_cast<int16_t>(fontH(style::kCaptionStrong.scale) + 8);
   if (!m.configValid && y + 4 + stripH <= geom::kContentBottom) {
@@ -773,7 +659,7 @@ void drawS3(PortraitCanvas& c, const S3Model& m) {
   }
 }
 
-void drawHelp(PortraitCanvas& c, const S3Model& m) {
+void drawHelp(PortraitCanvas& c, const KvModel& m) {
   drawPageTitle(c, Str::PageHelp);
   drawKvList(c, m.rows, geom::kBodyTop);
 }
@@ -855,6 +741,68 @@ void drawS4(PortraitCanvas& c, const S4Model& m) {
   const int16_t pw = static_cast<int16_t>(geom::kSettingsNextArrow.x - 8 - px0);
   textCentered(c, px0, pw, centerY(geom::kSettingsPagerY, geom::kSettingsPagerH, style::kBody.scale),
                page, style::kBody);
+}
+
+// ── 引导页（未配置 dashboard 的主页）────────────────────────────────────────
+//
+// 标题 ｜ 「在浏览器中打开」+ 地址大字框（设备 IP 或配网热点地址）｜ WiFi 状态 ｜
+// 三步说明 ｜ 无效配置原因（如有）｜ 前置键提示（内容区底部）。
+
+void drawOnboarding(PortraitCanvas& c, const OnboardingModel& m) {
+  drawPageTitle(c, Str::PageOnboarding);
+  int16_t y = geom::kBodyTop;
+
+  textFit(c, geom::kInnerX, y, geom::kInnerW, tr(Str::OnbOpen), style::kCaption);
+  y = static_cast<int16_t>(y + lineHeight(style::kCaption.scale) + 4);
+
+  // 地址框：黑框白底，地址按框宽选最大字号（3x → 2x → 1x）。
+  const int16_t boxH = 84;
+  c.drawRoundRect(geom::kContentX, y, geom::kContentW, boxH, 10, 0);
+  c.drawRoundRect(static_cast<int16_t>(geom::kContentX + 1), static_cast<int16_t>(y + 1),
+                  static_cast<int16_t>(geom::kContentW - 2), static_cast<int16_t>(boxH - 2), 9, 0);
+  const char* address = m.url.empty() ? tr(Str::OnbNoAddress) : m.url.c_str();
+  TextStyle addr = m.url.empty() ? style::kBodyMuted : style::kHeadline;
+  const int16_t boxInner = static_cast<int16_t>(geom::kContentW - 2 * geom::kRowPadX);
+  while (addr.scale > 1 && (styleW(address, addr) > boxInner || fontH(addr.scale) > boxH - 12)) {
+    addr.scale = static_cast<int16_t>(addr.scale - 1);
+  }
+  textCentered(c, geom::kContentX, geom::kContentW, centerY(y, boxH, addr.scale), address, addr);
+  y = static_cast<int16_t>(y + boxH + 12);
+
+  if (!m.network.empty()) {
+    textFit(c, geom::kInnerX, y, geom::kInnerW, m.network.c_str(), style::kBodyMuted);
+    y = static_cast<int16_t>(y + lineHeight(style::kBodyMuted.scale) + 12);
+  }
+
+  hline(c, geom::kInnerX, y, geom::kInnerW, kDividerGray);
+  y = static_cast<int16_t>(y + 16);
+  const Str lanSteps[3] = {Str::OnbStep1, Str::OnbStep2, Str::OnbStep3};
+  const Str apSteps[3] = {Str::OnbApStep1, Str::OnbApStep2, Str::OnbApStep3};
+  const Str* steps = m.apMode ? apSteps : lanSteps;
+  const int16_t lh = lineHeight(style::kBody.scale);
+  const int16_t footerY =
+      static_cast<int16_t>(geom::kContentBottom - lineHeight(style::kCaption.scale));
+  for (int i = 0; i < 3; ++i) {
+    const int16_t room = static_cast<int16_t>((footerY - 8 - y) / lh);
+    if (room <= 0) break;
+    const int16_t n = drawTextWrapped(c, geom::kInnerX, y, geom::kInnerW, tr(steps[i]),
+                                      style::kBody.scale, lh, std::min<int16_t>(2, room),
+                                      style::kBody.gray);
+    y = static_cast<int16_t>(y + std::max<int16_t>(n, 1) * lh + 10);
+  }
+
+  if (!m.reason.empty() && y + lineHeight(style::kSmall.scale) <= footerY - 8) {
+    char reason[160];
+    snprintf(reason, sizeof(reason), tr(Str::OnbInvalidFmt), m.reason.c_str());
+    const int16_t stripH = static_cast<int16_t>(fontH(style::kCaptionStrong.scale) + 8);
+    c.fillRoundRectGray(geom::kInnerX, y, geom::kInnerW, stripH, 4, 5);
+    TextStyle st = style::kCaptionStrong;
+    st.gray = 15;
+    textFit(c, static_cast<int16_t>(geom::kInnerX + 8), centerY(y, stripH, st.scale),
+            static_cast<int16_t>(geom::kInnerW - 16), reason, st);
+  }
+
+  textFit(c, geom::kInnerX, footerY, geom::kInnerW, tr(Str::OnbKeys), style::kCaption);
 }
 
 // ── 配网页 ──────────────────────────────────────────────────────────────────

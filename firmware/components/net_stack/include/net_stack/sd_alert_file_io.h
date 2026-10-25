@@ -24,6 +24,7 @@
 // 宿主工具）经同一把锁不会看到半写状态。
 
 #include <cstddef>
+#include <functional>
 #include <mutex>
 #include <string>
 
@@ -45,6 +46,11 @@ class SdAlertFileIo : public alert_core::IAlertFileIo {
   bool remove(const std::string& path) override;
   bool rename(const std::string& from, const std::string& to) override;
   bool fileSize(const std::string& path, size_t& out) const override;
+  // 流式读写（压缩/加载不再整文件进内存；内部 RAM 有限）。producer/sink 在持锁
+  // 状态下回调，不得再调用本实例的其它方法（std::mutex 非递归）。
+  bool writeStream(const std::string& path,
+                   const std::function<bool(const ChunkSink& sink)>& producer) override;
+  bool readStream(const std::string& path, const ChunkSink& sink) override;
 
   // 失败计数（未挂载/写失败/rename 失败）——诊断与告警用。
   size_t ioFailures() const {

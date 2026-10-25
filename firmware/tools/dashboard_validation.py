@@ -250,7 +250,7 @@ SOURCE_DEFAULTS = {
 # Device layout rule (mirrors kGridRowsPerScreen in dashboard_core/model.h):
 # columns map proportionally onto the screen width; every screen holds exactly
 # GRID_ROWS_PER_SCREEN grid rows; a visible panel must fit inside one screen and
-# must not overlap another visible panel. page.row_height does not affect it.
+# must not overlap another visible panel.
 GRID_ROWS_PER_SCREEN = 8
 
 

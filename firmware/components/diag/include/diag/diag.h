@@ -32,7 +32,7 @@ struct Handlers {
   std::function<void()> smoke;                   // 自检序列（PASS/FAIL 清单）
   std::function<void()> version;                 // 版本/chip/heap/帧缓冲信息
   std::function<void(const char* arg)> lang;     // lang zh|en（界面语言切换）
-  std::function<void(const char* arg)> page;     // page s0|s1|s2|s3|s4（台架跳转）
+  std::function<void(const char* arg)> page;     // page home|dashboard|detail|status|settings|help（台架跳转）
   std::function<void(const char* arg)> dashboard;  // dashboard 状态/变量/面板/数据/刷新/smoke
 };
 

@@ -90,7 +90,6 @@ class DataPipeline {
   bool scheduleSourceRefresh(const std::string& source_id);
   bool schedulePanel(const std::string& panel_id);
   bool refreshSource(const std::string& source_id);
-  bool refreshPanel(const std::string& panel_id);
 
   std::shared_ptr<const SourceResult> sourceResult(const std::string& source_id) const;
   bool sourceStatus(const std::string& source_id, SourceStatus& out) const;

@@ -559,16 +559,12 @@ bool BleManager::beginRecoveryAp() {
 
 void BleManager::endRecoveryAp() { recovery_ap_active_ = false; }
 
-bool BleManager::recoveryApActive() const { return recovery_ap_active_.load(); }
-
 esp_err_t BleManager::clearBonds() {
   lock();
   UnlockGuard guard{mutex_};
   stopProvisioningLocked(ProvisionState::Cancelled);
   if (!stopObserverLocked() || role_.load() != Role::Off) return ESP_ERR_INVALID_STATE;
-  esp_err_t err = eego::net::CredentialStore::clearNamespace("nimble_bond");
-  const esp_err_t legacy_err = eego::net::CredentialStore::clearNamespace("ble");
-  if (err == ESP_OK) err = legacy_err;
+  const esp_err_t err = eego::net::CredentialStore::clearNamespace("nimble_bond");
   if (err != ESP_OK) setErrorLocked("BLE bond NVS erase failed");
   next_observer_ms_ = nowMs() + 1000;
   return err;

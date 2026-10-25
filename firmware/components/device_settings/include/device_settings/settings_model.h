@@ -124,13 +124,6 @@ bool mergePatch(const Settings& current, const alert_core::JsonValue& patch,
 
 uint32_t changedFields(const Settings& before, const Settings& after);
 
-// One-way migration/legacy write path for admin.display. Brightness zero means
-// disabled; a nonzero legacy brightness preserves the old power-on behavior.
-void applyLegacyDisplay(const alert_core::JsonValue& display, Settings& settings);
-void validateLegacyDisplayCapability(const alert_core::JsonValue& display_patch,
-                                     const Settings& current, bool frontlight_available,
-                                     FieldErrors& errors);
-
 // Daily local-time deep-sleep window, including overnight windows. A disabled
 // schedule or invalid `now_unix` returns false. The wake timestamp is exact
 // when the device is currently inside the configured window; otherwise zero.

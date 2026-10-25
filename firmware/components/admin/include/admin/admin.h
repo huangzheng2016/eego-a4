@@ -4,6 +4,11 @@
 // admin 组件公共入口 —— FW4 局域网管理与远程管理（M17）。
 //
 // 快速上手（M18 组合根）：
+//   // 0. 一次性初始化（只在组合根调用一次；startAdminApi/门户不再重复 init）
+//   AuthManager::instance().init();
+//   ConfigStore::instance().init("/sdcard/alertpanel/config.json");
+//   AdminLog::instance().init(level);
+//   DashboardStore::instance().init("/sdcard/alertpanel/dashboard.json");
 //   // 1. 接线（M20 提供 net_stack 侧实现后注入；未注入时读写端点回 503）
 //   admin::setAlertSnapshotSource(...);
 //   admin::setAlertActionSink(...);
@@ -40,14 +45,12 @@ namespace eego::admin {
 struct AdminConfig {
   uint16_t port = 80;                          // 管理端口（绑 0.0.0.0，STA/AP 均可达）
   std::string hostname = "eego-a4";            // Host/Origin 白名单补充（mDNS 名）
-  std::string config_path = "/sdcard/alertpanel/config.json";
   alert_core::TypeRegistry* registry = nullptr;  // GET /types 数据源（写经 AdminCommand）
 };
 
 // ---- 管理 API 服务器（app_task 按设备模式启停；幂等）----
 // 门户开启期间拒绝启动（80 端口互斥，防御性检查）。
 esp_err_t startAdminApi(const AdminConfig& cfg);
-void stopAdminApi();
 bool adminApiRunning();
 
 // ---- 依赖注入（M18 组合根；M20 提供 net_stack 实现后告警读写全通）----

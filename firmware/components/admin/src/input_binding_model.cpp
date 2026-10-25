@@ -13,12 +13,20 @@ using alert_core::JsonValue;
 using eego::dashboard::ActionKind;
 using eego::dashboard::Dashboard;
 
-constexpr std::array<const char*, 7> kBuiltins = {
-    "focus_previous", "focus_next", "page_previous", "page_next",
-    "help",           "status",     "refresh",
+// Builtins (device-side semantics, see firmware/README.md「设备操作」):
+//   page_previous/page_next   dashboard: previous/next screen; lists
+//                             (settings, alert detail): previous/next item
+//   focus_previous/focus_next dashboard: previous/next panel focus;
+//                             settings: previous/next settings page
+//   home      dashboard first screen      settings  settings screen
+//   status    device status screen        help      input help screen
+//   refresh   refresh dashboard sources (current screen)
+constexpr std::array<const char*, 9> kBuiltins = {
+    "page_previous", "page_next", "focus_previous", "focus_next", "home",
+    "settings",      "status",    "help",           "refresh",
 };
-constexpr std::array<const char*, 8> kLocalPages = {
-    "overview", "table", "detail", "status", "settings", "help", "dashboard", "*",
+constexpr std::array<const char*, 7> kLocalPages = {
+    "dashboard", "onboarding", "detail", "status", "settings", "help", "*",
 };
 
 struct TriggerName {
@@ -184,12 +192,15 @@ bool inputBuiltinAllowed(std::string_view name) {
 }
 
 const std::vector<InputBinding>& defaultInputBindings() {
+  // Up/Down short = previous/next screen (or item in a list), long = panel
+  // focus; front long = Settings, front double = Status. Power short/long
+  // (select/back) and front short (home) are fixed and not bindable.
   static const std::vector<InputBinding> defaults = {
-      builtin(InputTrigger::UpShort, "focus_previous"),
-      builtin(InputTrigger::DownShort, "focus_next"),
-      builtin(InputTrigger::UpLong, "page_previous"),
-      builtin(InputTrigger::DownLong, "page_next"),
-      builtin(InputTrigger::FrontLong, "help"),
+      builtin(InputTrigger::UpShort, "page_previous"),
+      builtin(InputTrigger::DownShort, "page_next"),
+      builtin(InputTrigger::UpLong, "focus_previous"),
+      builtin(InputTrigger::DownLong, "focus_next"),
+      builtin(InputTrigger::FrontLong, "settings"),
       builtin(InputTrigger::FrontDouble, "status"),
   };
   return defaults;
@@ -246,6 +257,26 @@ bool inputBindingsFromJson(const JsonValue& root, bool require_revision,
     }
   }
   if (!errors.empty() || !validateInputBindingsSyntax(candidate.bindings, errors)) return false;
+  out = std::move(candidate);
+  return true;
+}
+
+bool parseStoredInputBindings(const std::string& text, InputBindingSet& out, std::string& reason) {
+  reason.clear();
+  JsonValue root;
+  alert_core::JsonParseError parse_error;
+  if (!alert_core::jsonParse(text, root, parse_error)) {
+    reason = "record is not valid JSON";
+    return false;
+  }
+  InputBindingSet candidate;
+  InputBindingErrors errors;
+  if (!inputBindingsFromJson(root, true, candidate, errors)) {
+    reason = errors.empty() ? std::string("record failed validation")
+                            : errors.front().field + ": " + errors.front().message;
+    return false;
+  }
+  candidate.loaded = true;
   out = std::move(candidate);
   return true;
 }

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// panel_render —— S0 总览 / S1 表格 / S2 详情 / S3 状态 / S4 设置 的纯绘制层。
+// panel_render —— 设备本地屏幕（引导 / 告警详情 / 状态 / 设置 / 帮助 / 配网）
+// 与状态栏、软键栏的纯绘制层。Dashboard 主屏由 dashboard_ui 渲染器绘制。
 //
 // 边界（M12：app_task 唯一 UI 属主）：
 //   * 本层只做「模型 → 画布」绘制，不持有业务状态、不访问网络/store；
@@ -22,8 +23,7 @@
 //   kBodyStrong 2x 粗体黑   —— 强调正文（列表行标题、时间）
 //   kCaption    1x 常规中灰 —— 次要说明（副标题、年龄、页码、标签列）
 //   kSmall      1x 常规黑   —— 高密度主文字（详情消息、状态/帮助值列）
-//   kHeadline   3x 粗体黑   —— 总览卡片标签、空态大字
-//   kDisplay    6x 粗体黑   —— 总览计数大数字
+//   kHeadline   3x 粗体黑   —— 引导页设备地址
 
 #include <cstddef>
 #include <cstdint>
@@ -51,7 +51,6 @@ constexpr TextStyle kCaption{1, false, 6};
 constexpr TextStyle kCaptionStrong{1, true, 0};
 constexpr TextStyle kSmall{1, false, 0};
 constexpr TextStyle kHeadline{3, true, 0};
-constexpr TextStyle kDisplay{6, true, 0};
 }  // namespace style
 
 namespace geom {
@@ -79,10 +78,9 @@ constexpr int16_t kSoftKeyY = 28 + 712 - kSoftKeyBarH;                   // 672
 constexpr int16_t kSoftKeyH = 60;
 constexpr int16_t kSoftKeyGap = 8;
 
-// 统一内边距：自由文字距内容区左右缘 kPadX；框内（行/卡片/条）文字距框缘 kRowPadX。
+// 统一内边距：自由文字距内容区左右缘 kPadX；框内（行/条）文字距框缘 kRowPadX。
 constexpr int16_t kPadX = 12;
 constexpr int16_t kRowPadX = 16;
-constexpr int16_t kCardPadX = 24;   // 大色块卡片（S0）内边距
 constexpr int16_t kInnerX = kContentX + kPadX;                           // 40
 constexpr int16_t kInnerW = kContentW - 2 * kPadX;                       // 472
 constexpr int16_t kInnerRight = kInnerX + kInnerW;                       // 512
@@ -93,21 +91,11 @@ constexpr int16_t kTitleY = kContentTop + kBannerH + 4;                  // 108
 constexpr int16_t kTitleH = 40;
 constexpr int16_t kBodyTop = kTitleY + kTitleH + 4;                      // 152
 
-// 严重度芯片（S1 列表行与 S2 详情头部共用同一尺寸/文字样式）。
+// 严重度芯片（告警详情头部）。
 constexpr int16_t kSevChip = 48;
 
-// S0 总览卡片（点击区域 = kOverviewCardsTop..kOverviewCardsBottom）。
-constexpr int16_t kCardH = 130;
-constexpr int16_t kCardGap = 10;
-constexpr int16_t kOverviewCardsTop = kBodyTop;                                   // 152
-constexpr int16_t kOverviewCardsBottom = kOverviewCardsTop + 3 * kCardH + 2 * kCardGap;  // 562
-
-// S1 列表：kRowsPerPage 行，每行 kRowH，自 kTableRowTop 起。
-constexpr int16_t kRowsPerPage = 6;
-constexpr int16_t kTableRowTop = kBodyTop;                               // 152
-constexpr int16_t kRowH = (kContentBottom - kTableRowTop) / kRowsPerPage;  // 86
-static_assert(kTableRowTop + kRowsPerPage * kRowH <= kContentBottom,
-              "S1 rows must end above the soft-key bar");
+// 状态页每子页最多行数（分节标题计一行；drawKvList 另按内容区底边截断）。
+constexpr size_t kStatusRowsPerPage = 16;
 
 // S4 设置：每页 kSettingsRowsPerPage 行（= panel_app kSettingsPageRows），
 // 行 i 的点击区域 y ∈ [kSettingsRowTop + i*kSettingsRowPitch, +kSettingsRowPitch)，
@@ -142,7 +130,7 @@ struct StatusBarModel {
   bool mains = true;  // true=常供电 false=电池
   bool portalOpen = false;
   bool apFallback = false;
-  size_t mutedCount = 0;  // store 静音记录数（快照内 muted 计数）
+  size_t mutedCount = 0;  // 外部告警 store 静音记录数（快照内 muted 计数）
   char banner[96] = "";  // 操作结果/二次确认提示（空 = 无）
 };
 
@@ -151,52 +139,33 @@ struct SoftKeyModel {
   bool enabled = true;
 };
 
-struct S0Model {
-  size_t critical = 0;
-  size_t warning = 0;
-  size_t info = 0;
-  size_t activeTotal = 0;  // Active+Acked（已排除 store 静音记录）
-  size_t acked = 0;
-  size_t muted = 0;        // store 静音记录数（仅展示）
-  size_t sourcesOk = 0;
-  size_t sourcesTotal = 0;
-  char updatedText[24] = "";
-  bool empty = true;
-};
-
-struct S1RowModel {
-  uint8_t severity = 0;  // alert_core::Severity
-  uint8_t state = 0;     // alert_core::AlertState
-  std::string title;     // 已钳制（≤120 字符 + 去控制字符）
-  std::string subtitle;  // 类型名（zh/en）· 源 id
-  char age[24] = "";     // 相对时间（刚刚/Nm ago/...）
-};
-
-struct S1Model {
-  std::vector<S1RowModel> rows;
-  size_t total = 0;
-  size_t page = 0;
-  size_t pageCount = 0;
-  size_t selected = 0;  // 页内选中行下标
-};
-
-struct S2Model {
-  uint8_t severity = 0;
-  uint8_t state = 0;
+// 告警详情（dashboard 告警视图的一条；外部告警附带 store 元信息）。
+struct AlertDetailModel {
+  uint8_t severity = 0;  // 0 info / 1 warning / 2 critical
+  uint8_t state = 0;     // 0 活动 / 1 已确认 / 2 已恢复 / 3 已过期
+  char position[16] = "";  // "2/5"（列表内位置）
   std::string typeName;
   std::string title;
   std::string message;
   std::vector<std::pair<std::string, std::string>> meta;  // 标签/值（已格式化）
   std::vector<std::pair<std::string, std::string>> fields;
-  bool canAck = false;
-  bool canClear = false;
-  bool muted = false;  // store 级静音（M21：规则命中，记录留库但不进总览/列表）
+  bool empty = false;  // 列表已空（目标消失）
 };
 
-struct S3Model {
-  // 预格式化的行（label/value 两段，已钳制）；分节标题以空 value + bold 呈现
+// 状态页 / 帮助页：预格式化的行（label/value 两段，已钳制）；分节标题以空
+// value 呈现。
+struct KvModel {
   std::vector<std::pair<std::string, std::string>> rows;
+  char pageText[16] = "";  // 多子页时 "1/2"
   bool configValid = true;
+};
+
+// 未配置 dashboard 时的主页：引导到 web 配置。
+struct OnboardingModel {
+  std::string url;       // http://<ip>/（空 = 尚无地址）
+  std::string network;   // WiFi 状态行（SSID · RSSI 或 未连接）
+  bool apMode = false;   // 配网/恢复热点开启：引导连接热点
+  std::string reason;    // dashboard 配置存在但无效时的原因（已钳制）
 };
 
 struct S4RowModel {
@@ -224,12 +193,11 @@ void drawSoftKeys(eego::PortraitCanvas& c, const SoftKeyModel* keys, size_t n,
                   size_t focused);
 
 // 页面内容（不含状态栏/软键栏；状态栏横幅由 drawStatusBar 绘制）。
-void drawS0(eego::PortraitCanvas& c, const S0Model& m);
-void drawS1(eego::PortraitCanvas& c, const S1Model& m);
-void drawS2(eego::PortraitCanvas& c, const S2Model& m);
-void drawS3(eego::PortraitCanvas& c, const S3Model& m);
+void drawOnboarding(eego::PortraitCanvas& c, const OnboardingModel& m);
+void drawAlertDetail(eego::PortraitCanvas& c, const AlertDetailModel& m);
+void drawStatus(eego::PortraitCanvas& c, const KvModel& m);
 void drawS4(eego::PortraitCanvas& c, const S4Model& m);
-void drawHelp(eego::PortraitCanvas& c, const S3Model& m);
+void drawHelp(eego::PortraitCanvas& c, const KvModel& m);
 void drawProvision(eego::PortraitCanvas& c, const ProvisionModel& m);
 
 // ── 钳制工具（构建模型与绘制共用；渲染层对不可信字段的最后一道闸）────────────

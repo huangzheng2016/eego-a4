@@ -40,10 +40,6 @@ std::string encodeFrom(uint64_t unix_ms, const uint8_t rand_bytes[16]) {
 
 }  // namespace
 
-std::string ulidEncode(uint64_t unix_ms, const uint8_t entropy[16]) {
-  return encodeFrom(unix_ms, entropy);
-}
-
 std::string UlidMonotonic::next(uint64_t unix_ms, const uint8_t entropy[16]) {
   if (have_prev_ && unix_ms <= last_ms_) {
     // Same (or backwards) clock tick: increment the randomness component so

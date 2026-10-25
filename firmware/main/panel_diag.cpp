@@ -28,12 +28,11 @@ void printOk(bool ok) { printf("[%s] ", ok ? "PASS" : "FAIL"); }
 
 const char* pageName(Page p) {
   switch (p) {
-    case Page::Overview: return "s0-overview";
-    case Page::Table: return "s1-table";
-    case Page::Detail: return "s2-detail";
-    case Page::Status: return "s3-status";
-    case Page::Settings: return "s4-settings";
     case Page::Dashboard: return "dashboard";
+    case Page::Onboarding: return "onboarding";
+    case Page::AlertDetail: return "detail";
+    case Page::Status: return "status";
+    case Page::Settings: return "settings";
     case Page::Help: return "help";
     default: return "provision";
   }
@@ -95,19 +94,24 @@ void PanelApp::diagNet() {
   printf("net: running=%d wifi_state=%d ssid=%s rssi=%d ip=%s backoff=%ums\n",
          ns.running ? 1 : 0, ns.wifi.state, ns.wifi.ssid.c_str(), ns.wifi.rssi,
          ns.wifi.ip.c_str(), static_cast<unsigned>(ns.wifi.reconnect_backoff_ms));
-  printf("net: sources=%u pool_sessions=%u\n", static_cast<unsigned>(ns.sources.size()),
-         static_cast<unsigned>(ns.pool_sessions));
-  for (const auto& s : ns.sources) {
-    printf("  src %s kind=%s enabled=%d fail=%u http=%d ingested=%u cleared=%u skipped=%u\n",
-           s.id.c_str(), s.kind.c_str(), s.enabled ? 1 : 0,
-           static_cast<unsigned>(s.consecutive_failures), s.last_http_status,
-           static_cast<unsigned>(s.events_ingested), static_cast<unsigned>(s.events_cleared),
-           static_cast<unsigned>(s.events_skipped));
-    if (!s.last_error.empty()) printf("    last_error: %s\n", s.last_error.c_str());
+  printf("net: pool_sessions=%u alerts_db attached=%d records=%u bytes=%u compactions=%u "
+         "io_failures=%u\n",
+         static_cast<unsigned>(ns.pool_sessions), ns.alert_db.attached ? 1 : 0,
+         static_cast<unsigned>(ns.alert_db.records), static_cast<unsigned>(ns.alert_db.file_bytes),
+         static_cast<unsigned>(ns.alert_db.compactions),
+         static_cast<unsigned>(ns.alert_db.io_failures));
+  // 数据源状态属于 dashboard（唯一取数模型）：见 `dashboard status`。
+  for (const DashboardSourceInfo& src : dashboard_.sources()) {
+    printf("  source %s enabled=%d data=%d offline=%d fail=%u http=%d\n", src.id.c_str(),
+           src.enabled ? 1 : 0, src.has_data ? 1 : 0, src.offline ? 1 : 0,
+           static_cast<unsigned>(src.consecutive_failures), src.last_http_status);
   }
 }
 
 void PanelApp::diagAlerts() {
+  if (deps_.publisher != nullptr) {
+    if (auto snap = deps_.publisher->acquire()) snapshot_ = snap;
+  }
   if (snapshot_ == nullptr) {
     printf("alerts: no snapshot published yet\n");
     return;
@@ -252,7 +256,7 @@ void PanelApp::diagSmoke() {
     check(dashboard_.smoke(), "dashboard", "runtime checks complete");
     dashboard_.invalidateAll();
   } else {
-    printf("[WARN] dashboard: not configured; legacy alert UI active\n");
+    printf("[WARN] dashboard: not configured; onboarding screen active\n");
     warn++;
   }
 
@@ -292,20 +296,30 @@ void PanelApp::diagLang(const char* arg) {
 
 void PanelApp::diagPage(const char* arg) {
   Page target;
-  if (strcasecmp(arg, "s0") == 0) {
-    target = Page::Overview;
-  } else if (strcasecmp(arg, "s1") == 0) {
-    target = Page::Table;
-  } else if (strcasecmp(arg, "s2") == 0) {
-    if (detailId_.empty()) {
-      printf("ERR page s2 needs an open detail (use s1 first)\n");
+  if (strcasecmp(arg, "home") == 0) {
+    goHome();
+    printf("page: -> %s\n", pageName(page_));
+    return;
+  }
+  if (strcasecmp(arg, "status") == 0) {
+    target = Page::Status;
+  } else if (strcasecmp(arg, "settings") == 0) {
+    target = Page::Settings;
+  } else if (strcasecmp(arg, "help") == 0) {
+    target = Page::Help;
+  } else if (strcasecmp(arg, "detail") == 0) {
+    if (!dashboard_.available()) {
+      printf("ERR page detail: dashboard not loaded\n");
       return;
     }
-    target = Page::Detail;
-  } else if (strcasecmp(arg, "s3") == 0) {
-    target = Page::Status;
-  } else if (strcasecmp(arg, "s4") == 0) {
-    target = Page::Settings;
+    const std::vector<DashboardAlertItem> items = dashboard_.alertItems({});
+    if (items.empty()) {
+      printf("ERR page detail: no alerts\n");
+      return;
+    }
+    openDetail({}, items.front().identity);
+    printf("page: -> %s (%u alert(s))\n", pageName(page_), static_cast<unsigned>(items.size()));
+    return;
   } else if (strcasecmp(arg, "dashboard") == 0 || strcasecmp(arg, "dash") == 0) {
     if (!dashboard_.available()) {
       printf("ERR page dashboard: not loaded\n");
@@ -313,7 +327,8 @@ void PanelApp::diagPage(const char* arg) {
     }
     target = Page::Dashboard;
   } else {
-    printf("ERR usage: page s0|s1|s2|s3|s4|dashboard (current=%s)\n", pageName(page_));
+    printf("ERR usage: page home|dashboard|detail|status|settings|help (current=%s)\n",
+           pageName(page_));
     return;
   }
   gotoPage(target);

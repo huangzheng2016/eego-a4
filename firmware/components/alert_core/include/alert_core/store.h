@@ -94,7 +94,6 @@ class AlertStore {
   AlertStore(TypeRegistry& registry, EntropyFn entropy = EntropyFn());
 
   const StoreConfig& config() const { return config_; }
-  void setConfig(const StoreConfig& cfg) { config_ = cfg; }
 
   // Ingests one normalized event from the given source at unix time `now`.
   IngestOutcome ingest(const AlertEvent& ev, const AlertSource& source, uint64_t now);
@@ -117,18 +116,12 @@ class AlertStore {
 
   // Read side (still confined to the owning task — UI uses snapshots).
   const AlertRecord* find(const std::string& id) const;
-  const AlertRecord* findByFingerprint(const std::string& fingerprint) const;
   std::vector<const AlertRecord*> list(const std::string& state, const std::string& severity,
                                        const std::string& type, const std::string& source,
                                        bool include_muted, uint64_t since,
                                        size_t limit) const;
   StoreStats stats() const;
   size_t size() const { return entries_.size(); }
-
-  // Active (non-terminal) id+fingerprint pairs of one source — the http_poll
-  // adapter feeds this into its clear_after_misses bookkeeping.
-  std::vector<std::pair<std::string, std::string>> activeIdsBySource(
-      const std::string& source_id) const;
 
   // Full record copy (e.g. feeding buildSnapshot for the UI publisher).
   std::vector<AlertRecord> allRecords() const;
@@ -143,6 +136,20 @@ class AlertStore {
   // Rewrites the whole db from memory (atomic tmp + read-back verify + rename).
   bool compactDb(std::string& err);
 
+  // Compaction policy for the append-only db (the owning task calls
+  // maybeCompactDb periodically; boot calls compactDb when dead lines exist).
+  // Compacts when the file exceeds max_bytes (and has at least doubled since the
+  // last compaction, so a large live set does not compact on every check), or
+  // when superseded lines dominate (dead >= min_dead_lines and dead > live).
+  struct CompactPolicy {
+    size_t max_bytes = 256 * 1024;
+    size_t min_dead_lines = 256;
+  };
+  // Returns true when a compaction ran and succeeded; `attempted` reports
+  // whether one was needed (a failed attempt leaves `err` set).
+  bool maybeCompactDb(const CompactPolicy& policy, std::string& err, bool* attempted = nullptr);
+  size_t lastCompactBytes() const { return last_compact_bytes_; }
+
   // Effective TTL for an event against a type: event ttl_s > override ttl >
   // type default > severity band.
   uint32_t effectiveTtl(const AlertEvent& ev, const AlertTypeDescriptor& desc) const;
@@ -152,6 +159,8 @@ class AlertStore {
     AlertRecord record;
     uint64_t seq = 0;  // store-local activity clock: purge "oldest" = smallest seq
   };
+
+  size_t last_compact_bytes_ = 0;
 
   Entry* findEntry(const std::string& id);
   Entry* findEntryByFingerprint(const std::string& fingerprint);

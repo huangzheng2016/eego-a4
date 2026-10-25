@@ -1,27 +1,37 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// panel_app —— 告警/数据面板应用状态机（FW5/M18 + DP4/M26 组合根的 UI 属主）。
+// panel_app —— 监控面板设备应用状态机（组合根的 UI 属主）。
+//
+// 屏幕（产品模型：web 端配置的 dashboard 是唯一主界面）：
+//   Dashboard     主页（已配置 dashboard）；告警通过告警面板/横幅呈现
+//   Onboarding    主页（未配置）：设备地址、WiFi 状态与配置步骤
+//   AlertDetail   告警详情：从告警面板/横幅进入，↑/↓ 浏览同一列表，确认/静音/删除
+//   Status        设备状态：网络、电源、存储、固件、各数据源最近更新与错误
+//   Settings / Help / Provision
+//
+// 导航（详见 README「设备操作」）：↑/↓ 短按 = 上/下一屏（列表内上/下一项）；
+// ↑/↓ 长按 = 面板焦点；Power 短按 = 选择/确认，长按 = 返回；前置键短按 = 主页，
+// 长按 = 设置，双击 = 状态（后两者及 ↑/↓ 可经 input-bindings 自定义）。
 //
 // 并发模型（M12 定稿，本类强制执行）：
 //   * 全部渲染/导航/本地动作只在 app_task 上下文（begin/service/handle* 由
 //     app_main 主循环调用）；触控 8ms 轮询与按键队列在 app_main 泵入；
 //   * 告警数据只读：SnapshotPublisher::acquire 无锁取不可变快照，绝不直写
-//     AlertStore；告警动作（ack/ackAll/clear）与静音规则（set/clear/query）
-//     一律经 NetStack 命令队列由 net_task 执行；本类不触碰 HttpPool/适配器；
+//     AlertStore；告警动作（ack/clear）与静音规则（set/clear/query）一律经
+//     NetStack 命令队列由 net_task 执行；本类不触碰 HttpPool；
 //   * 跨任务入口只有 notifyNetEvent / notifyAdminEvent：只做原子置位与小
 //     信箱投递，短平快，绝不做渲染/IO。
 //
 // 电源双策略（M13/M18）：
 //   * 常供电：WiFi modem-sleep（setPowerSave(true)）常驻，http_push 即时可达；
-//   * 电池：唤醒 → 重连 → 全源轮询 → 渲染 → 短暂交互窗口 → 安全深睡
+//   * 电池：唤醒 → 重连 → dashboard 全源拉取 → 渲染 → 短暂交互窗口 → 安全深睡
 //     （GPIO4 锁存保持 + 定时唤醒 + 电源键 EXT0 唤醒）；唤醒=重启，循环。
 //   模式判定：DeviceSettings Auto = 充电状态（无电池读数回退常供电），S4 可强制。
 //
-// 静音（M21 store 级）：详情静音 = 指纹规则经 net_task 落入 AlertStore
+// 静音（store 级）：外部告警详情静音 = 指纹规则经 net_task 落入 AlertStore
 // （重估 muted 标志 + 快照发布），并持久化到 config.json mute_rules（重启
-// 恢复）；S4 清除全部静音 = 清空规则表。总览/列表/状态统计统一按记录的
-// muted 标志过滤（store 语义），不再有 UI 级指纹过滤。
+// 恢复）；设置页清除全部静音 = 清空规则表。muted 记录不进入 dashboard 事件。
 
 #include <atomic>
 #include <cstdint>
@@ -36,11 +46,12 @@
 #include "device_settings/device_settings.h"
 #include "eego_hal.h"
 #include "eego_ui.h"
-#include "net_stack/source_health.h"
+#include "net_stack/net_status.h"
 #include "panel_render.h"
 #include "panel_types.h"
 #include "ui_text.h"
 #include "admin/input_binding_model.h"
+#include "admin/render_preview.h"
 #include "input_confirm.h"
 #include "input_navigation.h"
 
@@ -83,8 +94,13 @@ class PanelApp {
   // 不因 app_task 忙而被当作陈旧丢弃。
   void noteInputResume();
 
+  // 管理 API 渲染预览（app_task 上下文，经 AdminCommand::RenderPreview 调用）：
+  // 在独立的离屏 framebuffer 上渲染候选 dashboard，绝不触碰实屏帧缓冲。
+  bool renderDashboardPreview(const eego::admin::RenderPreviewRequest& request, uint8_t* rows,
+                              size_t stride, eego::admin::RenderPreviewResult& result);
+
   // 跨任务通知（必须短平快；可在 net_task/httpd/sys_evt 上下文调用）。
-  void notifyNetEvent(int wifiState, bool sourceHealthChanged);
+  void notifyNetEvent(int wifiState);
   void notifyAdminEvent(int type, int reason, uint32_t remainingS);
 
   // ---- diag 串口命令钩子（app_task 上下文；app_main 注册到 diag::Handlers）----
@@ -109,15 +125,18 @@ class PanelApp {
  private:
   // ---- 事件处理（按页面分发）----
   void onTouchTap(int16_t x, int16_t y);
-  void onFrontKeyShort();
   void dispatchTrigger(eego::admin::InputTrigger trigger, int64_t now_us);
   void executeBinding(const eego::admin::InputBinding& binding, int64_t now_us);
   void executeBuiltin(const std::string& name, int64_t now_us);
 
   // ---- 导航 ----
+  Page home() const { return homePage(dashboard_.available()); }
   void gotoPage(Page p);          // 切页（下一帧强制 Full）
+  void goHome();                  // 前置键短按：主页（dashboard 默认页第一屏）
   void back();                    // 电源键长按/返回软键
-  void moveFocus(int delta);      // S0/S2/S3 软键聚焦、S1 行选择、S4 行聚焦
+  // Focus = 面板焦点（dashboard）/ 设置子页 / 软键焦点；
+  // Page  = 上/下一屏（dashboard）/ 列表上/下一项（设置行、告警）/ 状态子页。
+  void moveFocus(int delta);
   void movePage(int delta);
   void requestNavigation(NavigationKind kind, int delta, int64_t now_us);
   void flushNavigation(int64_t now_us);
@@ -137,7 +156,8 @@ class PanelApp {
   bool adjustSettingRow(SettingId id, int dir, bool coarse = false, bool wrap = false);
   static bool settingAdjustable(SettingId id);
   size_t settingsPage() const;
-  bool pageEdge(int delta) const;  // Table/Settings 当前子页沿 delta 方向已到边界
+  bool pageEdge(int delta) const;  // Settings/Status 当前子页沿 delta 方向已到边界
+  size_t statusPageCount() const;
 
   // ---- 触控命中 ----
   struct TouchHit {
@@ -158,8 +178,7 @@ class PanelApp {
   void syncDoublePress(bool force);
 
   // ---- 动作（NetStack / DeviceSettings / recovery）----
-  void doAck(const std::string& id);
-  void doAckAll();
+  void doAck();                   // 告警详情：确认当前告警
   void doClear(const std::string& id);
   void doMute(const alert_core::AlertRecord& rec);
   void doClearMutes();
@@ -217,20 +236,25 @@ class PanelApp {
   }
   void render(int64_t nowMs);
   void buildStatusBar(StatusBarModel& m);
-  void buildS0(S0Model& m);
-  void buildS1(S1Model& m);
-  void buildS2(S2Model& m);
-  void buildS3(S3Model& m);
+  void buildOnboarding(OnboardingModel& m);
+  void buildDetail(AlertDetailModel& m);
+  void buildStatus(KvModel& m);
   void buildS4(S4Model& m);
-  void buildHelp(S3Model& m);
+  void buildHelp(KvModel& m);
+
+  // ---- 告警详情（dashboard 告警视图；外部告警附带 alert_core 记录）----
+  void openDetail(const std::string& panel_id, const std::string& identity);
+  void refreshDetailItems();
+  const DashboardAlertItem* detailItem() const;
+  const alert_core::AlertRecord* detailRecord() const;  // 外部告警的 store 记录
+  void moveDetail(int delta);
+  std::string detailSignature() const;
 
   // ---- 数据辅助 ----
   uint64_t nowUnix();             // 统一时间源（TimeSource：SNTP 系统时间 > RTC > 0）
   void refreshBattery(int64_t nowMs);
   const eego::net::NetStatusSnapshot& netStatus();  // 5s 缓存的源/WiFi/时间状态
   const alert_core::AlertRecord* findRecord(const std::string& id) const;
-  bool recordVisible(const alert_core::AlertRecord& r) const;  // 非 store 静音
-  size_t visibleRecords(std::vector<const alert_core::AlertRecord*>& out) const;
   void formatAge(uint64_t ts, char* out, size_t cap);
   void formatTs(uint64_t ts, char* out, size_t cap) const;
   const char* typeName(const std::string& typeId, std::string& buf) const;
@@ -249,11 +273,18 @@ class PanelApp {
   int wakeCause_ = 0;
 
   // 页面/导航状态（仅 app_task 上下文读写）
-  Page page_ = Page::Overview;
-  Page helpReturn_ = Page::Overview;
+  Page page_ = Page::Onboarding;
+  Page helpReturn_ = Page::Settings;
   size_t focus_ = 0;
-  size_t tablePage_ = 0;
-  std::string detailId_;
+  size_t statusPage_ = 0;
+  size_t statusRows_ = 0;  // 上次构建的状态页总行数（分页用）
+  // 告警详情：来源面板（空 = 全部告警）、当前条目身份与下标（条目消失时按下标就近）。
+  std::string detailPanel_;
+  std::string detailIdentity_;
+  size_t detailIndex_ = 0;
+  std::vector<DashboardAlertItem> detailItems_;
+  std::string detailRendered_;
+  int64_t lastDetailCheckMs_ = 0;
   bool provisionSucceeded_ = false;
   uint64_t pageEpoch_ = 1;
   NavigationCoalescer navigation_;
@@ -316,6 +347,9 @@ class PanelApp {
   int64_t lastClockCheckMs_ = 0;
   int64_t lastBleProvRenderMs_ = 0;
   bool dashboardWasAvailable_ = false;
+  std::string onboardingKey_;       // 引导页显示内容签名（地址/WiFi 变化即重绘）
+  int64_t lastOnboardingCheckMs_ = 0;
+  int64_t lastStatusRenderMs_ = 0;
 
   // 双击门控缓存
   std::string doublePressContext_;

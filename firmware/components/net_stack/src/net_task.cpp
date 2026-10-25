@@ -13,8 +13,6 @@
 #include "freertos/task.h"
 #include "mbedtls/platform.h"
 
-#include "net_stack/http_poll_adapter.h"
-#include "net_stack/refresh_schedule.h"
 #include "store_digest.h"
 
 namespace eego::net {
@@ -51,17 +49,8 @@ struct NetStack::Impl {
     std::shared_ptr<void> payload;
   };
 
-  struct AddSrcPayload {
-    SourceConfig cfg;
-    PendingOp op;
-  };
-  struct IdPayload {  // RemoveSource / SetEnabled / PollNow / ReconnectNow
+  struct IdPayload {  // ReconnectNow
     std::string id;
-    bool flag = false;  // SetEnabled: 目标状态；PollNow/ReconnectNow 忽略
-    PendingOp op;
-  };
-  struct RefreshPayload {
-    uint32_t interval_ms = 0;
     PendingOp op;
   };
   struct HttpPayload {
@@ -92,19 +81,9 @@ struct NetStack::Impl {
     PendingOp op;
   };
 
-  struct SourceRuntime {
-    SourceConfig cfg;
-    std::unique_ptr<ISourceAdapter> adapter;
-    SourceHealth health;
-    int64_t next_due_ms = 0;  // esp_timer 毫秒
-    bool last_ok = true;      // 上一次轮询成败（跃迁检测用）
-  };
-
   NetStack* self = nullptr;
   QueueHandle_t queue = nullptr;
   TaskHandle_t task = nullptr;
-  std::vector<std::unique_ptr<SourceRuntime>> sources_;
-  uint32_t data_refresh_interval_ms_ = 0;
 
   // WiFi 重连状态（net_task 上下文私有）
   int64_t next_wifi_retry_ms_ = 0;
@@ -116,6 +95,10 @@ struct NetStack::Impl {
   uint64_t last_digest_ = 0;
   bool have_digest_ = false;
   int64_t next_expire_ms_ = 0;
+  // alerts.db 维护（net_task 私有）
+  int64_t next_db_check_ms_ = 0;
+  uint32_t db_compactions_ = 0;
+  uint64_t db_last_compact_at_ = 0;
 
   static int64_t nowMs() { return esp_timer_get_time() / 1000; }
   uint64_t nowUnix() const {
@@ -159,98 +142,38 @@ struct NetStack::Impl {
     publishSnapshotIfChanged(false);
   }
 
-  SourceRuntime* findSource(const std::string& id) {
-    for (auto& s : sources_)
-      if (s->cfg.id == id) return s.get();
-    return nullptr;
+  // alerts.db 压缩（store 唯一写方 = 本任务，压缩与追加天然串行）：按节拍检查
+  // 文件大小与死行比例，超阈值即 tmp + 回读校验 + 替换。失败保留原文件，
+  // 下个节拍重试。
+  void maintainAlertDb(int64_t now) {
+    if (!self->store_ || self->cfg_.alert_db_check_interval_ms == 0) return;
+    if (now < next_db_check_ms_) return;
+    next_db_check_ms_ = now + self->cfg_.alert_db_check_interval_ms;
+    // 压缩流式进行，但仍需少量内部堆（单条序列化 + 文件缓冲）；堆紧张时本拍
+    // 跳过，下个节拍再看，绝不在低内存下硬上。
+    constexpr size_t kCompactMinFree = 32 * 1024;
+    constexpr size_t kCompactMinBlock = 12 * 1024;
+    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < kCompactMinFree ||
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) <
+            kCompactMinBlock) {
+      return;
+    }
+    std::string err;
+    bool attempted = false;
+    if (self->store_->maybeCompactDb(self->cfg_.alert_db_policy, err, &attempted)) {
+      ++db_compactions_;
+      db_last_compact_at_ = nowUnix();
+      ESP_LOGI(TAG, "alerts.db compacted: %u record(s), %u bytes",
+               (unsigned)self->store_->size(), (unsigned)self->store_->lastCompactBytes());
+    } else if (attempted) {
+      ESP_LOGW(TAG, "alerts.db compaction failed: %s", err.c_str());
+    }
   }
 
   // ---- 命令处理（全部在 net_task 上下文）----
   void process(Command* cmd) {
     std::unique_ptr<Command> holder(cmd);  // 无论哪个分支都回收
     switch (cmd->type) {
-      case CmdType::AddSource: {
-        auto p = std::static_pointer_cast<AddSrcPayload>(cmd->payload);
-        if (findSource(p->cfg.id)) {
-          p->op.ok = false;
-          p->op.err = "source id already exists";
-        } else {
-          auto rt = std::make_unique<SourceRuntime>();
-          rt->cfg = p->cfg;
-          rt->adapter = SourceAdapterRegistry::instance().create(p->cfg.kind);
-          if (!rt->adapter) {
-            p->op.ok = false;
-            p->op.err = "unknown source kind: " + p->cfg.kind;
-          } else {
-            rt->health.id = p->cfg.id;
-            rt->health.kind = p->cfg.kind;
-            rt->health.enabled = p->cfg.enabled;
-            rt->health.interval_ms =
-                effectivePollIntervalMs(data_refresh_interval_ms_, p->cfg.interval_ms);
-            rt->next_due_ms = nowMs();  // 新源立即首轮（M11 验收 2：≤interval+5s）
-            sources_.push_back(std::move(rt));
-            p->op.ok = true;
-          }
-        }
-        p->op.give();
-        break;
-      }
-      case CmdType::RemoveSource: {
-        auto p = std::static_pointer_cast<IdPayload>(cmd->payload);
-        for (auto it = sources_.begin(); it != sources_.end(); ++it) {
-          if ((*it)->cfg.id == p->id) {
-            sources_.erase(it);
-            p->op.ok = true;
-            break;
-          }
-        }
-        if (!p->op.ok) p->op.err = "source not found";
-        p->op.give();
-        break;
-      }
-      case CmdType::SetEnabled: {
-        auto p = std::static_pointer_cast<IdPayload>(cmd->payload);
-        SourceRuntime* rt = findSource(p->id);
-        if (!rt) {
-          p->op.err = "source not found";
-        } else {
-          rt->cfg.enabled = p->flag;
-          rt->health.enabled = p->flag;
-          if (p->flag) rt->next_due_ms = nowMs();  // 重新启用立即轮询
-          p->op.ok = true;
-        }
-        p->op.give();
-        break;
-      }
-      case CmdType::PollNow: {
-        auto p = std::static_pointer_cast<IdPayload>(cmd->payload);
-        if (p->id.empty()) {
-          for (auto& s : sources_)
-            if (s->cfg.enabled) s->next_due_ms = nowMs();
-        } else {
-          SourceRuntime* rt = findSource(p->id);
-          if (rt && rt->cfg.enabled) rt->next_due_ms = nowMs();
-        }
-        p->op.ok = true;
-        p->op.give();
-        break;
-      }
-      case CmdType::SetDataRefresh: {
-        auto p = std::static_pointer_cast<RefreshPayload>(cmd->payload);
-        data_refresh_interval_ms_ = p->interval_ms;
-        const int64_t now = nowMs();
-        for (auto& source : sources_) {
-          source->health.interval_ms =
-              effectivePollIntervalMs(data_refresh_interval_ms_, source->cfg.interval_ms);
-          if (source->cfg.enabled) {
-            source->next_due_ms = dueAfterRefreshChange(
-                data_refresh_interval_ms_, source->cfg.interval_ms, now);
-          }
-        }
-        p->op.ok = true;
-        p->op.give();
-        break;
-      }
       case CmdType::ReconnectNow: {
         auto p = std::static_pointer_cast<IdPayload>(cmd->payload);
         wifi_backoff_ms_ = kWifiBackoffStartMs;
@@ -381,7 +304,17 @@ struct NetStack::Impl {
         p->snapshot.wifi.reconnect_backoff_ms = wifi_backoff_ms_;
         p->snapshot.pool_sessions = self->pool_ ? self->pool_->sessionCount() : 0;
         p->snapshot.running = true;
-        for (const auto& s : sources_) p->snapshot.sources.push_back(s->health);
+        if (self->store_) {
+          AlertDbStatus& db = p->snapshot.alert_db;
+          db.records = self->store_->size();
+          db.io_failures = self->store_->dbIoFailures();
+          db.compactions = db_compactions_;
+          db.last_compact_at = db_last_compact_at_;
+          if (self->cfg_.alert_db != nullptr) {
+            db.attached = true;
+            self->cfg_.alert_db->fileSize(db.file_bytes);
+          }
+        }
         // 统一时间源状态（M21）：time_valid_fn 判定可信性 + TimeSync SNTP 状态
         p->snapshot.time.valid = timeValid();
         p->snapshot.time.now = nowUnix();
@@ -426,12 +359,10 @@ struct NetStack::Impl {
     WifiState st = self->wifi_.state();
     if (st == WifiState::Connected) {
       if (last_wifi_state_ != WifiState::Connected) {
-        // 刚连上：退避复位 + 全部源立即重轮 + SNTP（重）同步（M21）
+        // 刚连上：退避复位 + SNTP（重）同步（M21）。dashboard 数据源由
+        // data_pipeline 自行重试（离线退避到期即拉取）。
         wifi_backoff_ms_ = kWifiBackoffStartMs;
         next_wifi_retry_ms_ = 0;
-        for (auto& s : sources_) {
-          if (s->cfg.enabled && s->next_due_ms > now) s->next_due_ms = now;
-        }
         self->time_sync_.onWifiConnected();
       }
     } else if (st != WifiState::Connecting && now >= next_wifi_retry_ms_) {
@@ -451,53 +382,13 @@ struct NetStack::Impl {
     }
     if (st != last_wifi_state_) {
       last_wifi_state_ = st;
-      self->emit({NetEventType::WifiStateChanged, (int)st, {}});
-    }
-  }
-
-  // ---- 到期源轮询（源级指数退避）----
-  void pumpSources(int64_t now) {
-    for (auto& s : sources_) {
-      if (!s->cfg.enabled || now < s->next_due_ms) continue;
-      AdapterContext ctx;
-      ctx.pool = self->pool_.get();
-      ctx.store = self->store_;
-      ctx.registry = self->registry_;
-      ctx.cache = &self->cache_;
-      ctx.now = nowUnix();
-
-      bool ok = s->adapter->runCycle(ctx, s->cfg, s->health);
-      if (ok) {
-        s->health.consecutive_failures = 0;
-        s->health.backoff_level = 0;
-        s->next_due_ms =
-            now + effectivePollIntervalMs(data_refresh_interval_ms_, s->cfg.interval_ms);
-      } else {
-        s->health.consecutive_failures++;
-        s->health.backoff_level = std::min(s->health.backoff_level + 1, (uint32_t)6);
-        const uint32_t backoff = pollBackoffMs(data_refresh_interval_ms_, s->cfg.interval_ms,
-                                               s->health.backoff_level,
-                                               self->cfg_.source_backoff_max_ms);
-        s->next_due_ms = now + backoff;
-        ESP_LOGW(TAG, "source %s poll failed (#%u, next in %ums): %s", s->cfg.id.c_str(),
-                 (unsigned)s->health.consecutive_failures, (unsigned)backoff,
-                 s->health.last_error.c_str());
-      }
-      if (ok != s->last_ok) {
-        s->last_ok = ok;
-        self->emit({NetEventType::SourceHealthChanged, (int)self->wifi_.state(), s->cfg.id});
-      }
-      // 适配器本轮可能已摄入/自动清除（runCycle 内部直写 store，net_task 上下文）
-      publishSnapshotIfChanged(false);
+      self->emit({NetEventType::WifiStateChanged, (int)st});
     }
   }
 
   // 距下一个事件点的毫秒数（上限 1000ms 保 housekeeping 精度）
   int64_t nextWakeMs(int64_t now) {
     int64_t next = now + 1000;
-    for (const auto& s : sources_) {
-      if (s->cfg.enabled && s->next_due_ms < next) next = s->next_due_ms;
-    }
     if (next_wifi_retry_ms_ > 0 && next_wifi_retry_ms_ < next) next = next_wifi_retry_ms_;
     return std::max<int64_t>(next - now, 10);
   }
@@ -506,7 +397,7 @@ struct NetStack::Impl {
 
   void loop() {
     publishSnapshotIfChanged(true);  // 首帧快照（覆盖 start 前的 loadFrom 加载）
-    self->emit({NetEventType::Started, 0, {}});
+    self->emit({NetEventType::Started, 0});
     while (self->running_) {
       int64_t now = nowMs();
       // 先排空命令队列（每轮最多 16 条，防饿死轮询）
@@ -519,15 +410,15 @@ struct NetStack::Impl {
       if (!self->running_) break;
       now = nowMs();
       pumpWifi(now);
-      pumpSources(now);
       expireDue(now);
+      maintainAlertDb(now);
       self->time_sync_.service();  // SNTP 同步结果的 RTC 回写（net_task 上下文 I2C）
       if (self->pool_) self->pool_->housekeeping(now);
       // 阻塞等命令/到期（上限 1s 保 housekeeping 与事件及时性）
       TickType_t wait = pdMS_TO_TICKS((uint32_t)nextWakeMs(now));
       if (xQueueReceive(queue, &cmd, wait) == pdTRUE) process(cmd);
     }
-    self->emit({NetEventType::Stopped, 0, {}});
+    self->emit({NetEventType::Stopped, 0});
     task = nullptr;
     vTaskDelete(nullptr);
   }
@@ -541,7 +432,7 @@ NetStack& NetStack::instance() {
   return inst;
 }
 
-NetStack::NetStack() : wifi_(WifiManager::instance()), cache_("/sdcard/alertpanel/cache") {}
+NetStack::NetStack() : wifi_(WifiManager::instance()) {}
 
 NetStack::~NetStack() {
   stop();
@@ -556,7 +447,6 @@ esp_err_t NetStack::start(const NetStackConfig& cfg, alert_core::AlertStore* sto
   store_ = store;
   registry_ = registry;
   time_fn_ = std::move(time_fn);
-  cache_ = SourceCache(cfg.cache_dir);
   pool_ = std::make_unique<HttpPool>(cfg.pool);
 
   // mbedTLS 走 PSRAM（≤4KB 内部 RAM）：TLS 握手/证书校验的必选项，
@@ -579,20 +469,19 @@ esp_err_t NetStack::start(const NetStackConfig& cfg, alert_core::AlertStore* sto
 
   if (!impl_) impl_ = std::make_unique<Impl>();
   impl_->self = this;
-  impl_->sources_.clear();
-  impl_->data_refresh_interval_ms_ = 0;
   impl_->next_wifi_retry_ms_ = 0;
   impl_->wifi_backoff_ms_ = kWifiBackoffStartMs;
   impl_->last_wifi_state_ = WifiState::Disconnected;
   impl_->last_digest_ = 0;
   impl_->have_digest_ = false;
   impl_->next_expire_ms_ = 0;
+  // 首次压缩检查推迟一个节拍：启动时组合根已按死行做过一次压缩。
+  impl_->next_db_check_ms_ = Impl::nowMs() + cfg.alert_db_check_interval_ms;
+  impl_->db_compactions_ = 0;
+  impl_->db_last_compact_at_ = 0;
   time_sync_.configure(cfg.sntp_servers, cfg.rtc_write_fn);  // M21：SNTP + RTC 回写
   if (!impl_->queue) impl_->queue = xQueueCreate(16, sizeof(Impl::Command*));
   if (!impl_->queue) return ESP_ERR_NO_MEM;
-
-  // 内置适配器（http_poll）；ble_scan/web_chart/serial inject 后装在注册点注册
-  registerHttpPollAdapter(SourceAdapterRegistry::instance());
 
   esp_err_t err = wifi_.init();
   if (err != ESP_OK) return err;
@@ -631,56 +520,6 @@ bool NetStack::sendCmdAndWait(CmdType type, const std::shared_ptr<void>& payload
     return false;
   }
   return true;  // 入队成功；结果经 payload->op 等待（由调用方决定等多久）
-}
-
-bool NetStack::addSource(const SourceConfig& cfg, std::string& err, uint32_t wait_ms) {
-  auto p = std::make_shared<Impl::AddSrcPayload>();
-  p->cfg = cfg;
-  if (!sendCmdAndWait(CmdType::AddSource, p, wait_ms) ||
-      xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE) {
-    err = "net_task busy/unavailable";
-    return false;
-  }
-  err = p->op.err;
-  return p->op.ok;
-}
-
-bool NetStack::removeSource(const std::string& id, uint32_t wait_ms) {
-  auto p = std::make_shared<Impl::IdPayload>();
-  p->id = id;
-  if (!sendCmdAndWait(CmdType::RemoveSource, p, wait_ms) ||
-      xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
-    return false;
-  return p->op.ok;
-}
-
-bool NetStack::setSourceEnabled(const std::string& id, bool enabled, uint32_t wait_ms) {
-  auto p = std::make_shared<Impl::IdPayload>();
-  p->id = id;
-  p->flag = enabled;
-  if (!sendCmdAndWait(CmdType::SetEnabled, p, wait_ms) ||
-      xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
-    return false;
-  return p->op.ok;
-}
-
-bool NetStack::pollNow(const std::string& id, uint32_t wait_ms) {
-  auto p = std::make_shared<Impl::IdPayload>();
-  p->id = id;
-  if (!sendCmdAndWait(CmdType::PollNow, p, wait_ms) ||
-      xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
-    return false;
-  return p->op.ok;
-}
-
-bool NetStack::setDataRefreshInterval(uint32_t interval_ms, uint32_t wait_ms) {
-  auto p = std::make_shared<Impl::RefreshPayload>();
-  p->interval_ms = interval_ms;
-  if (!sendCmdAndWait(CmdType::SetDataRefresh, p, wait_ms) ||
-      xSemaphoreTake(p->op.sem, pdMS_TO_TICKS(wait_ms)) != pdTRUE) {
-    return false;
-  }
-  return p->op.ok;
 }
 
 bool NetStack::reconnectNow(uint32_t wait_ms) {

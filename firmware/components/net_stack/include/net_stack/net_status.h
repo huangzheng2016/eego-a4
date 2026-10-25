@@ -1,41 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// 源健康统计与 WiFi 状态快照（状态页 S3 / GET /api/v1/status 数据源，M11 §1）。
+// WiFi / 时间 / 外部告警库状态快照（设备状态页与 GET /api/v1/status 的数据源）。
 // 所有字段由 net_task 单属主更新；读取方经 NetStack::queryStatus 拿快照。
+// 数据源健康不在这里：dashboard 数据源（唯一取数模型）由 DashboardRuntime
+// 的 data_pipeline 维护。
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
-#include <vector>
 
 namespace eego::net {
-
-struct SourceHealth {
-  std::string id;
-  std::string kind;
-  bool enabled = true;
-  uint32_t interval_ms = 60000;
-
-  // 轮询节律（unix 秒，0 = 从未）
-  uint64_t last_attempt_at = 0;
-  uint64_t last_success_at = 0;
-  uint64_t next_due_at = 0;
-
-  // 失败退避：连续失败次数与当前退避档（源级指数退避 = interval << failures，封顶）
-  uint32_t consecutive_failures = 0;
-  uint32_t backoff_level = 0;
-
-  int last_http_status = 0;
-  std::string last_error;  // 不含秘密/凭据
-
-  uint32_t events_ingested = 0;
-  uint32_t events_cleared = 0;
-  uint32_t events_skipped = 0;  // 预算超限/映射缺字段被丢弃的事件数
-
-  // 离线缓存（最后一次成功响应）
-  uint64_t cache_fetched_at = 0;
-  uint32_t cache_bytes = 0;
-};
 
 struct WifiStatus {
   int state = 0;  // WifiState 枚举值（避免头文件依赖）
@@ -46,7 +21,7 @@ struct WifiStatus {
   uint32_t reconnect_backoff_ms = 0;  // 当前 WiFi 重连退避（指数退避档位）
 };
 
-// 统一时间源状态（M21：net_task 用 time_fn/time_valid_fn 填充；SNTP 状态由
+// 统一时间源状态（net_task 用 time_fn/time_valid_fn 填充；SNTP 状态由
 // TimeSync 提供）。valid=false 时 now 可能退化为 0 —— 展示层必须如实显示
 // 「时间不可用」，不得把 0 时间伪装成有效告警时间。
 struct TimeStatus {
@@ -56,12 +31,22 @@ struct TimeStatus {
   uint64_t last_sync_at = 0; // 最近一次 SNTP 同步 unix 秒（0 = 从未）
 };
 
+// 外部告警库（POST /alerts 推送摄入的 alerts.db）持久化状态。
+struct AlertDbStatus {
+  bool attached = false;      // store 已接 alerts.db（SD 可用）
+  size_t records = 0;         // 内存中的记录数
+  size_t file_bytes = 0;      // alerts.db 当前大小（0 = 未知/不存在）
+  uint32_t compactions = 0;   // 本次运行成功压缩次数
+  uint64_t last_compact_at = 0;  // 最近一次成功压缩 unix 秒（0 = 从未）
+  size_t io_failures = 0;     // 累计写/重命名失败次数
+};
+
 struct NetStatusSnapshot {
   WifiStatus wifi;
-  std::vector<SourceHealth> sources;
   uint32_t pool_sessions = 0;
   bool running = false;
   TimeStatus time;
+  AlertDbStatus alert_db;
 };
 
 }  // namespace eego::net

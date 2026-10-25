@@ -544,16 +544,6 @@ void HttpPool::housekeeping(int64_t now_ms) {
   }
 }
 
-bool HttpPool::hostThrottled(const std::string& url) const {
-  ParsedUrl u = parseUrl(url);
-  if (!u.valid) return false;
-  auto it = impl_->hosts_.find(impl_->hostKey(u));
-  if (it == impl_->hosts_.end()) return false;
-  const int64_t now = Impl::nowMs();
-  return it->second.transport_cooldown_until_ms > now ||
-         it->second.server_cooldown_until_ms > now;
-}
-
 size_t HttpPool::sessionCount() const { return impl_->sessions_.size(); }
 
 }  // namespace eego::net

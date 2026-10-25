@@ -234,12 +234,6 @@ WifiState WifiManager::connectMulti(const std::vector<WifiAccount>& accounts) {
   return state_;
 }
 
-void WifiManager::disconnect() {
-  connecting_ = false;
-  if (initialized_) esp_wifi_disconnect();
-  setState(WifiState::Disconnected);
-}
-
 void WifiManager::powerOff() {
   connecting_ = false;
   if (initialized_) {

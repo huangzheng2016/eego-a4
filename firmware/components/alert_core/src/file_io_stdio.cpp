@@ -35,6 +35,38 @@ bool StdioFileIo::readAll(const std::string& path, std::string& out) {
   return ok;
 }
 
+bool StdioFileIo::writeStream(const std::string& path,
+                              const std::function<bool(const ChunkSink& sink)>& producer) {
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  if (f == nullptr) return false;
+  bool write_ok = true;
+  const ChunkSink sink = [&](const char* data, size_t n) {
+    if (n != 0 && std::fwrite(data, 1, n, f) != n) write_ok = false;
+    return write_ok;
+  };
+  const bool produced = producer(sink);
+  const bool flushed = std::fflush(f) == 0;
+  const bool closed = std::fclose(f) == 0;
+  return produced && write_ok && flushed && closed;
+}
+
+bool StdioFileIo::readStream(const std::string& path, const ChunkSink& sink) {
+  std::FILE* f = std::fopen(path.c_str(), "rb");
+  if (f == nullptr) return false;
+  char buf[1024];
+  size_t n;
+  bool ok = true;
+  while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
+    if (!sink(buf, n)) {
+      ok = false;
+      break;
+    }
+  }
+  if (std::ferror(f)) ok = false;
+  std::fclose(f);
+  return ok;
+}
+
 bool StdioFileIo::exists(const std::string& path) const {
   struct stat st;
   return ::stat(path.c_str(), &st) == 0;

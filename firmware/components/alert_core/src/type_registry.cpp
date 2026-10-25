@@ -326,22 +326,6 @@ bool TypeRegistry::applyOverridesJson(const JsonValue& obj, ValidationError& err
   return true;
 }
 
-JsonValue TypeRegistry::overridesJson() const {
-  JsonValue::Object root;
-  for (const auto& kv : overrides_) {
-    const AlertTypeOverride& o = kv.second;
-    JsonValue::Object members;
-    if (o.has_severity)
-      members.emplace_back("severity", JsonValue::makeString(severityName(o.severity)));
-    if (o.has_ttl) members.emplace_back("ttl_s", JsonValue::makeInt(o.ttl_s));
-    if (o.has_name_zh) members.emplace_back("name_zh", JsonValue::makeString(o.name_zh));
-    if (o.has_name_en) members.emplace_back("name_en", JsonValue::makeString(o.name_en));
-    if (o.has_muted) members.emplace_back("muted", JsonValue::makeBool(o.muted));
-    root.emplace_back(kv.first, JsonValue::makeObject(std::move(members)));
-  }
-  return JsonValue::makeObject(std::move(root));
-}
-
 const AlertTypeDescriptor& TypeRegistry::generic() {
   static const AlertTypeDescriptor kGeneric = [] {
     AlertTypeDescriptor d = makeDesc("generic.any", "通用告警", "Generic alert", Severity::Info,

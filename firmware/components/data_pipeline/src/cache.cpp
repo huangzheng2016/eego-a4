@@ -12,6 +12,7 @@
 #include <limits>
 #include <set>
 
+#include "atomic_file.h"
 #include "dashboard_core/json.h"
 
 namespace eego::dashboard::pipeline {
@@ -85,6 +86,7 @@ std::string hex(uint64_t value) {
 }
 
 bool readFile(const std::string& path, size_t maximum, std::string& out, std::string& error) {
+  fsutil::recoverFile(path);  // power cut mid-replace: only <path>.bak is left
   struct stat info;
   if (::stat(path.c_str(), &info) != 0 || info.st_size < 0) {
     error = "cache file is unavailable";
@@ -111,24 +113,11 @@ bool readFile(const std::string& path, size_t maximum, std::string& out, std::st
   return true;
 }
 
+// FatFS-safe replace (see eego_hal atomic_file.h): tmp + fsync, then
+// target -> .bak, tmp -> target, drop .bak.
 bool writeAtomic(const std::string& path, const char* data, size_t size, std::string& error) {
-  const std::string temporary = path + ".tmp";
-  FILE* file = std::fopen(temporary.c_str(), "wb");
-  if (file == nullptr) {
-    error = "cache temporary file open failed";
-    return false;
-  }
-  const bool written = size == 0 || std::fwrite(data, 1, size, file) == size;
-  const bool flushed = std::fflush(file) == 0;
-  const bool closed = std::fclose(file) == 0;
-  if (!written || !flushed || !closed) {
-    std::remove(temporary.c_str());
-    error = "cache write failed";
-    return false;
-  }
-  if (std::rename(temporary.c_str(), path.c_str()) != 0) {
-    std::remove(temporary.c_str());
-    error = "cache atomic rename failed";
+  if (!fsutil::atomicWriteFile(path, data, size)) {
+    error = "cache atomic write failed";
     return false;
   }
   return true;
@@ -644,9 +633,10 @@ bool SdCache::clearSource(const std::string& source_id, std::string& error) {
   const std::string history = historyPath(source_id);
   const std::string snapshot = snapshotPath(source_id);
   const std::string generation = generationPath(source_id);
-  const std::string paths[] = {history,          history + ".tmp",  snapshot,
-                               snapshot + ".tmp", snapshot + ".next", snapshot + ".next.tmp",
-                               generation,        generation + ".tmp",
+  const std::string paths[] = {history,          history + ".tmp",  history + ".bak",
+                               snapshot,         snapshot + ".tmp", snapshot + ".bak",
+                               snapshot + ".next", snapshot + ".next.tmp", snapshot + ".next.bak",
+                               generation,        generation + ".tmp", generation + ".bak",
                                imagePath(source_id) + ".tmp"};
   bool ok = true;
   for (const std::string& path : paths) {
@@ -675,6 +665,9 @@ bool SdCache::appendHistory(const std::string& source_id,
       return false;
     }
   }
+  // Power cut mid-replace leaves only <history>.bak: restore it before the
+  // existence check, or the append would start a fresh history over it.
+  fsutil::recoverFile(historyPath(source_id));
   struct stat info;
   const bool exists = ::stat(historyPath(source_id).c_str(), &info) == 0;
   std::vector<HistoryEntry> combined;
@@ -715,6 +708,7 @@ bool SdCache::loadHistoryLimited(const std::string& source_id, std::vector<Histo
   }
   struct stat info;
   const std::string path = historyPath(source_id);
+  fsutil::recoverFile(path);  // only <path>.bak left after an interrupted replace
   if (::stat(path.c_str(), &info) != 0 || info.st_size < 0) {
     error = "cache file is unavailable";
     return false;
@@ -865,7 +859,7 @@ bool SdCache::writeSnapshot(const SourceResult& result, std::string& error,
     if (error.empty()) error = "snapshot manifest read-back failed";
     return false;
   }
-  if (std::rename(stage.c_str(), snapshotPath(result.source_id).c_str()) != 0) {
+  if (!fsutil::replaceFile(stage, snapshotPath(result.source_id))) {
     std::remove(stage.c_str());
     error = "snapshot manifest publication failed";
     return false;

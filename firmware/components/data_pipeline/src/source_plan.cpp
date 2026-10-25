@@ -373,7 +373,7 @@ bool validateSourcePlan(const SourcePlan& plan, std::string& error) {
   }
   if (!source.auth_token_ref.empty() &&
       !net::CredentialStore::validSourceRef(source.auth_token_ref)) {
-    error = "auth_token_ref must use nvs:source/<key>; re-create legacy refs via credentials API";
+    error = "auth_token_ref must use nvs:source/<key> (manage via credentials API)";
     return false;
   }
   if (source.headers.size() + source.header_secret_refs.size() > kMaxHeaders) {
@@ -514,21 +514,6 @@ bool sourcePlanFromJson(const JsonValue& value, SourcePlan& out, std::string& er
   return validateSourcePlan(out, error);
 }
 
-bool parseSourcePlan(std::string_view json, SourcePlan& out, std::string& error) {
-  if (json.size() > 128 * 1024) {
-    error = "source plan exceeds byte budget";
-    return false;
-  }
-  JsonValue root;
-  JsonParseError parse_error;
-  if (!jsonParse(json, root, parse_error)) {
-    error = "invalid source plan JSON at byte " + std::to_string(parse_error.offset) + ": " +
-            parse_error.message;
-    return false;
-  }
-  return sourcePlanFromJson(root, out, error);
-}
-
 bool buildSourceRequest(const SourcePlan& plan, const VariableValues& variables,
                         const TokenResolver& token_resolver, net::NetRequest& out,
                         std::string& error) {
@@ -605,20 +590,6 @@ std::string sourceRequestKey(const net::NetRequest& request) {
   return key;
 }
 
-SourcePlan makeTokenUsagePlan(const std::string& id, const std::string& url) {
-  SourcePlan plan = basePlan(id, url);
-  plan.response_kind = ResponseKind::GenericJson;
-  MetricMapping metric;
-  metric.items_path = "$.metrics[*]";
-  metric.name_path = "$.metric";
-  metric.value_path = "$.value";
-  metric.timestamp_path = "$.timestamp_ms";
-  metric.unit_path = "$.unit";
-  metric.reset_at_path = "$.reset_at";
-  plan.metrics.push_back(std::move(metric));
-  return plan;
-}
-
 SourcePlan makeWeatherPlan(const std::string& id, const std::string& url) {
   SourcePlan plan = basePlan(id, url);
   plan.response_kind = ResponseKind::GenericJson;
@@ -640,22 +611,6 @@ SourcePlan makeWeatherPlan(const std::string& id, const std::string& url) {
     metric.labels.push_back({"city", "$.city", ""});
     plan.metrics.push_back(std::move(metric));
   }
-  return plan;
-}
-
-SourcePlan makeServerMetricsPlan(const std::string& id, const std::string& url) {
-  SourcePlan plan = basePlan(id, url);
-  plan.response_kind = ResponseKind::Prometheus;
-  return plan;
-}
-
-SourcePlan makeSecurityEventsPlan(const std::string& id, const std::string& url) {
-  SourcePlan plan = basePlan(id, url);
-  plan.response_kind = ResponseKind::GenericJson;
-  EventMapping events;
-  events.severity_map = {{"error", "critical"}, {"warn", "warning"}, {"notice", "info"}};
-  events.clear_states = {"cleared", "resolved", "inactive"};
-  plan.events.push_back(std::move(events));
   return plan;
 }
 

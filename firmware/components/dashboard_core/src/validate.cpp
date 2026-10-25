@@ -421,8 +421,6 @@ class Validator {
       total_panels += page.panels.size();
       check(page.grid_columns >= 1 && page.grid_columns <= 64, child(path, "grid_columns"),
             "must be in 1..64");
-      check(page.row_height >= 1 && page.row_height <= 256, child(path, "row_height"),
-            "must be in 1..256");
       for (size_t j = 0; j < page.panels.size(); ++j) {
         const PanelSpec& panel = page.panels[j];
         const std::string panel_path = child(path, "panels") + "[" + std::to_string(j) + "]";
@@ -750,93 +748,6 @@ bool exportDashboard(const Dashboard& dashboard, std::string& out,
     return false;
   }
   return true;
-}
-
-size_t repairLegacyStoredLayout(JsonValue& stored) {
-  if (stored.type() != JsonValue::Type::Object) return 0;
-  JsonValue* dashboard = stored.find("dashboard");
-  return repairLegacyLayout(dashboard != nullptr ? *dashboard : stored);
-}
-
-size_t repairLegacyLayout(JsonValue& dashboard) {
-  if (dashboard.type() != JsonValue::Type::Object) return 0;
-  JsonValue* pages = dashboard.find("pages");
-  if (pages == nullptr || pages->type() != JsonValue::Type::Array) return 0;
-  constexpr int64_t kMaxRow = 100000;
-  auto field = [](JsonValue& grid, const char* key, int64_t fallback) {
-    const JsonValue* value = grid.find(key);
-    return value != nullptr && value->type() == JsonValue::Type::Int ? value->intValue() : fallback;
-  };
-  auto store = [](JsonValue& grid, const char* key, int64_t value) {
-    if (JsonValue* existing = grid.find(key)) {
-      *existing = JsonValue::makeInt(value);
-    } else {
-      grid.objectItems().emplace_back(key, JsonValue::makeInt(value));
-    }
-  };
-  size_t changed = 0;
-  for (JsonValue& page : pages->arrayItems()) {
-    if (page.type() != JsonValue::Type::Object) continue;
-    int64_t columns = 24;
-    if (const JsonValue* value = page.find("grid_columns");
-        value != nullptr && value->type() == JsonValue::Type::Int)
-      columns = value->intValue();
-    JsonValue* panels = page.find("panels");
-    if (columns < 1 || panels == nullptr || panels->type() != JsonValue::Type::Array) continue;
-    std::vector<GridRect> placed;
-    for (JsonValue& panel : panels->arrayItems()) {
-      if (panel.type() != JsonValue::Type::Object) continue;
-      const JsonValue* visible = panel.find("visible");
-      if (visible != nullptr && visible->type() == JsonValue::Type::Bool && !visible->boolValue())
-        continue;
-      JsonValue* grid = panel.find("grid");
-      if (grid == nullptr || grid->type() != JsonValue::Type::Object) continue;
-      const int64_t x = field(*grid, "x", 0), y = field(*grid, "y", 0);
-      const int64_t w = field(*grid, "w", 6), h = field(*grid, "h", 4);
-      // Malformed or column-overflowing grids are left for validation to report.
-      if (x < 0 || y < 0 || y > kMaxRow || w < 1 || h < 1 || x + w > columns) continue;
-      GridRect rect{static_cast<uint32_t>(x), static_cast<uint32_t>(y), static_cast<uint32_t>(w),
-                    static_cast<uint32_t>(std::min<int64_t>(h, kGridRowsPerScreen))};
-      auto fits = [&](const GridRect& candidate) {
-        if (!gridFitsScreen(candidate)) return false;
-        for (const GridRect& other : placed) {
-          if (candidate.x < other.x + other.w && other.x < candidate.x + candidate.w &&
-              candidate.y < other.y + other.h && other.y < candidate.y + candidate.h)
-            return false;
-        }
-        return true;
-      };
-      if (!fits(rect)) {
-        GridRect found = rect;
-        bool ok = false;
-        for (int64_t row = y; row <= kMaxRow && !ok; ++row) {
-          found.y = static_cast<uint32_t>(row);
-          found.x = rect.x;
-          if (fits(found)) {
-            ok = true;
-            break;
-          }
-          for (int64_t column = 0; column + w <= columns; ++column) {
-            found.x = static_cast<uint32_t>(column);
-            if (fits(found)) {
-              ok = true;
-              break;
-            }
-          }
-        }
-        if (!ok) continue;
-        rect = found;
-      }
-      if (rect.x != x || rect.y != y || rect.h != h) {
-        store(*grid, "x", rect.x);
-        store(*grid, "y", rect.y);
-        store(*grid, "h", rect.h);
-        ++changed;
-      }
-      placed.push_back(rect);
-    }
-  }
-  return changed;
 }
 
 }  // namespace eego::dashboard

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """smoke_serial_test.py — 真机串口 smoke 清单（FW6/M19）。
 
-覆盖：启动、显示、SD、WiFi、mock 告警、确认、API 登录状态。
+覆盖：启动、显示、SD、WiFi、外部告警注入、确认、API 登录状态。
 
 安全边界（强制）：本脚本**绝不刷写设备**——只做 USB Serial/JTAG 读写与局域网 HTTP
 GET/POST，不调用 esptool / idf.py / 任何写 flash 的工具。设备变砖风险为零；
@@ -16,7 +16,7 @@ GET/POST，不调用 esptool / idf.py / 任何写 flash 的工具。设备变砖
 
 用法：
   python3 firmware/tools/smoke_serial_test.py --port /dev/cu.usbmodem1101 \
-      [--baud 115200] [--admin-password PW] [--mock-url http://IP:8977/normal] \
+      [--baud 115200] [--admin-password PW] \
       [--timeout 90] [--json]
 """
 
@@ -256,8 +256,8 @@ def phase_wifi(dev: Device, rep: Report) -> str | None:
     return None
 
 
-def phase_mock_alert(dev: Device, rep: Report, mock_url: str | None) -> None:
-    # 1) 串口注入路径（不依赖外部 mock 服务）
+def phase_inject_alert(dev: Device, rep: Report) -> None:
+    # 串口注入外部告警（与 POST /alerts 推送同一 store 摄入路径）
     resp = dev.cmd("inject " + json.dumps(INJECT_EVENT, ensure_ascii=False))
     queued = any("inject: queued 1 event(s) -> ingested" in l for l in resp)
     rep.check(queued, "inject", "串口注入已入队 net_task",
@@ -273,21 +273,6 @@ def phase_mock_alert(dev: Device, rep: Report, mock_url: str | None) -> None:
     rep.check(found, "alert-visible", "快照中可见注入的告警",
               "12s 内快照未出现注入告警（net_task 摄入链路异常）")
 
-    # 2) mock 轮询路径（可选；需设备已配置指向 mock_alert_server 的源）
-    if not mock_url:
-        rep.warn("mock-poll", "未给 --mock-url，跳过 http_poll 轮询联调")
-        return
-    type_prefix = "mock."
-    end = time.monotonic() + 45
-    seen = False
-    while time.monotonic() < end and not seen:
-        alerts = dev.cmd("alerts", deadline_s=10)
-        seen = any(type_prefix in l or "Mock" in l for l in alerts)
-        if not seen:
-            time.sleep(3)
-    rep.check(seen, "mock-poll",
-              f"轮询源告警已入库（{mock_url}）",
-              f"45s 内未见 mock 源告警；确认设备 sources[] 已配置 {mock_url} 且间隔 ≤15s")
 
 
 def phase_ack(dev: Device, rep: Report) -> None:
@@ -343,15 +328,13 @@ def phase_api(rep: Report, ip: str | None, password: str | None, api_base: str |
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="真机串口 smoke（启动/显示/SD/WiFi/mock 告警/确认/API 登录）；绝不刷写设备")
+    ap = argparse.ArgumentParser(description="真机串口 smoke（启动/显示/SD/WiFi/告警注入/确认/API 登录）；绝不刷写设备")
     ap.add_argument("--port", required=True, help="串口设备（如 /dev/cu.usbmodem1101 或 COM3）")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--admin-password", default=os.environ.get("SMOKE_ADMIN_PASSWORD"),
                     help="管理密码（默认读环境变量 SMOKE_ADMIN_PASSWORD）")
     ap.add_argument("--api-base", default=None,
                     help="管理 API 基址（默认 http://<设备IP>/api/v1；台架可用 http://127.0.0.1:端口/api/v1）")
-    ap.add_argument("--mock-url", default=None,
-                    help="mock_alert_server 场景 URL（如 http://192.168.1.10:8977/normal）")
     ap.add_argument("--timeout", type=float, default=90.0, help="启动横幅等待秒数（默认 90）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
@@ -364,7 +347,7 @@ def main() -> int:
         phase_display_smoke(dev, rep)
         phase_sd(dev, rep)
         ip = phase_wifi(dev, rep)
-        phase_mock_alert(dev, rep, args.mock_url)
+        phase_inject_alert(dev, rep)
         phase_ack(dev, rep)
         phase_api(rep, ip, args.admin_password, args.api_base)
     except serial.SerialException as exc:

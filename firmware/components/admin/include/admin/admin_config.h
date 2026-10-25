@@ -8,13 +8,12 @@
 //   schema_version        int，必须 1
 //   admin                 admin 域（本组件强校验；wifi_list 只能经
 //                         POST/DELETE /api/v1/config/wifi 变更，PUT 携带即 400）
-//   sources               告警源数组（net::SourceConfig::fromJson 校验）
 //   alert_type_overrides  类型覆盖表（形状校验；应用在 app_task 上下文）
 //   mute_rules            静音规则数组（M21；热生效同步到 NetStack，重启后恢复）
 //   * 文件内未知顶层键      读取时保留（前向兼容），PUT body 内出现即 400
 //
 // 持久化（M13 F6 持久化层）：校验 → 应用 RAM → tmp 文件 + rename 原子写 →
-// 回读校验 → 失败回滚 RAM 并报 500。启动校验失败：坏文件改名 config.bak、
+// 回读校验 → 失败回滚 RAM 并报 500。启动校验失败：坏文件改名 config.json.corrupt、
 // 加载默认、valid()=false（状态页可见）。
 //
 // 线程安全：config 互斥锁；commit 只允许在 app_task 上下文调用（SD 写单属主）。
@@ -27,28 +26,21 @@
 #include "alert_core/json.h"
 #include "alert_core/store.h"
 #include "esp_err.h"
-#include "net_stack/source_config.h"
 
 namespace eego::admin {
 
 struct FieldError {
-  std::string field;    // "admin.display.brightness"、"sources[2].url"
+  std::string field;    // "admin.display.font"、"mute_rules[2].value"
   std::string message;  // 安全描述（不含请求值原文）
 };
 using FieldErrors = std::vector<FieldError>;
 
-// Appends field errors only for actual legacy frontlight changes while the
-// hardware is unavailable. display_patch contains only the submitted section.
-void validateLegacyDisplayCapability(const alert_core::JsonValue& display_patch,
-                                     FieldErrors& errors);
 
 // admin 域强类型视图（M13 §3）。
 struct AdminDomainConfig {
   bool auto_ap_fallback = false;
   uint32_t session_ttl_s = 86400;
   uint32_t login_lock_threshold = 5;
-  int brightness = 0;        // 0-100
-  int warmth = 50;           // 0-100
   std::string font;          // SD 绝对路径，禁 ".."
   std::string log_level = "INFO";
   bool sd_log = false;
@@ -59,7 +51,7 @@ class ConfigStore {
   static ConfigStore& instance();
 
   // 加载 + 启动校验（幂等）。文件缺失 → 默认配置（valid=true）；
-  // 解析/校验失败 → 改名 config.bak + 默认配置（valid=false）。
+  // 解析/校验失败 → 改名 config.json.corrupt + 默认配置（valid=false）。
   esp_err_t init(const std::string& path);
   bool valid() const;
   const std::string& path() const;
@@ -84,9 +76,6 @@ class ConfigStore {
 
   // 当前 admin 域强类型视图（锁保护下解析）。
   AdminDomainConfig admin() const;
-
-  // 当前 sources 数组（已校验形状；空数组 = 无源）。
-  std::vector<net::SourceConfig> sources() const;
 
   // 当前静音规则表（M21；已校验形状，直接可喂 NetStack::setMuteRules）。
   // expires_at 为绝对 unix 秒（0 = 永不过期）——重启恢复后 TTL 语义不变。

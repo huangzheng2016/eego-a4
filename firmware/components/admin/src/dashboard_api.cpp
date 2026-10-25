@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "dashboard_api.h"
 
+#include <atomic>
 #include <cerrno>
 #include <cstdlib>
+#include <memory>
+#include <new>
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -14,9 +17,11 @@
 #include "admin/admin_commands.h"
 #include "admin/admin_log.h"
 #include "admin/dashboard_config.h"
+#include "admin/render_preview.h"
 #include "dashboard_core/model.h"
 #include "data_pipeline/net_stack_transport.h"
 #include "data_pipeline/parser.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "probe_mask.h"
 
@@ -439,12 +444,10 @@ esp_err_t layout(httpd_req_t* req, JsonValue& root, JsonValue& page,
       }
     }
     const JsonValue* columns = page.find("grid_columns");
-    const JsonValue* height = page.find("row_height");
     return sendJson(req, 200,
                     JsonValue::makeObject({
                         {"page_id", JsonValue::makeString(idValue(page, "id"))},
                         {"grid_columns", columns == nullptr ? JsonValue::makeInt(24) : *columns},
-                        {"row_height", height == nullptr ? JsonValue::makeInt(16) : *height},
                         {"panels", JsonValue::makeArray(std::move(panels))},
                     }).toString());
   }
@@ -452,7 +455,6 @@ esp_err_t layout(httpd_req_t* req, JsonValue& root, JsonValue& page,
     // Reset to a non-overlapping flow: 4 panels (6x4) per band, 2 bands per
     // 8-row screen, so the result always satisfies the screen layout rule.
     set(page, "grid_columns", JsonValue::makeInt(24));
-    set(page, "row_height", JsonValue::makeInt(16));
     if (JsonValue* panels = collection(page, "panels")) {
       int64_t index = 0;
       for (auto& panel : panels->arrayItems()) {
@@ -476,7 +478,7 @@ esp_err_t layout(httpd_req_t* req, JsonValue& root, JsonValue& page,
   }
   for (const auto& member : body.objectItems()) {
     if (member.first != "page_id" && member.first != "grid_columns" &&
-        member.first != "row_height" && member.first != "panels") {
+        member.first != "panels") {
       return sendError(req, 400, "validation_failed", "unknown layout field: " + member.first);
     }
   }
@@ -484,7 +486,6 @@ esp_err_t layout(httpd_req_t* req, JsonValue& root, JsonValue& page,
     return sendError(req, 400, "validation_failed", "layout page_id must match the path");
   }
   if (const JsonValue* value = body.find("grid_columns")) set(page, "grid_columns", *value);
-  if (const JsonValue* value = body.find("row_height")) set(page, "row_height", *value);
   if (const JsonValue* panel_layouts = body.find("panels")) {
     if (panel_layouts->type() != JsonValue::Type::Array) {
       return sendError(req, 400, "validation_failed", "layout panels must be an array");
@@ -868,11 +869,167 @@ esp_err_t validateOnly(httpd_req_t* req, const DashboardDocument& current) {
   }
   JsonValue::Object out;
   out.emplace_back("valid", JsonValue::makeBool(parsed.ok()));
-  out.emplace_back("migrated", JsonValue::makeBool(parsed.migrated));
-  out.emplace_back("source_version", JsonValue::makeInt(parsed.source_version));
   out.emplace_back("errors", JsonValue::makeArray(std::move(errors)));
   if (parsed.ok()) out.emplace_back("bundle", DashboardStore::toJson(parsed.document, true, false));
   return sendJson(req, 200, JsonValue::makeObject(std::move(out)).toString());
+}
+
+// POST /dashboard/render-preview: {"bundle": <bundle>, "page_id"?: string,
+// "screen"?: int, "refresh"?: "full"|"fast"} -> 4-bpp BMP (see display_snapshot.h).
+// One render at a time (the route is also rate limited to 10/min per session);
+// the render itself runs on app_task through the AdminCommand queue.
+std::atomic<bool> g_preview_busy{false};
+
+esp_err_t renderPreview(httpd_req_t* req, const DashboardDocument& current) {
+  if (!renderPreviewAvailable()) {
+    return sendError(req, 503, "unavailable", "render preview unavailable");
+  }
+  bool expected = false;
+  if (!g_preview_busy.compare_exchange_strong(expected, true)) {
+    httpd_resp_set_hdr(req, "Retry-After", "2");
+    return sendError(req, 503, "unavailable", "another render preview is in progress");
+  }
+  // The flag is owned by this slot, not by the handler's stack frame: the job
+  // keeps a reference, so a request that times out while its job is still
+  // queued/rendering keeps new requests out until the job itself is destroyed.
+  struct BusySlot {
+    ~BusySlot() { g_preview_busy.store(false); }
+  };
+  std::shared_ptr<BusySlot> busy_slot(new (std::nothrow) BusySlot);
+  if (!busy_slot) {
+    g_preview_busy.store(false);
+    return sendError(req, 503, "unavailable", "render preview unavailable");
+  }
+
+  std::string body;
+  if (!readBody(req, body)) return ESP_OK;
+  JsonValue root;
+  dashboard::JsonParseError parse_error;
+  if (!dashboard::jsonParse(body, root, parse_error, 19)) {
+    return sendError(req, 400, "invalid_request",
+                     "invalid JSON at byte " + std::to_string(parse_error.offset) + ": " +
+                         parse_error.message);
+  }
+  body.clear();
+  body.shrink_to_fit();
+  if (root.type() != JsonValue::Type::Object) {
+    return sendError(req, 400, "invalid_request", "request must be an object");
+  }
+  RenderPreviewRequest request;
+  const JsonValue* bundle = nullptr;
+  std::vector<ValidationError> request_errors;
+  for (const auto& member : root.objectItems()) {
+    const JsonValue& value = member.second;
+    if (member.first == "bundle") {
+      bundle = &value;
+      if (value.type() != JsonValue::Type::Object) {
+        request_errors.push_back({"bundle", "must be a dashboard bundle object"});
+      }
+    } else if (member.first == "page_id") {
+      if (value.type() != JsonValue::Type::String || value.stringValue().empty() ||
+          value.stringValue().size() > 64) {
+        request_errors.push_back({"page_id", "must be a page id string"});
+      } else {
+        request.page_id = value.stringValue();
+      }
+    } else if (member.first == "screen") {
+      if (value.type() != JsonValue::Type::Int || value.intValue() < 0 || value.intValue() > 1023) {
+        request_errors.push_back({"screen", "must be an integer >= 0"});
+      } else {
+        request.has_screen = true;
+        request.screen = static_cast<uint32_t>(value.intValue());
+      }
+    } else if (member.first == "refresh") {
+      if (value.type() != JsonValue::Type::String ||
+          (value.stringValue() != "full" && value.stringValue() != "fast")) {
+        request_errors.push_back({"refresh", "must be \"full\" or \"fast\""});
+      } else {
+        request.fast = value.stringValue() == "fast";
+      }
+    } else {
+      request_errors.push_back({member.first, "unknown field"});
+    }
+  }
+  if (bundle == nullptr) request_errors.push_back({"bundle", "required"});
+  if (!request_errors.empty()) {
+    return sendError(req, 400, "invalid_request", "invalid render preview request", &request_errors);
+  }
+
+  // Same validation as POST /dashboard/validate.
+  DashboardParseResult parsed = DashboardStore::parse(bundle->toString(), &current);
+  root = JsonValue();
+  if (!parsed.ok()) {
+    return sendError(req, 400, "validation_failed", "dashboard validation failed", &parsed.errors);
+  }
+  const dashboard::Dashboard& candidate = parsed.document.dashboard;
+  const dashboard::Page* page = nullptr;
+  for (const dashboard::Page& item : candidate.pages) {
+    if (!item.visible) continue;
+    if (request.page_id.empty() ? (page == nullptr || item.id == candidate.default_page_id)
+                                : item.id == request.page_id) {
+      page = &item;
+    }
+  }
+  if (page == nullptr) {
+    const std::vector<ValidationError> errors = {
+        {"page_id", request.page_id.empty() ? "dashboard has no visible page"
+                                            : "no visible page with this id"}};
+    return sendError(req, 400, "validation_failed", "render preview page not found", &errors);
+  }
+  request.page_id = page->id;
+  uint32_t screens = 1;
+  for (const dashboard::PanelSpec& panel : page->panels) {
+    if (panel.visible) screens = std::max(screens, dashboard::gridScreenIndex(panel.grid) + 1);
+  }
+  if (request.has_screen && request.screen >= screens) {
+    const std::vector<ValidationError> errors = {
+        {"screen", "page has " + std::to_string(screens) + " screen(s)"}};
+    return sendError(req, 400, "validation_failed", "render preview screen out of range", &errors);
+  }
+
+  auto job = std::make_shared<RenderPreviewJob>();
+  job->bmp = static_cast<uint8_t*>(heap_caps_malloc(kPreviewFileBytes, MALLOC_CAP_SPIRAM));
+  if (job->bmp == nullptr) return sendError(req, 503, "unavailable", "preview buffer unavailable");
+  writePreviewBmpHeader(job->bmp);
+  job->busy_slot = busy_slot;
+  request.document = std::make_shared<DashboardDocument>(std::move(parsed.document));
+  job->request = std::move(request);
+
+  AdminCommand command;
+  command.type = AdminCommandType::RenderPreview;
+  command.preview = job;
+  AdminResult result;
+  if (!enqueueAdminCommand(command, result, 15000)) {
+    // On a timeout app_task may still finish the render; `job` keeps the buffer alive.
+    return sendError(req, 503, "unavailable", "render preview timed out or UI busy");
+  }
+  if (!result.ok) {
+    const int status = job->result.status == 400 ? 400 : 503;
+    return sendError(req, status, status == 400 ? "validation_failed" : "unavailable",
+                     result.err.empty() ? "render preview failed" : result.err);
+  }
+  const std::string screen_text = std::to_string(job->result.screen);
+  const std::string count_text = std::to_string(job->result.screen_count);
+  httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_set_hdr(req, "X-Preview-Page", job->result.page_id.c_str());
+  httpd_resp_set_hdr(req, "X-Preview-Screen", screen_text.c_str());
+  httpd_resp_set_hdr(req, "X-Preview-Screens", count_text.c_str());
+  httpd_resp_set_hdr(req, "X-Preview-Data", job->result.data.c_str());
+  httpd_resp_set_type(req, "image/bmp");
+  httpd_resp_set_status(req, statusText(200));
+  constexpr size_t kChunk = 4096;
+  for (size_t offset = 0; offset < kPreviewFileBytes; offset += kChunk) {
+    const size_t n = std::min(kChunk, kPreviewFileBytes - offset);
+    if (httpd_resp_send_chunk(req, reinterpret_cast<const char*>(job->bmp + offset),
+                              static_cast<ssize_t>(n)) != ESP_OK) {
+      return ESP_FAIL;
+    }
+  }
+  httpd_resp_send_chunk(req, nullptr, 0);
+  ADMIN_LOG_INFO("dashboard render preview: page=%s screen=%s data=%s",
+                 job->result.page_id.c_str(), screen_text.c_str(), job->result.data.c_str());
+  return ESP_OK;
 }
 
 esp_err_t importOrReplace(httpd_req_t* req, const DashboardDocument& current, bool create_only) {
@@ -930,7 +1087,7 @@ esp_err_t eraseDashboard(httpd_req_t* req, const DashboardDocument& current) {
 const char* schemaInfo() {
   return R"JSON({
   "bundle":{"schema":"eego.dashboard-bundle/1","schema_version":1,"max_bytes":196608,"fields":["schema","schema_version","revision","dashboard","source_plans"]},
-  "dashboard":{"schema":"eego.dashboard/2","schema_version":2,"accepted_versions":[1,2],"canonical_schema_file":"dashboard_core/schema/eego-dashboard-v2.schema.json"},
+  "dashboard":{"schema":"eego.dashboard/2","schema_version":2,"canonical_schema_file":"dashboard_core/schema/eego-dashboard-v2.schema.json"},
   "source_plan":{"max_bytes":32768,"max_items":12,"script_execution":false,"auth_token_ref":"nvs:source/<key>","headers":"non-secret literal values only","header_secret_refs":"header name -> nvs:source/<key>","responses":["generic_json","prometheus","standard_json","metrics_json","events_json","image","text"]},
   "resources":{
     "dashboard":"/api/v1/dashboard",
@@ -944,9 +1101,10 @@ const char* schemaInfo() {
     "layout":"/api/v1/dashboard/pages/{page}/layout",
     "templates":"/api/v1/dashboard/templates",
     "source_test":"/api/v1/dashboard/sources/test",
-    "source_probe":"/api/v1/dashboard/sources/probe"
+    "source_probe":"/api/v1/dashboard/sources/probe",
+    "render_preview":"/api/v1/dashboard/render-preview"
   },
-  "layout":{"screen_px":[552,768],"content_px":[28,28,496,712],"gap_px":8,"grid_rows_per_screen":8,"columns":"page.grid_columns mapped proportionally","rules":["visible panels must not overlap","a visible panel must fit inside one screen: h<=8 and y%8+h<=8","row_height does not affect device geometry"]},
+  "layout":{"screen_px":[552,768],"content_px":[28,28,496,712],"gap_px":8,"grid_rows_per_screen":8,"columns":"page.grid_columns mapped proportionally","rules":["visible panels must not overlap","a visible panel must fit inside one screen: h<=8 and y%8+h<=8"]},
   "concurrency":"Send If-Match: <revision> on mutations; stale revisions return 409.",
   "security":"Bearer required; JSON writes enforce same-origin and content type. Credentials are write-only in NVS source; SD and exports carry refs only. Raw response bodies are returned only by sources/probe: masked under sensitive keys and bounded to 16 KiB."
 })JSON";
@@ -983,6 +1141,9 @@ esp_err_t handleDashboardApi(httpd_req_t* req, const char* path) {
   }
   if (parts.size() == 2 && parts[1] == "validate" && req->method == HTTP_POST) {
     return validateOnly(req, *current);
+  }
+  if (parts.size() == 2 && parts[1] == "render-preview" && req->method == HTTP_POST) {
+    return renderPreview(req, *current);
   }
   if (parts.size() == 2 && parts[1] == "import" && req->method == HTTP_POST) {
     return importOrReplace(req, *current, false);

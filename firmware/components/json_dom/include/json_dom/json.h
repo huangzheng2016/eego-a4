@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+// Minimal DOM-style JSON value, strict parser and canonical writer shared by
+// alert_core, dashboard_core and everything above them. Pure C++ (no ESP-IDF,
+// no cJSON) so it builds unchanged for the host tests and the firmware.
+// Objects keep insertion order, so serialization is deterministic.
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -8,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace eego::dashboard {
+namespace eego::json {
 
 class JsonValue {
  public:
@@ -67,4 +72,4 @@ bool jsonIsValidUtf8(std::string_view text);
 size_t jsonCodePointCount(std::string_view text);
 std::string jsonEscape(std::string_view text);
 
-}  // namespace eego::dashboard
+}  // namespace eego::json

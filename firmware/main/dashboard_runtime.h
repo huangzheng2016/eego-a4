@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "dashboard_core/model.h"
 
@@ -34,6 +35,36 @@ struct DashboardConfirmRequest {
   uint64_t snapshot_epoch = 0;
 };
 
+// 告警面板/横幅里的一条告警（dashboard 事件视图：规则派生事件 + 外部推送的
+// alert_core 记录）。供设备端告警详情页逐条浏览与操作。
+struct DashboardAlertItem {
+  std::string identity;        // dashboardEventIdentity（source_id + "\n" + event id）
+  std::string core_id;         // alert_core 记录 id（外部告警）；规则派生事件为空
+  std::string title;
+  std::string message;
+  std::string source_id;
+  std::string rule_id;
+  std::string linked_panel_id;  // 可跳转的趋势面板（空 = 无）
+  uint8_t severity = 0;         // 0 info / 1 warning / 2 critical
+  bool active = true;           // false = 已恢复/清除
+  bool acknowledged = false;    // 已确认（本代际不再进横幅/标记）
+  int64_t timestamp_ms = 0;     // unix 毫秒（0 = 未知）
+};
+
+// dashboard 数据源运行状态（设备状态页）。
+struct DashboardSourceInfo {
+  std::string id;
+  bool enabled = true;
+  bool has_data = false;          // 有缓存或本次运行成功过的结果
+  bool offline = false;
+  bool stale = true;
+  uint32_t consecutive_failures = 0;
+  int last_http_status = 0;
+  int64_t last_success_ms = 0;    // unix 毫秒（0 = 从未）
+  int64_t last_attempt_ms = 0;
+  std::string error;              // 已脱敏的最近错误（空 = 无）
+};
+
 class DashboardRuntime {
  public:
   struct Deps {
@@ -53,6 +84,9 @@ class DashboardRuntime {
   bool begin(const Deps& deps);
   bool reload();
   bool available() const;
+  // 最近一次加载失败原因（未配置时为空或 "dashboard deleted" 等）。
+  std::string unavailableReason() const;
+  std::string title() const;
 
   void service(bool mains);
   void pollBattery();
@@ -64,7 +98,17 @@ class DashboardRuntime {
 
   void moveFocus(int delta, bool adjust);
   void movePage(int delta);
+  // 上/下一屏：先在页面子屏（page_index）间移动，再跨页（循环）。
+  void moveScreen(int delta);
+  // 主页：默认页第一屏，清空返回栈与面板焦点。
+  void home();
+  bool atHome() const;
+  bool firstScreen() const;
   void refreshCurrent();
+  void refreshAll();
+  // 全局刷新周期覆盖（DeviceSettings.data_refresh_s；0 = 按面板/数据源配置）。
+  // 用户在面板上单独设定的周期优先。
+  void setGlobalRefresh(uint32_t refresh_ms);
   void activate();
   void touch(int16_t x, int16_t y);
   bool back();
@@ -84,8 +128,30 @@ class DashboardRuntime {
   void showStatusMessage(const std::string& text, uint32_t duration_ms);
   std::string linkedPanelForAlert(const alert_core::AlertRecord& record) const;
 
+  // 告警详情：点按告警面板行/横幅或在告警面板上按 Power 时登记请求，
+  // PanelApp 取走后切到详情页。panel_id 为空 = 全部告警（横幅入口）。
+  bool consumeDetailRequest(std::string& panel_id, std::string& identity);
+  std::vector<DashboardAlertItem> alertItems(const std::string& panel_id) const;
+  bool acknowledgeEvent(const std::string& identity);
+  std::vector<DashboardSourceInfo> sources() const;
+
   void diag(const char* args);
   bool smoke();
+
+  // Offscreen preview of a candidate dashboard (admin render-preview). app_task
+  // only. Renders page/screen of `candidate` into `canvas` (which must wrap an
+  // offscreen display) with the device layout; values come from the candidate's
+  // samples/events, else live data of same-id sources, else placeholders.
+  struct PreviewInfo {
+    bool bad_request = false;
+    std::string error;
+    std::string page_id;
+    size_t screen = 0;
+    size_t screen_count = 0;
+    std::string data;  // "bundle" | "live" | "mixed" | "placeholder" | "none"
+  };
+  bool renderPreview(eego::PortraitCanvas& canvas, const eego::dashboard::Dashboard& candidate,
+                     const std::string& page_id, size_t screen, PreviewInfo& info) const;
 
  private:
   struct Impl;

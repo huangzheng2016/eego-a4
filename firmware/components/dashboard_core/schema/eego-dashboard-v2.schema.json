@@ -413,8 +413,7 @@
         "id": {"$ref": "#/$defs/id"},
         "title": {"type": "string", "maxLength": 160, "default": ""},
         "visible": {"type": "boolean", "default": true},
-        "grid_columns": {"type": "integer", "minimum": 1, "maximum": 64, "default": 24},
-        "row_height": {"type": "integer", "minimum": 1, "maximum": 256, "default": 16, "description": "Legacy hint; device geometry ignores it. Each screen holds 8 grid rows; visible panels must not overlap and must fit one screen (h <= 8, y % 8 + h <= 8)."},
+        "grid_columns": {"type": "integer", "minimum": 1, "maximum": 64, "default": 24, "description": "Each screen holds 8 grid rows; visible panels must not overlap and must fit one screen (h <= 8, y % 8 + h <= 8)."},
         "panels": {"type": "array", "maxItems": 24, "default": [], "items": {"$ref": "#/$defs/panel"}}
       }
     }

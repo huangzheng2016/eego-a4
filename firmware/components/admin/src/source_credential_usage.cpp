@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "source_credential_usage.h"
 
-#include "admin/admin_config.h"
 #include "admin/dashboard_config.h"
 #include "net_stack/credentials.h"
 
@@ -21,12 +20,6 @@ bool sourceUsesCredential(const dashboard::Source& source, const std::string& re
 bool sourceCredentialInUse(const std::string& key) {
   const std::string ref = net::CredentialStore::sourceRef(key);
   if (ref.empty()) return false;
-  for (const auto& source : ConfigStore::instance().sources()) {
-    if (source.auth_token_ref == ref) return true;
-    for (const auto& header : source.header_secret_refs) {
-      if (header.value == ref) return true;
-    }
-  }
   const auto document = DashboardStore::instance().snapshot();
   if (document == nullptr) return false;
   for (const auto& source : document->dashboard.sources) {

@@ -29,6 +29,10 @@ namespace eego::admin {
 
 class ProvisionPortal {
  public:
+  // 恢复/配网热点的固定 SSID 与门户地址（设备引导页、状态页展示用）。
+  static constexpr const char* kApSsid = "EEGO-A4-Setup";
+  static constexpr const char* kApUrl = "http://192.168.4.1/";
+
   static ProvisionPortal& instance();
 
   // ---- 配网门户（INIT_PROVISION）----

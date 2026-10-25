@@ -13,7 +13,7 @@
 //   type_registry.h 39 presets + generic.any, bilingual, overrides
 //   store.h         dedup/ack/escalate/clear/expire/mute/500-ring semantics
 //   snapshot.h      immutable snapshots + double-buffered lock-free publishing
-//   persistence.h   alerts.db JSONL + compaction + source cache, via IAlertFileIo
+//   persistence.h   alerts.db JSONL + compaction, via IAlertFileIo
 //   file_io_stdio.h host/diagnostics stdio IO implementation
 
 #include "alert_core/file_io_stdio.h"

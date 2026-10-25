@@ -26,6 +26,11 @@ public:
     ~Uc8279cDisplay();
 
     esp_err_t begin();        // 初始化 SPI + GPIO + 控制器
+    // 离屏实例（例如管理 API 的渲染预览）：只分配 PSRAM framebuffer，不初始化
+    // SPI/GPIO/控制器；display()/displayGray()/deepSleep() 为空操作，end()/析构
+    // 只释放缓冲区（不释放实屏占用的 SPI 总线）。不得在实屏实例上调用。
+    esp_err_t beginOffscreen();
+    bool offscreen() const { return offscreen_; }
     void end();               // 释放资源
 
     // framebuffer 操作（逻辑 portrait 坐标）
@@ -43,6 +48,9 @@ public:
     // 当前帧是否仍含灰度像素（扫描灰阶平面 MSB!=LSB；按帧准确，局部重绘覆盖
     // 掉所有灰度后自动变为 false）。
     bool hasGrayContent() const;
+    // 像素的四级灰阶（0=黑, 1=深灰, 2=浅灰, 3=白；Full 刷新所显示的级别）。
+    // 无灰阶平面时按 B/W 返回 0/3。
+    uint8_t grayLevel(int16_t x, int16_t y) const;
     static uint8_t grayToBw(uint8_t gray) { return gray >= 8 ? 1 : 0; }
 
     // 刷新（阻塞直到波形完成）。
@@ -100,6 +108,7 @@ private:
     uint8_t* fbGrayMsb_ = nullptr;    // PSRAM 灰阶 MSB 平面 (与 fb_ 同尺寸)
     uint8_t* fbGrayLsb_ = nullptr;    // PSRAM 灰阶 LSB 平面 (与 fb_ 同尺寸)
     bool planesActive_ = false;       // 灰阶平面已同步且随绘制更新
+    bool offscreen_ = false;          // beginOffscreen() 实例：无 SPI/面板
     bool screenOn_ = false;
     bool grayControllerMode_ = false; // 控制器当前是否处于灰阶模式
     bool fullRequested_ = false;

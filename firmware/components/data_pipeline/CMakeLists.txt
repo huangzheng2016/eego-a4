@@ -12,5 +12,6 @@ idf_component_register(
   INCLUDE_DIRS "include"
   REQUIRES
     dashboard_core
+    eego_hal
     net_stack
 )

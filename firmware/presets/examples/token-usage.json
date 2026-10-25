@@ -62,7 +62,6 @@
         "title": "Overview",
         "visible": true,
         "grid_columns": 24,
-        "row_height": 16,
         "panels": [
           {
             "id": "token_used",
@@ -198,7 +197,6 @@
         "title": "TOKEN details",
         "visible": true,
         "grid_columns": 24,
-        "row_height": 16,
         "panels": [
           {
             "id": "token_table",

@@ -295,10 +295,6 @@ esp_err_t CredentialStore::listSourceCredentials(std::vector<SourceCredentialMet
   return err;
 }
 
-esp_err_t CredentialStore::clearSourceCredentials() {
-  return clearNamespace(kSourceNamespace);
-}
-
 void CredentialStore::secureErase(std::string& value) {
   volatile char* data = value.empty() ? nullptr : value.data();
   for (size_t i = 0; i < value.size(); ++i) data[i] = 0;
@@ -315,14 +311,6 @@ esp_err_t CredentialStore::clearNamespace(const std::string& ns) {
   if (err == ESP_OK) err = nvs_commit(h);
   nvs_close(h);
   return err;
-}
-
-std::string CredentialStore::describeRef(const std::string& ref) {
-  if (ref.compare(0, 4, "nvs:") != 0 || ref.size() <= 4) return "(invalid ref)";
-  std::string body = ref.substr(4);
-  size_t slash = body.find('/');
-  if (slash == std::string::npos) return "nvs:sec/" + body;
-  return "nvs:" + body;
 }
 
 }  // namespace eego::net

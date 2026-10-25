@@ -31,16 +31,9 @@ bool runConfigTransaction(const ConfigTransactionHooks& hooks, std::string& erro
     rollback(hooks.rollback_config, "config", error);
     return false;
   }
-  if (!run(hooks.apply_settings, error)) {
-    if (error.empty()) error = "settings apply failed";
-    rollback(hooks.rollback_settings, "settings", error);
-    rollback(hooks.rollback_config, "config", error);
-    return false;
-  }
   if (!run(hooks.apply_runtime, error)) {
     if (error.empty()) error = "runtime apply failed";
     rollback(hooks.rollback_runtime, "runtime", error);
-    rollback(hooks.rollback_settings, "settings", error);
     rollback(hooks.rollback_config, "config", error);
     return false;
   }

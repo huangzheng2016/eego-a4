@@ -10,10 +10,10 @@
 #include <unistd.h>
 
 #include "admin/admin_log.h"
+#include "atomic_file.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "net_stack/credentials.h"
-#include "source_secret_migration.h"
 
 namespace eego::admin {
 namespace {
@@ -243,92 +243,6 @@ bool sameSource(const dashboard::Source& left, const dashboard::Source& right) {
   return true;
 }
 
-bool migrateDashboardSource(JsonValue& source, internal::SourceSecretMigration& migration,
-                            bool& changed, std::string& error) {
-  if (source.type() != JsonValue::Type::Object) return true;
-  JsonValue* headers = source.find("headers");
-  if (headers == nullptr || headers->type() != JsonValue::Type::Object) return true;
-  JsonValue* existing_refs = source.find("header_secret_refs");
-  if (existing_refs != nullptr && existing_refs->type() != JsonValue::Type::Object) {
-    error = "legacy header_secret_refs must be an object";
-    return false;
-  }
-  const JsonValue* id_value = source.find("id");
-  const std::string id = id_value != nullptr && id_value->type() == JsonValue::Type::String
-                             ? id_value->stringValue()
-                             : std::string("unknown");
-  JsonValue::Object plain;
-  JsonValue::Object refs;
-  if (existing_refs != nullptr) refs = existing_refs->objectItems();
-  for (const auto& header : headers->objectItems()) {
-    if (header.second.type() != JsonValue::Type::String) {
-      plain.emplace_back(header.first, header.second);
-      continue;
-    }
-    const std::string lowered = lower(header.first);
-    const bool authorization = lowered == "authorization";
-    if (!authorization && !net::CredentialStore::sensitiveHeaderName(header.first)) {
-      plain.emplace_back(header.first, header.second);
-      continue;
-    }
-    if (existing_refs != nullptr && existing_refs->find(header.first) != nullptr) {
-      error = "legacy plain and referenced secret headers are ambiguous";
-      return false;
-    }
-    std::string secret = header.second.stringValue();
-    if (authorization) {
-      const JsonValue* existing_auth = source.find("auth_token_ref");
-      if (existing_auth != nullptr &&
-          (existing_auth->type() != JsonValue::Type::String ||
-           !existing_auth->stringValue().empty())) {
-        net::CredentialStore::secureErase(secret);
-        error = "legacy Authorization conflicts with auth_token_ref";
-        return false;
-      }
-      if (secret.size() < 8 || lower(secret.substr(0, 7)) != "bearer ") {
-        net::CredentialStore::secureErase(secret);
-        error = "legacy Authorization must use Bearer; re-enter it via credentials API";
-        return false;
-      }
-      secret = secret.substr(7);
-    }
-    const std::string ref = migration.add("dashboard/" + id, header.first, secret, error);
-    net::CredentialStore::secureErase(secret);
-    if (ref.empty()) return false;
-    if (authorization) {
-      set(source, "auth_token_ref", JsonValue::makeString(ref));
-    } else {
-      refs.emplace_back(header.first, JsonValue::makeString(ref));
-    }
-    changed = true;
-  }
-  set(source, "headers", JsonValue::makeObject(std::move(plain)));
-  if (!refs.empty()) set(source, "header_secret_refs", JsonValue::makeObject(std::move(refs)));
-  return true;
-}
-
-bool migrateDashboardSecrets(JsonValue& root, internal::SourceSecretMigration& migration,
-                             bool& changed, std::string& error) {
-  JsonValue* dashboard_value = root.find("dashboard");
-  if (dashboard_value == nullptr) dashboard_value = &root;
-  const auto migrate_collection = [&](JsonValue* collection, auto&& self) -> bool {
-    if (collection == nullptr || collection->type() != JsonValue::Type::Array) return true;
-    for (auto& source : collection->arrayItems()) {
-      if (!self(source)) return false;
-    }
-    return true;
-  };
-  const auto migrate_one = [&](JsonValue& source) {
-    return migrateDashboardSource(source, migration, changed, error);
-  };
-  if (!migrate_collection(dashboard_value->find("sources"), migrate_one)) return false;
-  if (dashboard_value != &root &&
-      !migrate_collection(root.find("source_plans"), migrate_one)) {
-    return false;
-  }
-  return true;
-}
-
 bool readFile(const std::string& path, size_t maximum, std::string& out, bool& exists) {
   exists = false;
   out.clear();
@@ -350,9 +264,7 @@ bool readFile(const std::string& path, size_t maximum, std::string& out, bool& e
   return ok;
 }
 
-bool atomicWrite(const std::string& path, const std::string& text, std::string& error,
-                 bool* replaced = nullptr) {
-  if (replaced != nullptr) *replaced = false;
+bool atomicWrite(const std::string& path, const std::string& text, std::string& error) {
   const size_t slash = path.find_last_of('/');
   if (slash != std::string::npos && slash > 0) {
     const std::string directory = path.substr(0, slash);
@@ -360,25 +272,14 @@ bool atomicWrite(const std::string& path, const std::string& text, std::string& 
       // fopen below returns the authoritative error without exposing file contents.
     }
   }
-  const std::string temporary = path + ".tmp";
-  bool ok = false;
-  if (FILE* file = std::fopen(temporary.c_str(), "wb")) {
-    ok = std::fwrite(text.data(), 1, text.size(), file) == text.size();
-    if (ok) ok = std::fflush(file) == 0;
-    if (ok) ok = fsync(fileno(file)) == 0;
-    if (std::fclose(file) != 0) ok = false;
-  }
-  if (ok) {
-    ok = std::rename(temporary.c_str(), path.c_str()) == 0;
-    if (ok && replaced != nullptr) *replaced = true;
-  }
+  // FatFS-safe replace (tmp + fsync, target -> .bak, tmp -> target, drop .bak).
+  bool ok = fsutil::atomicWriteFile(path, text);
   if (ok) {
     std::string verify;
     bool exists = false;
     ok = readFile(path, kDashboardBundleMaxBytes, verify, exists) && exists && verify == text;
   }
   if (!ok) {
-    std::remove(temporary.c_str());
     error = "atomic dashboard write failed; previous in-memory configuration retained";
     return false;
   }
@@ -401,56 +302,27 @@ esp_err_t DashboardStore::init(const std::string& path) {
   auto empty = std::make_shared<DashboardDocument>();
   snapshot_ = empty;
 
+  // Power cut mid-replace leaves only dashboard.json.bak: restore it.
+  if (fsutil::recoverFile(path_)) ADMIN_LOG_WARN("dashboard.json restored from interrupted replace");
   std::string text;
   bool exists = false;
-  bool migration_failed = false;
   const bool read_ok = readFile(path_, kDashboardBundleMaxBytes, text, exists);
   if (read_ok && exists && !text.empty()) {
-    JsonValue migrated_root;
-    dashboard::JsonParseError preprocess_error;
-    if (dashboard::jsonParse(text, migrated_root, preprocess_error, 18)) {
-      net::CredentialStore::secureErase(text);
-      internal::SourceSecretMigration migration;
-      bool migrated = false;
-      bool replaced = false;
-      std::string migration_error;
-      bool migration_ok = migrateDashboardSecrets(migrated_root, migration, migrated, migration_error);
-      if (migration_ok) migration_ok = migration.persist(migration_error);
-      if (migration_ok) {
-        // Configurations saved before the 8-rows-per-screen rule may contain
-        // panels that cross screens or overlap; repair them and persist the
-        // repaired bundle (same atomic path as the secret migration) so the
-        // runtime, which reads the file with strict validation, loads it too.
-        const size_t repaired = dashboard::repairLegacyStoredLayout(migrated_root);
-        if (repaired > 0) ADMIN_LOG_WARN("dashboard layout: repaired %u legacy panel(s)",
-                                         static_cast<unsigned>(repaired));
-        text = migrated_root.toString();
-        if (migrated || repaired > 0) migration_ok = atomicWrite(path_, text, migration_error, &replaced);
-      }
-      if (!migration_ok) {
-        if (!replaced) migration.rollback();
-        migration_failed = true;
-        valid_ = false;
-        ADMIN_LOG_ERROR("dashboard secret migration failed; configuration not loaded");
-      }
-      migration.finish();
-    }
-    if (!migration_failed) {
-      DashboardParseResult parsed = parse(text);
-      net::CredentialStore::secureErase(text);
-      if (parsed.ok()) {
-        parsed.document.configured = true;
-        if (parsed.document.revision == 0) parsed.document.revision = 1;
-        snapshot_ = std::make_shared<DashboardDocument>(std::move(parsed.document));
-      } else {
-        valid_ = false;
-      }
+    DashboardParseResult parsed = parse(text);
+    net::CredentialStore::secureErase(text);
+    if (parsed.ok()) {
+      parsed.document.configured = true;
+      if (parsed.document.revision == 0) parsed.document.revision = 1;
+      snapshot_ = std::make_shared<DashboardDocument>(std::move(parsed.document));
+    } else {
+      valid_ = false;
     }
   } else if (!read_ok) {
     valid_ = false;
   }
-  if (!valid_ && exists && !migration_failed) {
-    const std::string backup = path_ + ".bak";
+  if (!valid_ && exists) {
+    // Quarantine as .corrupt (.bak belongs to the atomic-replace recovery path).
+    const std::string backup = path_ + ".corrupt";
     std::remove(backup.c_str());
     if (std::rename(path_.c_str(), backup.c_str()) == 0) {
       ADMIN_LOG_ERROR("dashboard config invalid; backed up and left unconfigured");
@@ -539,8 +411,6 @@ DashboardParseResult DashboardStore::parse(const std::string& json,
   }
 
   dashboard::ParseResult parsed = dashboard::dashboardFromJson(*dashboard_value);
-  result.source_version = parsed.source_version;
-  result.migrated = parsed.migrated;
   for (const auto& error : parsed.errors) {
     const std::string prefix = bundle ? "dashboard." : "";
     addError(result.errors, prefix + error.field, error.message);
@@ -744,14 +614,14 @@ const char* DashboardStore::sampleJson() {
       {"name":"locale","label":"语言 / Locale","kind":"locale","default_value":"zh-CN","options":[],"source_id":"","value_path":"","multi":false,"include_all":false}
     ],
     "pages":[
-      {"id":"main","title":"总览 / Overview","visible":true,"grid_columns":24,"row_height":16,"panels":[
+      {"id":"main","title":"总览 / Overview","visible":true,"grid_columns":24,"panels":[
         {"id":"intro","kind":"text","grid":{"x":0,"y":0,"w":24,"h":2},"title":"说明 / About","visible":true,"source_id":"","metric":"","value_path":"","value_expression":"","time_window":{"from":"-1h","to":"now"},"refresh_ms":60000,"thresholds":[],"style":{"unit":"","variant":"multiline","precision":2,"line_width":1,"show_legend":true,"invert":false},"linked_panel_ids":[],"actions":[],"text":{"content":"静态样板数据，无需联网。\nStatic sample data; no network required.","multiline":true,"max_lines":4}},
         {"id":"token_card","kind":"card","grid":{"x":0,"y":2,"w":8,"h":2},"title":"TOKEN 用量 / Usage","visible":true,"source_id":"sample","metric":"token.used","value_path":"$.value","value_expression":"","time_window":{"from":"-1h","to":"now"},"refresh_ms":60000,"thresholds":[{"value":1000,"severity":"warning","label":"高 / High"}],"style":{"unit":"tokens","variant":"default","precision":0,"line_width":1,"show_legend":true,"invert":false},"linked_panel_ids":[],"actions":[],"text":{"content":"${account}","multiline":false,"max_lines":1}},
         {"id":"cpu_trend","kind":"chart","grid":{"x":8,"y":2,"w":16,"h":4},"title":"CPU 趋势 / CPU trend","visible":true,"source_id":"sample","metric":"server.cpu","value_path":"$.value","value_expression":"","time_window":{"from":"-1h","to":"now"},"refresh_ms":60000,"thresholds":[{"value":80,"severity":"critical","label":"过载 / Overload"}],"style":{"unit":"percent","variant":"default","precision":1,"line_width":2,"show_legend":true,"invert":false},"linked_panel_ids":[],"actions":[],"chart":{"kind":"line","show_points":true,"fill":false,"y_min":0,"y_max":100}},
         {"id":"main_actions","kind":"button","grid":{"x":0,"y":4,"w":8,"h":2},"title":"操作 / Actions","visible":true,"source_id":"","metric":"","value_path":"","value_expression":"","time_window":{"from":"-1h","to":"now"},"refresh_ms":60000,"thresholds":[],"style":{"unit":"","variant":"default","precision":2,"line_width":1,"show_legend":true,"invert":false},"linked_panel_ids":[],"actions":[{"id":"details","kind":"goto_page","label":"详情 / Details","target":"details","value":"","confirm":false},{"id":"refresh","kind":"refresh","label":"刷新 / Refresh","target":"current","value":"","confirm":false},{"id":"shanghai","kind":"set_variable","label":"上海 / Shanghai","target":"city","value":"Shanghai","confirm":true}]},
         {"id":"alert_preview","kind":"alert","grid":{"x":0,"y":6,"w":24,"h":2},"title":"告警 / Alerts","visible":true,"source_id":"","metric":"","value_path":"","value_expression":"","time_window":{"from":"-1h","to":"now"},"refresh_ms":60000,"thresholds":[],"style":{"unit":"","variant":"default","precision":2,"line_width":1,"show_legend":true,"invert":false},"linked_panel_ids":["cpu_trend"],"actions":[],"text":{"content":"CPU 告警预览 / CPU alert preview","multiline":false,"max_lines":1}}
       ]},
-      {"id":"details","title":"详情 / Details","visible":true,"grid_columns":24,"row_height":16,"panels":[
+      {"id":"details","title":"详情 / Details","visible":true,"grid_columns":24,"panels":[
         {"id":"cpu_table","kind":"table","grid":{"x":0,"y":0,"w":24,"h":6},"title":"CPU 明细 / CPU details","visible":true,"source_id":"sample","metric":"server.cpu","value_path":"$.value","value_expression":"","time_window":{"from":"-1h","to":"now"},"refresh_ms":60000,"thresholds":[],"style":{"unit":"percent","variant":"default","precision":1,"line_width":1,"show_legend":true,"invert":false},"linked_panel_ids":[],"actions":[],"columns":[{"key":"value","title":"数值 / Value","unit":"percent","width":6},{"key":"server","title":"服务器 / Server","unit":"","width":10}]},
         {"id":"back","kind":"button","grid":{"x":0,"y":6,"w":8,"h":2},"title":"返回 / Back","visible":true,"source_id":"","metric":"","value_path":"","value_expression":"","time_window":{"from":"-1h","to":"now"},"refresh_ms":60000,"thresholds":[],"style":{"unit":"","variant":"default","precision":2,"line_width":1,"show_legend":true,"invert":false},"linked_panel_ids":[],"actions":[{"id":"back","kind":"back","label":"返回 / Back","target":"","value":"","confirm":false}]}
       ]}

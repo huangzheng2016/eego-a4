@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 告警面板应用状态机实现（契约见 panel_app.h）。
+// 监控面板设备应用状态机实现（契约见 panel_app.h）。
 #include "panel_app.h"
 
 #include <algorithm>
@@ -11,6 +11,7 @@
 
 #include "admin/admin.h"
 #include "admin/provision_portal.h"
+#include "dashboard_ui/preview_render.h"
 #include "alert_core/types.h"
 #include "ble/ble_manager.h"
 #include "driver/gpio.h"
@@ -40,7 +41,6 @@ using eego::net::NetStack;
 using eego::settings::PowerMode;
 
 constexpr uint32_t kNetBitWifi = 1u << 0;
-constexpr uint32_t kNetBitSource = 1u << 1;
 constexpr uint32_t kPollWaitMs = 45000;
 constexpr uint32_t kRenderThrottleMs = 250;
 constexpr int64_t kClockCheckMs = 1000;          // 状态栏分钟变化检查周期（仅分钟变化才重绘）
@@ -52,6 +52,9 @@ constexpr int64_t kNetIdleMaxIntervalMs = 5000;
 constexpr int64_t kPollIdleBudgetMs = 40000;     // 原 waitIdle(30000) + 重试 waitIdle(10000)
 constexpr int64_t kSleepIdleBudgetMs = 15000;    // 原 waitIdle(10000) + 重试 waitIdle(5000)
 constexpr size_t kSettingsRowsPerPage = static_cast<size_t>(geom::kSettingsRowsPerPage);
+constexpr int64_t kDetailCheckMs = 1000;        // 告警详情内容变化检查周期
+constexpr int64_t kOnboardingCheckMs = 2000;    // 引导页地址/WiFi 变化检查周期
+constexpr int64_t kStatusRefreshMs = 30000;     // 状态页周期重绘（年龄/运行时长）
 
 constexpr uint32_t kDashboardPollWaitMs = 130000;
 
@@ -114,7 +117,9 @@ void PanelApp::begin(const Deps& deps) {
   dashboardDeps.confirm_action = [this](const DashboardConfirmRequest& request) {
     armDashboardConfirm(request);
   };
-  page_ = dashboardStartupPage(page_, dashboard_.begin(dashboardDeps));
+  dashboard_.setGlobalRefresh(settings_.data_refresh_s * 1000);
+  dashboard_.begin(dashboardDeps);
+  if (page_ != Page::Provision) page_ = home();
   dashboardWasAvailable_ = dashboard_.available();
   dashboard_.setMains(mains_);
   syncDoublePress(true);
@@ -178,10 +183,8 @@ void PanelApp::applySettings(uint32_t changed) {
     frontlightRowsVisible_ = visibleNow;
   }
   if ((changed & eego::settings::kChangedDataRefresh) != 0) {
-    const uint32_t interval_ms = settings_.data_refresh_s * 1000;
-    if (!NetStack::instance().setDataRefreshInterval(interval_ms)) {
-      ESP_LOGW(TAG, "data refresh scheduler unavailable");
-    }
+    // 全局刷新周期覆盖 dashboard 面板（面板上单独设定的周期优先）。
+    dashboard_.setGlobalRefresh(settings_.data_refresh_s * 1000);
   }
   if ((changed & eego::settings::kChangedEpdRefresh) != 0) {
     lastFullRenderMs_ = nowMs();
@@ -227,11 +230,9 @@ uint64_t PanelApp::nextWakeAt(int64_t now_ms) const {
 
 // ── 跨任务通知（短平快）─────────────────────────────────────────────────────
 
-void PanelApp::notifyNetEvent(int wifiState, bool sourceHealthChanged) {
+void PanelApp::notifyNetEvent(int wifiState) {
   wifiState_.store(wifiState);
-  uint32_t bits = kNetBitWifi;
-  if (sourceHealthChanged) bits |= kNetBitSource;
-  netBits_.fetch_or(bits);
+  netBits_.fetch_or(kNetBitWifi);
 }
 
 void PanelApp::notifyAdminEvent(int type, int reason, uint32_t remainingS) {
@@ -243,8 +244,8 @@ void PanelApp::notifyAdminEvent(int type, int reason, uint32_t remainingS) {
 void PanelApp::drainNetBits() {
   const uint32_t bits = netBits_.exchange(0);
   if (bits == 0) return;
-  markDirty();
-  if ((bits & kNetBitSource) != 0) netStatusCacheMs_ = 0;  // 源健康跃迁 → 立即刷新缓存
+  netStatusCacheMs_ = 0;  // WiFi 跃迁 → 立即刷新地址/信号缓存
+  if (page_ != Page::Dashboard) markDirty();
   // WiFi 全账号失败 → AP 兜底（auto_ap_fallback 判定在 app_task，M13 F2）
   if ((bits & kNetBitWifi) != 0 && wifiState_.load() == 4 /*OfflineMode*/ &&
       !fallbackArmed_) {
@@ -270,9 +271,11 @@ void PanelApp::drainAdminMailbox() {
         if (page_ == Page::Provision) leaveProvision();
         break;
       case kEvApFallbackOpened:
+        netStatusCacheMs_ = 0;
         showBanner(tr(Str::ApFallback), 5000);
         break;
       case kEvApFallbackClosed:
+        netStatusCacheMs_ = 0;
         markDirty();
         break;
       case kEvProvisionSucceeded:
@@ -294,13 +297,15 @@ void PanelApp::service() {
   drainAdminMailbox();
   drainNetBits();
 
-  // 快照代际跟踪（无锁 acquire；渲染在 render() 统一取）。只有展示告警的页面
-  // 才因快照变化重绘；其他页面切回时 gotoPage 会整页重绘并取最新快照。
-  if (deps_.publisher != nullptr &&
-      (page_ == Page::Overview || page_ == Page::Table || page_ == Page::Detail ||
-       page_ == Page::Status)) {
+  // 外部告警快照（无锁 acquire）：只有告警详情/状态页直接展示 store 内容；
+  // dashboard 告警面板由 DashboardRuntime::service 自行跟踪快照代际。
+  if (deps_.publisher != nullptr) {
     auto snap = deps_.publisher->acquire();
-    if (snap && snap->seq != snapshotSeq_) markDirty();
+    if (snap && snap->seq != snapshotSeq_) {
+      snapshot_ = snap;
+      snapshotSeq_ = snap->seq;
+      if (page_ == Page::AlertDetail || page_ == Page::Status) markDirty();
+    }
   }
 
   refreshBattery(now);
@@ -319,25 +324,37 @@ void PanelApp::service() {
     markDirty();
   }
 
-  // 详情目标消失（过期/淘汰）→ 退回列表
-  if (page_ == Page::Detail && findRecord(detailId_) == nullptr) {
-    back();
-  }
-
   const bool wantMains = computeMains();
   if (wantMains != mains_) onModeChange(wantMains);
   dashboard_.service(mains_);
-  // web 端应用/删除 dashboard 后 runtime 自行重载；可用性变化影响总览软键与当前页。
+  // web 端应用/删除 dashboard 后 runtime 自行重载；主页随可用性在
+  // Dashboard ↔ Onboarding 之间切换，依赖 dashboard 的告警详情一并退出。
   const bool dashboardAvailable = dashboard_.available();
   if (dashboardAvailable != dashboardWasAvailable_) {
     dashboardWasAvailable_ = dashboardAvailable;
-    if (!dashboardAvailable && page_ == Page::Dashboard) {
-      gotoPage(Page::Overview);
-    } else if (page_ == Page::Overview) {
-      if (focus_ >= softKeyCount()) focus_ = 0;
-      markDirty();
-    }
+    if ((isHomePage(page_) || page_ == Page::AlertDetail) && page_ != home()) gotoPage(home());
   }
+  if (page_ == Page::Dashboard) {
+    if (dashboard_.consumeExitRequest()) dashboard_.home();
+    std::string panel_id;
+    std::string identity;
+    if (dashboard_.consumeDetailRequest(panel_id, identity)) openDetail(panel_id, identity);
+  }
+  if (page_ == Page::AlertDetail && now - lastDetailCheckMs_ >= kDetailCheckMs) {
+    lastDetailCheckMs_ = now;
+    refreshDetailItems();
+    if (detailSignature() != detailRendered_) markDirty();
+  }
+  if (page_ == Page::Onboarding && now - lastOnboardingCheckMs_ >= kOnboardingCheckMs) {
+    lastOnboardingCheckMs_ = now;
+    OnboardingModel probe;
+    buildOnboarding(probe);
+    const std::string key = probe.url + "|" + probe.network + "|" +
+                            (probe.apMode ? "ap" : "sta") + "|" + probe.reason;
+    if (key != onboardingKey_) markDirty();
+  }
+  if (page_ == Page::Status && now - lastStatusRenderMs_ >= kStatusRefreshMs) markDirty();
+
   if (!doublePressSynced_ || now - lastDoublePressSyncMs_ >= kDoublePressSyncMs ||
       pageContext() != doublePressContext_) {
     syncDoublePress(false);
@@ -354,7 +371,6 @@ void PanelApp::service() {
                  5000);
     }
   }
-  if (page_ == Page::Dashboard && dashboard_.consumeExitRequest()) gotoPage(Page::Overview);
 
   if (now - lastScheduleCheckMs_ > 1000) {
     lastScheduleCheckMs_ = now;
@@ -656,7 +672,7 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
       }
       if (confirm_ != ConfirmKind::None) clearConfirm();
       activeInputControl_ = "front.home";
-      onFrontKeyShort();
+      goHome();
       break;
     case eego::TouchEventType::FrontLong:
       if (confirm_ != ConfirmKind::None) {
@@ -728,7 +744,8 @@ void PanelApp::executeBinding(const eego::admin::InputBinding& binding, int64_t 
   }
   if (confirm_ == ConfirmKind::DashboardAction) return;
   if (dashboard_.consumeExitRequest()) {
-    gotoPage(Page::Overview);
+    dashboard_.home();
+    gotoPage(home());
     return;
   }
   if (kind == eego::dashboard::ActionKind::GotoPage ||
@@ -742,6 +759,10 @@ void PanelApp::executeBuiltin(const std::string& name, int64_t now_us) {
     requestNavigation(NavigationKind::Focus, name == "focus_previous" ? -1 : 1, now_us);
   } else if (name == "page_previous" || name == "page_next") {
     requestNavigation(NavigationKind::Page, name == "page_previous" ? -1 : 1, now_us);
+  } else if (name == "home") {
+    goHome();
+  } else if (name == "settings") {
+    gotoPage(Page::Settings);
   } else if (name == "help") {
     if (page_ != Page::Help) helpReturn_ = page_;
     gotoPage(Page::Help);
@@ -758,11 +779,14 @@ void PanelApp::executeBuiltin(const std::string& name, int64_t now_us) {
   }
 }
 
-void PanelApp::onFrontKeyShort() {
-  if (page_ == Page::Overview) {
-    gotoPage(Page::Table);
-  } else {
-    gotoPage(Page::Overview);
+void PanelApp::goHome() {
+  if (page_ == Page::Provision) return;
+  const bool wasHome = page_ == home();
+  if (page_ == Page::Dashboard || dashboard_.available()) dashboard_.home();
+  if (!wasHome) {
+    gotoPage(home());
+  } else if (page_ == Page::Dashboard) {
+    dashboard_.invalidateAll();
   }
 }
 
@@ -776,9 +800,8 @@ uint64_t PanelApp::inputEpoch() const {
 
 std::string PanelApp::pageContext() const {
   switch (page_) {
-    case Page::Overview: return "overview";
-    case Page::Table: return "table";
-    case Page::Detail: return "detail";
+    case Page::Onboarding: return "onboarding";
+    case Page::AlertDetail: return "detail";
     case Page::Status: return "status";
     case Page::Settings: return "settings";
     case Page::Help: return "help";
@@ -801,48 +824,6 @@ void PanelApp::flushNavigation(int64_t now_us) {
   if (delta == 0) return;
   if (kind == NavigationKind::Focus) moveFocus(delta);
   if (kind == NavigationKind::Page) movePage(delta);
-}
-
-void PanelApp::movePage(int delta) {
-  switch (page_) {
-    case Page::Table: {
-      std::vector<const alert_core::AlertRecord*> visible;
-      const size_t total = visibleRecords(visible);
-      const size_t pages = std::max<size_t>(1, (total + geom::kRowsPerPage - 1) /
-                                                   geom::kRowsPerPage);
-      // 与设置页一致：两端夹紧不循环（滑动/批量导航 delta 可能超过 ±1）。
-      const int64_t next = std::max<int64_t>(
-          0, std::min<int64_t>(static_cast<int64_t>(tablePage_) + delta,
-                               static_cast<int64_t>(pages) - 1));
-      if (static_cast<size_t>(next) == tablePage_) break;
-      tablePage_ = static_cast<size_t>(next);
-      focus_ = 0;
-      markDirty(true);
-      break;
-    }
-    case Page::Settings: {
-      // 设置页不循环：与页码条两端置灰的箭头一致。
-      const size_t rows = visibleSettings().size();
-      const size_t pages = std::max<size_t>(1, (rows + kSettingsRowsPerPage - 1) /
-                                                   kSettingsRowsPerPage);
-      const int64_t current = static_cast<int64_t>(settingsPage());
-      const int64_t next = std::max<int64_t>(
-          0, std::min<int64_t>(current + delta, static_cast<int64_t>(pages) - 1));
-      if (next == current) break;
-      focus_ = std::min(static_cast<size_t>(next) * kSettingsRowsPerPage,
-                        rows == 0 ? 0 : rows - 1);
-      markDirty(true);
-      break;
-    }
-    case Page::Dashboard:
-      dashboard_.movePage(delta);
-      break;
-    case Page::Overview:
-      if (delta > 0) gotoPage(Page::Table);
-      break;
-    default:
-      break;
-  }
 }
 
 // ── 导航 ────────────────────────────────────────────────────────────────────
@@ -916,82 +897,105 @@ void formatEvery(uint32_t seconds, char* out, size_t cap) {
 
 }  // namespace
 
+// Page 维度：dashboard 上/下一屏；设置行与告警列表的上/下一项；状态子页。
+void PanelApp::movePage(int delta) {
+  switch (page_) {
+    case Page::Dashboard:
+      dashboard_.moveScreen(delta);
+      break;
+    case Page::AlertDetail:
+      moveDetail(delta);
+      break;
+    case Page::Settings: {
+      const size_t oldPage = settingsPage();
+      focus_ = wrappedIndex(focus_, delta, visibleSettings().size());
+      markDirty(settingsPage() != oldPage);  // 同页焦点移动走 Fast；跨子页整页重绘
+      break;
+    }
+    case Page::Status: {
+      const size_t pages = statusPageCount();
+      const int64_t next = std::max<int64_t>(
+          0, std::min<int64_t>(static_cast<int64_t>(statusPage_) + delta,
+                               static_cast<int64_t>(pages) - 1));
+      if (static_cast<size_t>(next) == statusPage_) break;
+      statusPage_ = static_cast<size_t>(next);
+      markDirty(true);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
 void PanelApp::gotoPage(Page p) {
   if (page_ == p || (p == Page::Dashboard && !dashboard_.available())) return;
   page_ = p;
   ++pageEpoch_;
   navigation_.cancel();
+  // 详情页默认聚焦「确认」软键；其余页从第一个软键/行开始。
   focus_ = 0;
+  statusPage_ = 0;
   provisionSucceeded_ = false;
   clearConfirm();
   if (p == Page::Settings) refreshMuteRuleCount();
   if (p == Page::Dashboard) dashboard_.invalidateAll();
+  if (p == Page::Onboarding) onboardingKey_.clear();
   syncDoublePress(false);
   markDirty(true);  // 切页 → 下一帧 Full
 }
 
 void PanelApp::back() {
   switch (page_) {
-    case Page::Detail: {
-      const std::string target = detailId_;
-      gotoPage(Page::Table);
-      std::vector<const alert_core::AlertRecord*> vis;
-      visibleRecords(vis);
-      for (size_t i = 0; i < vis.size(); i++) {
-        if (vis[i]->id == target) {
-          tablePage_ = i / geom::kRowsPerPage;
-          focus_ = i % geom::kRowsPerPage;
-          break;
-        }
-      }
-      markDirty();
+    case Page::AlertDetail:
+      gotoPage(home());
       break;
-    }
     case Page::Help:
-      gotoPage(helpReturn_ == Page::Help ? Page::Overview : helpReturn_);
+      // 帮助页的来源页可能已不可进入（dashboard 期间被卸载/失效）：gotoPage 会
+      // 静默拒绝，Back 就卡在帮助页——此时回 home()。
+      gotoPage(helpReturn_ == Page::Help || helpReturn_ == Page::Provision ||
+                       (helpReturn_ == Page::Dashboard && !dashboard_.available())
+                   ? home()
+                   : helpReturn_);
       break;
-    case Page::Table:
     case Page::Status:
     case Page::Settings:
-      gotoPage(Page::Overview);
+      gotoPage(home());
       break;
     case Page::Dashboard:
-      if (!dashboard_.back()) gotoPage(Page::Overview);
+      // 先退 dashboard 内部返回栈（跳转动作），否则回到默认页第一屏。
+      if (!dashboard_.back() && !dashboard_.atHome()) dashboard_.home();
       break;
     default:
       break;
   }
 }
 
+// Focus 维度：dashboard 面板焦点；设置子页跳转；其余页软键焦点。
 void PanelApp::moveFocus(int delta) {
   switch (page_) {
-    case Page::Overview:
-    case Page::Detail:
+    case Page::Dashboard:
+      dashboard_.moveFocus(delta, false);
+      break;
+    case Page::Settings: {
+      // 设置页不循环：与页码条两端置灰的箭头一致。
+      const size_t rows = visibleSettings().size();
+      const size_t pages = std::max<size_t>(1, (rows + kSettingsRowsPerPage - 1) /
+                                                   kSettingsRowsPerPage);
+      const int64_t current = static_cast<int64_t>(settingsPage());
+      const int64_t next = std::max<int64_t>(
+          0, std::min<int64_t>(current + delta, static_cast<int64_t>(pages) - 1));
+      if (next == current) break;
+      focus_ = std::min(static_cast<size_t>(next) * kSettingsRowsPerPage,
+                        rows == 0 ? 0 : rows - 1);
+      markDirty(true);
+      break;
+    }
+    case Page::Onboarding:
+    case Page::AlertDetail:
     case Page::Status:
     case Page::Help:
       focus_ = wrappedIndex(focus_, delta, softKeyCount());
       markDirty();
-      break;
-    case Page::Table: {
-      std::vector<const alert_core::AlertRecord*> vis;
-      const size_t total = visibleRecords(vis);
-      if (total == 0) break;
-      const size_t oldPage = tablePage_;
-      int64_t idx = static_cast<int64_t>(tablePage_ * geom::kRowsPerPage + focus_) + delta;
-      idx = std::max<int64_t>(0, std::min<int64_t>(idx, static_cast<int64_t>(total) - 1));
-      tablePage_ = static_cast<size_t>(idx) / geom::kRowsPerPage;
-      focus_ = static_cast<size_t>(idx) % geom::kRowsPerPage;
-      markDirty(tablePage_ != oldPage);  // 同页焦点移动走 Fast；跨子页整页重绘
-      break;
-    }
-    case Page::Settings: {
-      const size_t oldPage = settingsPage();
-      focus_ = wrappedIndex(focus_, delta, visibleSettings().size());
-      markDirty(settingsPage() != oldPage);
-      break;
-    }
-    case Page::Dashboard:
-      dashboard_.moveFocus(delta, false);
       break;
     default:
       break;
@@ -1000,22 +1004,12 @@ void PanelApp::moveFocus(int delta) {
 
 void PanelApp::activateFocused() {
   switch (page_) {
-    case Page::Overview:
-    case Page::Detail:
+    case Page::Onboarding:
+    case Page::AlertDetail:
     case Page::Status:
     case Page::Help:
       activateSoftKey(focus_);
       break;
-    case Page::Table: {
-      std::vector<const alert_core::AlertRecord*> vis;
-      visibleRecords(vis);
-      const size_t idx = tablePage_ * geom::kRowsPerPage + focus_;
-      if (idx < vis.size()) {
-        detailId_ = vis[idx]->id;
-        gotoPage(Page::Detail);
-      }
-      break;
-    }
     case Page::Settings: {
       const std::vector<SettingId> rows = visibleSettings();
       if (focus_ < rows.size()) activateSettingRow(rows[focus_]);
@@ -1031,32 +1025,30 @@ void PanelApp::activateFocused() {
 
 void PanelApp::activateSoftKey(size_t idx) {
   switch (page_) {
-    case Page::Overview:
-      if (idx == 0) gotoPage(Page::Table);
-      else if (idx == 1) armConfirm(ConfirmKind::AckAll);
-      else if (idx == 2) gotoPage(Page::Settings);
-      else if (idx == 3) gotoPage(Page::Dashboard);
+    case Page::Onboarding:
+      // [状态] [设置]
+      if (idx == 0) gotoPage(Page::Status);
+      else if (idx == 1) gotoPage(Page::Settings);
       break;
-    case Page::Table:
-      if (idx == 0) activateFocused();
-      else if (idx == 1) back();
-      break;
-    case Page::Detail: {
-      const alert_core::AlertRecord* rec = findRecord(detailId_);
-      if (idx == 0 && rec != nullptr && rec->state == alert_core::AlertState::Active) {
-        doAck(detailId_);
-      } else if (idx == 1 && rec != nullptr) {
+    case Page::AlertDetail: {
+      // [确认] [静音] [删除] [趋势?] [返回]
+      const DashboardAlertItem* item = detailItem();
+      const alert_core::AlertRecord* rec = detailRecord();
+      const size_t n = softKeyCount();
+      if (idx + 1 == n) {
+        back();
+      } else if (idx == 0 && item != nullptr) {
+        doAck();
+      } else if (idx == 1 && rec != nullptr && !rec->muted) {
         armConfirm(ConfirmKind::Mute);
       } else if (idx == 2 && rec != nullptr &&
                  (rec->state == alert_core::AlertState::Active ||
                   rec->state == alert_core::AlertState::Acked)) {
         armConfirm(ConfirmKind::Clear);
-      } else if (idx == 3 && rec != nullptr &&
-                 !dashboard_.linkedPanelForAlert(*rec).empty()) {
-        const std::string linked = dashboard_.linkedPanelForAlert(*rec);
-        if (dashboard_.gotoPanel(linked)) gotoPage(Page::Dashboard);
-      } else if (idx == 3 || idx == 4) {
-        back();
+      } else if (idx == 3 && item != nullptr && !item->linked_panel_id.empty()) {
+        const std::string linked = item->linked_panel_id;
+        gotoPage(Page::Dashboard);
+        dashboard_.gotoPanel(linked);
       }
       break;
     }
@@ -1066,9 +1058,9 @@ void PanelApp::activateSoftKey(size_t idx) {
       break;
     case Page::Settings:
       // [← 上一页] [返回] [下一页 →]
-      if (idx == 0) movePage(-1);
+      if (idx == 0) moveFocus(-1);
       else if (idx == 1) back();
-      else if (idx == 2) movePage(1);
+      else if (idx == 2) moveFocus(1);
       break;
     case Page::Help:
       if (idx == 0) back();
@@ -1104,15 +1096,16 @@ size_t PanelApp::settingsPage() const { return focus_ / kSettingsRowsPerPage; }
 bool PanelApp::pageEdge(int delta) const {
   size_t page = 0;
   size_t pages = 1;
-  if (page_ == Page::Table) {
-    std::vector<const alert_core::AlertRecord*> vis;
-    const size_t total = visibleRecords(vis);
-    pages = std::max<size_t>(1, (total + geom::kRowsPerPage - 1) / geom::kRowsPerPage);
-    page = tablePage_;
-  } else if (page_ == Page::Settings) {
+  if (page_ == Page::Settings) {
     const size_t rows = visibleSettings().size();
     pages = std::max<size_t>(1, (rows + kSettingsRowsPerPage - 1) / kSettingsRowsPerPage);
     page = settingsPage();
+  } else if (page_ == Page::Status) {
+    pages = statusPageCount();
+    page = statusPage_;
+  } else if (page_ == Page::AlertDetail) {
+    pages = std::max<size_t>(1, detailItems_.size());
+    page = std::min(detailIndex_, pages - 1);
   } else {
     return false;
   }
@@ -1300,7 +1293,7 @@ std::string PanelApp::focusedControl() const {
     hit.kind = TouchHit::Kind::Row;
     return controlForHit(hit);
   }
-  if (page_ == Page::Overview || page_ == Page::Detail || page_ == Page::Status ||
+  if (page_ == Page::Onboarding || page_ == Page::AlertDetail || page_ == Page::Status ||
       page_ == Page::Help) {
     hit.kind = TouchHit::Kind::SoftKey;
     return controlForHit(hit);
@@ -1324,10 +1317,10 @@ void PanelApp::onTouchTap(int16_t x, int16_t y) {
       activateSoftKey(static_cast<size_t>(hit.index));
       return;
     case TouchHit::Kind::PagePrev:
-      movePage(-1);
+      moveFocus(-1);  // 设置页页码条：上一子页
       return;
     case TouchHit::Kind::PageNext:
-      movePage(1);
+      moveFocus(1);
       return;
     case TouchHit::Kind::Row: {
       // 一次点按 = 聚焦 + 激活（危险动作仍经 armConfirm 布防）；点值列左/右半
@@ -1350,27 +1343,6 @@ void PanelApp::onTouchTap(int16_t x, int16_t y) {
     case TouchHit::Kind::None:
       break;
   }
-  switch (page_) {
-    case Page::Overview:
-      if (y >= geom::kOverviewCardsTop && y < geom::kOverviewCardsBottom) gotoPage(Page::Table);
-      break;
-    case Page::Table: {
-      const int16_t rows_y = geom::kTableRowTop;
-      if (y >= rows_y && y < rows_y + geom::kRowsPerPage * geom::kRowH) {
-        const size_t row = static_cast<size_t>((y - rows_y) / geom::kRowH);
-        std::vector<const alert_core::AlertRecord*> vis;
-        visibleRecords(vis);
-        if (tablePage_ * geom::kRowsPerPage + row < vis.size()) {
-          focus_ = row;
-          detailId_ = vis[tablePage_ * geom::kRowsPerPage + row]->id;
-          gotoPage(Page::Detail);
-        }
-      }
-      break;
-    }
-    default:
-      break;
-  }
 }
 
 void PanelApp::onTouchHold(int16_t x, int16_t y) {
@@ -1390,29 +1362,33 @@ void PanelApp::onTouchHold(int16_t x, int16_t y) {
 }
 
 void PanelApp::onTouchSwipe(eego::TouchEventType type, int64_t now_us) {
-  // 左滑/上滑 = 下一页；右滑/下滑 = 上一页。右滑在首个子页（或无子页的页面）= 返回。
+  // 左滑/上滑 = 下一屏（项）；右滑/下滑 = 上一屏（项）。子页面在首屏（首项）
+  // 右滑 = 返回；dashboard 是主页，不返回。
   const bool forward =
       type == eego::TouchEventType::SwipeLeft || type == eego::TouchEventType::SwipeUp;
   const bool swipeRight = type == eego::TouchEventType::SwipeRight;
+  const int delta = forward ? 1 : -1;
   switch (page_) {
-    case Page::Overview:
-      if (forward) gotoPage(Page::Table);
+    case Page::Dashboard:
+      requestNavigation(NavigationKind::Page, delta, now_us);
       break;
-    case Page::Table:
     case Page::Settings:
-      if (pageEdge(forward ? 1 : -1)) {
+      if (pageEdge(delta)) {
         if (swipeRight) back();
         break;  // 已在边界：不循环
       }
-      requestNavigation(NavigationKind::Page, forward ? 1 : -1, now_us);
+      requestNavigation(NavigationKind::Focus, delta, now_us);  // 设置子页
       break;
-    case Page::Detail:
+    case Page::AlertDetail:
     case Page::Status:
+      if (pageEdge(delta)) {
+        if (swipeRight) back();
+        break;
+      }
+      requestNavigation(NavigationKind::Page, delta, now_us);
+      break;
     case Page::Help:
       if (swipeRight) back();
-      break;
-    case Page::Dashboard:
-      requestNavigation(NavigationKind::Page, forward ? 1 : -1, now_us);
       break;
     default:
       break;
@@ -1446,24 +1422,35 @@ void PanelApp::syncDoublePress(bool force) {
 
 // ── 动作 ────────────────────────────────────────────────────────────────────
 
-void PanelApp::doAck(const std::string& id) {
-  AlertActionResult r = NetStack::instance().alertAction({AlertActionType::Ack, id, "panel"});
-  if (r.code == AlertActionResult::Code::Ok) {
+// 告警详情「确认」：外部告警经 net_task 落 store（Active → Acked）并在
+// dashboard 视图中压制本代际；规则派生事件只在 dashboard 视图压制。
+void PanelApp::doAck() {
+  const DashboardAlertItem* item = detailItem();
+  if (item == nullptr) return;
+  if (item->acknowledged) {
+    showBanner(tr(Str::DoneAck), 2000);
+    return;
+  }
+  if (!item->active) {
+    showBanner(tr(Str::StateCleared), 2000);
+    return;
+  }
+  const std::string identity = item->identity;
+  if (dashboard_.acknowledgeEvent(identity)) {
     showBanner(tr(Str::DoneAck), 3000);
+  } else if (!item->core_id.empty()) {
+    // dashboard 未持有该事件（理论上不会发生）：直接确认 store 记录。
+    const AlertActionResult r =
+        NetStack::instance().alertAction({AlertActionType::Ack, item->core_id, "panel"});
+    if (r.code == AlertActionResult::Code::Ok) {
+      showBanner(tr(Str::DoneAck), 3000);
+    } else {
+      showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), r.detail.c_str());
+    }
   } else {
-    showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), r.detail.c_str());
+    showBanner(tr(Str::ActionFailed), 3000);
   }
-  markDirty();
-}
-
-void PanelApp::doAckAll() {
-  AlertActionResult r =
-      NetStack::instance().alertAction({AlertActionType::AckAll, "", "panel"});
-  if (r.code == AlertActionResult::Code::Ok) {
-    showBannerFmt(3000, "%s x%u", tr(Str::DoneAck), static_cast<unsigned>(r.affected));
-  } else {
-    showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), r.detail.c_str());
-  }
+  refreshDetailItems();
   markDirty();
 }
 
@@ -1510,7 +1497,8 @@ void PanelApp::doMute(const alert_core::AlertRecord& rec) {
   persistMuteRules(rules);
   muteRuleCount_ = rules.size();
   showBanner(tr(Str::DoneMute), 3000);
-  if (page_ == Page::Detail) back();  // 静音后详情目标从列表消失，回列表
+  // 静音记录不再进入 dashboard 事件：详情列表下一次刷新时移到相邻条目。
+  refreshDetailItems();
   markDirty();
 }
 
@@ -1544,7 +1532,11 @@ void PanelApp::refreshMuteRuleCount() {
 }
 
 void PanelApp::doPollNow() {
-  NetStack::instance().pollNow("");
+  if (!dashboard_.available()) {
+    showBanner(tr(Str::NoDashboard), 3000);
+    return;
+  }
+  dashboard_.refreshAll();
   showBanner(tr(Str::PollNowStarted), 3000);
   markDirty();
 }
@@ -1732,6 +1724,38 @@ uint64_t PanelApp::currentSnapshotEpoch() const {
   return snapshotSeq_;
 }
 
+bool PanelApp::renderDashboardPreview(const admin::RenderPreviewRequest& request, uint8_t* rows,
+                                      size_t stride, admin::RenderPreviewResult& result) {
+  if (request.document == nullptr || rows == nullptr) {
+    result.status = 503;
+    result.error = "render preview unavailable";
+    return false;
+  }
+  // Separate PSRAM framebuffer (no SPI/panel); freed when this scope ends.
+  eego::Uc8279cDisplay offscreen;
+  if (offscreen.beginOffscreen() != ESP_OK) {
+    result.status = 503;
+    result.error = "preview framebuffer unavailable";
+    return false;
+  }
+  eego::PortraitCanvas canvas(offscreen);
+  DashboardRuntime::PreviewInfo info;
+  const bool ok = dashboard_.renderPreview(canvas, request.document->dashboard, request.page_id,
+                                           request.has_screen ? request.screen : 0, info);
+  result.page_id = info.page_id;
+  result.screen = static_cast<uint32_t>(info.screen);
+  result.screen_count = static_cast<uint32_t>(info.screen_count);
+  result.data = info.data;
+  if (!ok) {
+    result.status = info.bad_request ? 400 : 503;
+    result.error = info.error.empty() ? "render preview failed" : info.error;
+    return false;
+  }
+  eego::dashboard::ui::packGrayLevels(offscreen, rows, stride, request.fast);
+  noteInputResume();  // the render blocked app_task; do not drop queued input as stale
+  return true;
+}
+
 void PanelApp::resetInputBindings() {
   std::string error;
   bool conflict = false;
@@ -1756,16 +1780,13 @@ bool PanelApp::confirmTargetCurrent() const {
            dashboard_.snapshotEpoch() == confirmDashboard_.snapshot_epoch;
   }
   if (target.page_epoch != pageEpoch_) return false;
-  if (confirm_ == ConfirmKind::AckAll || confirm_ == ConfirmKind::Mute ||
-      confirm_ == ConfirmKind::Clear) {
+  if (confirm_ == ConfirmKind::Mute || confirm_ == ConfirmKind::Clear) {
     const auto latest = deps_.publisher != nullptr ? deps_.publisher->acquire() : snapshot_;
-    const ConfirmRecordRule rule = confirm_ == ConfirmKind::AckAll
-                                       ? ConfirmRecordRule::AckAll
-                                       : (confirm_ == ConfirmKind::Mute ? ConfirmRecordRule::Mute
-                                                                       : ConfirmRecordRule::Clear);
+    const ConfirmRecordRule rule =
+        confirm_ == ConfirmKind::Mute ? ConfirmRecordRule::Mute : ConfirmRecordRule::Clear;
     if (!confirmRecordTargetCurrent(target, rule, latest.get())) return false;
-    if (confirm_ != ConfirmKind::AckAll &&
-        (page_ != Page::Detail || detailId_ != target.record_id)) {
+    const DashboardAlertItem* item = detailItem();
+    if (page_ != Page::AlertDetail || item == nullptr || item->core_id != target.record_id) {
       return false;
     }
   }
@@ -1785,7 +1806,6 @@ void PanelApp::executeArmedConfirm() {
     return;
   }
   switch (confirm_) {
-    case ConfirmKind::AckAll: doAckAll(); break;
     case ConfirmKind::Mute: {
       const auto latest = deps_.publisher != nullptr ? deps_.publisher->acquire() : snapshot_;
       const alert_core::AlertRecord* rec = nullptr;
@@ -1823,10 +1843,15 @@ void PanelApp::armConfirm(ConfirmKind kind) {
   target.page_epoch = pageEpoch_;
   target.control = activeInputControl_;
   target.physical_power_only = requiresPhysicalConfirm(kind);
-  if (kind == ConfirmKind::AckAll || kind == ConfirmKind::Mute || kind == ConfirmKind::Clear) {
+  if (kind == ConfirmKind::Mute || kind == ConfirmKind::Clear) {
+    const DashboardAlertItem* item = detailItem();
+    if (item == nullptr || item->core_id.empty()) {
+      showBanner(tr(Str::Unavailable), 3000);
+      return;
+    }
     target.snapshot_epoch = currentSnapshotEpoch();
+    target.record_id = item->core_id;
   }
-  if (kind == ConfirmKind::Mute || kind == ConfirmKind::Clear) target.record_id = detailId_;
   confirm_ = kind;
   confirmState_.arm(target, esp_timer_get_time());
   showBanner(requiresPhysicalConfirm(kind) ? tr(Str::ConfirmPhysicalHold) : tr(Str::ConfirmHold),
@@ -1998,8 +2023,7 @@ void PanelApp::batteryFsm(int64_t now) {
     case BattPhase::Polling: {
       if (!batteryPollStarted_) {
         if (wifiState_.load() == 2 /*Connected*/ || now > pollDeadlineMs_) {
-          ESP_LOGI(TAG, "battery poll cycle: poll all sources");
-          NetStack::instance().pollNow("");
+          ESP_LOGI(TAG, "battery poll cycle: refresh dashboard sources");
           dashboard_.pollBattery();
           batteryPollStarted_ = true;
           pollIdleWait_.active = false;
@@ -2180,7 +2204,7 @@ void PanelApp::enterProvision() {
 
 void PanelApp::leaveProvision() {
   provisionSucceeded_ = false;
-  gotoPage(Page::Overview);
+  gotoPage(home());
 }
 
 // ── 数据辅助 ────────────────────────────────────────────────────────────────
@@ -2215,23 +2239,6 @@ const alert_core::AlertRecord* PanelApp::findRecord(const std::string& id) const
     if (r.id == id) return &r;
   }
   return nullptr;
-}
-
-bool PanelApp::recordVisible(const alert_core::AlertRecord& r) const {
-  // store 级静音语义（M21）：muted 记录留在库但不进总览/列表/徽标（M11）；
-  // 与 API 默认列表（muted 排除）、状态统计一致——不再有 UI 级指纹过滤。
-  return !r.muted;
-}
-
-size_t PanelApp::visibleRecords(std::vector<const alert_core::AlertRecord*>& out) const {
-  out.clear();
-  if (snapshot_ != nullptr) {
-    out.reserve(snapshot_->records.size());
-    for (const alert_core::AlertRecord& r : snapshot_->records) {
-      if (recordVisible(r)) out.push_back(&r);
-    }
-  }
-  return out.size();
 }
 
 void PanelApp::formatTs(uint64_t ts, char* out, size_t cap) const {
@@ -2280,11 +2287,11 @@ const char* PanelApp::typeName(const std::string& typeId, std::string& buf) cons
 
 size_t PanelApp::softKeyCount() const {
   switch (page_) {
-    case Page::Overview: return dashboard_.available() ? 4 : 3;
-    case Page::Table: return 2;
-    case Page::Detail: {
-      const alert_core::AlertRecord* rec = findRecord(detailId_);
-      return rec != nullptr && !dashboard_.linkedPanelForAlert(*rec).empty() ? 5 : 4;
+    case Page::Onboarding: return 2;
+    case Page::AlertDetail: {
+      const DashboardAlertItem* item = detailItem();
+      if (item == nullptr) return 1;
+      return item->linked_panel_id.empty() ? 4 : 5;
     }
     case Page::Status: return 2;
     case Page::Settings: return 3;
@@ -2297,32 +2304,28 @@ void PanelApp::softKeys(SoftKeyModel* out, size_t cap) const {
   const size_t n = softKeyCount();
   if (n == 0 || cap < n) return;
   switch (page_) {
-    case Page::Overview:
-      out[0] = {tr(Str::List), true};
-      out[1] = {tr(Str::AckAll), true};
-      out[2] = {tr(Str::SettingsKey), true};
-      if (n == 4) out[3] = {currentLang() == Lang::Zh ? "面板" : "DASH", true};
+    case Page::Onboarding:
+      out[0] = {tr(Str::StatusKey), true};
+      out[1] = {tr(Str::SettingsKey), true};
       break;
-    case Page::Table:
-      out[0] = {tr(Str::Open), true};
-      out[1] = {tr(Str::Back), true};
-      break;
-    case Page::Detail: {
-      const alert_core::AlertRecord* rec = findRecord(detailId_);
-      const bool active = rec != nullptr && rec->state == alert_core::AlertState::Active;
+    case Page::AlertDetail: {
+      const DashboardAlertItem* item = detailItem();
+      if (item == nullptr) {
+        out[0] = {tr(Str::Back), true};
+        break;
+      }
+      const alert_core::AlertRecord* rec = detailRecord();
       const bool clearable = rec != nullptr && (rec->state == alert_core::AlertState::Active ||
                                                 rec->state == alert_core::AlertState::Acked);
-      const bool muted = rec != nullptr && rec->muted;  // store 级（M21）
-      const bool trend = rec != nullptr && !dashboard_.linkedPanelForAlert(*rec).empty();
-      out[0] = {tr(Str::Ack), active};
-      out[1] = {tr(Str::Mute), rec != nullptr && !muted};
+      out[0] = {tr(Str::Ack), item->active && !item->acknowledged};
+      out[1] = {tr(Str::Mute), rec != nullptr && !rec->muted};
       out[2] = {tr(Str::Clear), clearable};
-      out[3] = {trend ? (currentLang() == Lang::Zh ? "趋势" : "TREND") : tr(Str::Back), true};
-      if (trend) out[4] = {tr(Str::Back), true};
+      if (n == 5) out[3] = {tr(Str::Trend), true};
+      out[n - 1] = {tr(Str::Back), true};
       break;
     }
     case Page::Status:
-      out[0] = {tr(Str::Refresh), true};
+      out[0] = {tr(Str::Refresh), dashboard_.available()};
       out[1] = {tr(Str::Back), true};
       break;
     case Page::Settings:
@@ -2336,6 +2339,79 @@ void PanelApp::softKeys(SoftKeyModel* out, size_t cap) const {
     default:
       break;
   }
+}
+
+// ── 告警详情 ────────────────────────────────────────────────────────────────
+
+void PanelApp::openDetail(const std::string& panel_id, const std::string& identity) {
+  detailPanel_ = panel_id;
+  detailIdentity_ = identity;
+  detailIndex_ = 0;
+  refreshDetailItems();
+  gotoPage(Page::AlertDetail);
+  detailRendered_.clear();
+  lastDetailCheckMs_ = nowMs();
+}
+
+void PanelApp::refreshDetailItems() {
+  detailItems_ = dashboard_.alertItems(detailPanel_);
+  if (detailItems_.empty()) {
+    detailIndex_ = 0;
+    return;
+  }
+  for (size_t i = 0; i < detailItems_.size(); ++i) {
+    if (detailItems_[i].identity == detailIdentity_) {
+      detailIndex_ = i;
+      return;
+    }
+  }
+  // 目标已消失（静音/删除/淘汰）：停在原位置的相邻条目。
+  detailIndex_ = std::min(detailIndex_, detailItems_.size() - 1);
+  detailIdentity_ = detailItems_[detailIndex_].identity;
+}
+
+const DashboardAlertItem* PanelApp::detailItem() const {
+  if (detailItems_.empty() || detailIndex_ >= detailItems_.size()) return nullptr;
+  return &detailItems_[detailIndex_];
+}
+
+const alert_core::AlertRecord* PanelApp::detailRecord() const {
+  const DashboardAlertItem* item = detailItem();
+  if (item == nullptr || item->core_id.empty()) return nullptr;
+  return findRecord(item->core_id);
+}
+
+void PanelApp::moveDetail(int delta) {
+  if (detailItems_.empty() || delta == 0) return;
+  const int64_t next = std::max<int64_t>(
+      0, std::min<int64_t>(static_cast<int64_t>(detailIndex_) + delta,
+                           static_cast<int64_t>(detailItems_.size()) - 1));
+  if (static_cast<size_t>(next) == detailIndex_) return;
+  detailIndex_ = static_cast<size_t>(next);
+  detailIdentity_ = detailItems_[detailIndex_].identity;
+  clearConfirm();
+  ++pageEpoch_;  // 布防中的确认绑定旧条目
+  focus_ = 0;
+  markDirty();
+}
+
+std::string PanelApp::detailSignature() const {
+  const DashboardAlertItem* item = detailItem();
+  if (item == nullptr) return "empty";
+  std::string out = item->identity;
+  out += '|';
+  out += std::to_string(detailItems_.size());
+  out += item->active ? "A" : "C";
+  out += item->acknowledged ? "K" : "-";
+  out += std::to_string(item->severity);
+  out += item->title;
+  out += item->message;
+  if (const alert_core::AlertRecord* rec = detailRecord()) {
+    out += std::to_string(static_cast<unsigned>(rec->state));
+    out += rec->muted ? "M" : "-";
+    out += std::to_string(rec->occurrences);
+  }
+  return out;
 }
 
 // ── 渲染 ────────────────────────────────────────────────────────────────────
@@ -2367,28 +2443,27 @@ void PanelApp::render(int64_t now) {
   drawStatusBar(c, sb);
 
   switch (page_) {
-    case Page::Overview: {
-      S0Model m;
-      buildS0(m);
-      drawS0(c, m);
+    case Page::Onboarding: {
+      OnboardingModel m;
+      buildOnboarding(m);
+      onboardingKey_ = m.url + "|" + m.network + "|" + (m.apMode ? "ap" : "sta") + "|" + m.reason;
+      lastOnboardingCheckMs_ = now;
+      drawOnboarding(c, m);
       break;
     }
-    case Page::Table: {
-      S1Model m;
-      buildS1(m);
-      drawS1(c, m);
-      break;
-    }
-    case Page::Detail: {
-      S2Model m;
-      buildS2(m);
-      drawS2(c, m);
+    case Page::AlertDetail: {
+      refreshDetailItems();
+      AlertDetailModel m;
+      buildDetail(m);
+      detailRendered_ = detailSignature();
+      drawAlertDetail(c, m);
       break;
     }
     case Page::Status: {
-      S3Model m;
-      buildS3(m);
-      drawS3(c, m);
+      KvModel m;
+      buildStatus(m);
+      lastStatusRenderMs_ = now;
+      drawStatus(c, m);
       break;
     }
     case Page::Settings: {
@@ -2398,7 +2473,7 @@ void PanelApp::render(int64_t now) {
       break;
     }
     case Page::Help: {
-      S3Model m;
+      KvModel m;
       buildHelp(m);
       drawHelp(c, m);
       break;
@@ -2419,11 +2494,7 @@ void PanelApp::render(int64_t now) {
   SoftKeyModel keys[5];
   const size_t n = softKeyCount();
   softKeys(keys, 5);
-  size_t focusIdx = static_cast<size_t>(-1);
-  if (page_ == Page::Overview || page_ == Page::Detail || page_ == Page::Status ||
-      page_ == Page::Help) {
-    focusIdx = focus_;
-  }
+  const size_t focusIdx = page_ == Page::Settings ? static_cast<size_t>(-1) : focus_;
   drawSoftKeys(c, keys, n, focusIdx);
 
   c.display(forceFull_ ? eego::RefreshMode::Full : eego::RefreshMode::Fast);
@@ -2466,159 +2537,172 @@ void PanelApp::buildStatusBar(StatusBarModel& m) {
   }
 }
 
-void PanelApp::buildS0(S0Model& m) {
-  m.critical = m.warning = m.info = 0;
-  m.acked = 0;
-  size_t storeMuted = 0;
-  if (snapshot_ != nullptr) {
-    for (const alert_core::AlertRecord& r : snapshot_->records) {
-      if (r.muted) {
-        storeMuted++;
-        continue;
-      }
-      if (r.state == alert_core::AlertState::Active || r.state == alert_core::AlertState::Acked) {
-        switch (r.severity) {
-          case alert_core::Severity::Critical: m.critical++; break;
-          case alert_core::Severity::Warning: m.warning++; break;
-          default: m.info++; break;
-        }
-        if (r.state == alert_core::AlertState::Acked) m.acked++;
-      }
-    }
-  }
-  m.activeTotal = m.critical + m.warning + m.info;
-  m.muted = storeMuted;
-  m.empty = (m.activeTotal == 0);
-  if (snapshot_ != nullptr) formatTs(snapshot_->generated_at, m.updatedText, sizeof(m.updatedText));
+namespace {
 
-  // 源健康（netStatus() 5s 缓存，避免每次渲染都过命令队列）
+const char* wifiStateText(int state) {
+  switch (state) {
+    case 1: return tr(Str::WifiConnecting);
+    case 2: return tr(Str::WifiConnected);
+    case 3: return tr(Str::WifiFailed);
+    case 4: return tr(Str::WifiOffline);
+    default: return tr(Str::WifiDisconnected);
+  }
+}
+
+void formatBytes(size_t bytes, char* out, size_t cap) {
+  if (bytes >= 1024 * 1024) {
+    snprintf(out, cap, "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+  } else if (bytes >= 1024) {
+    snprintf(out, cap, "%u KB", static_cast<unsigned>((bytes + 512) / 1024));
+  } else {
+    snprintf(out, cap, "%u B", static_cast<unsigned>(bytes));
+  }
+}
+
+void formatUptime(int64_t seconds, char* out, size_t cap) {
+  const long long d = seconds / 86400;
+  const long long h = (seconds % 86400) / 3600;
+  const long long m = (seconds % 3600) / 60;
+  if (d > 0) snprintf(out, cap, "%lldd %lldh %lldm", d, h, m);
+  else if (h > 0) snprintf(out, cap, "%lldh %lldm", h, m);
+  else snprintf(out, cap, "%lldm %llds", m, static_cast<long long>(seconds % 60));
+}
+
+}  // namespace
+
+void PanelApp::buildOnboarding(OnboardingModel& m) {
   const eego::net::NetStatusSnapshot& ns = netStatus();
-  m.sourcesTotal = ns.sources.size();
-  m.sourcesOk = 0;
-  for (const auto& s : ns.sources) {
-    if (s.consecutive_failures == 0) m.sourcesOk++;
+  const bool connected = ns.wifi.state == 2 && !ns.wifi.ip.empty();
+  const bool ap = admin::ProvisionPortal::instance().apActive();
+  char buf[96];
+  if (connected) {
+    m.url = "http://" + ns.wifi.ip + "/";
+    snprintf(buf, sizeof(buf), "WiFi · %s · %d dBm", ns.wifi.ssid.c_str(), ns.wifi.rssi);
+    m.network = buf;
+  } else if (ap) {
+    m.apMode = true;
+    m.url = admin::ProvisionPortal::kApUrl;
+    snprintf(buf, sizeof(buf), "%s · %s", tr(Str::ApFallback), admin::ProvisionPortal::kApSsid);
+    m.network = buf;
+  } else if (ns.wifi.state == 4 || (ns.wifi.ssid.empty() && ns.wifi.state != 1)) {
+    m.network = tr(Str::OnbNoWifi);
+  } else {
+    m.network = wifiStateText(ns.wifi.state);
+    if (!ns.wifi.ssid.empty()) m.network += " · " + ns.wifi.ssid;
+  }
+  sanitizeClamped(m.network, 60);
+  const auto document = admin::DashboardStore::instance().snapshot();
+  if (document != nullptr && document->configured && !dashboard_.available()) {
+    m.reason = dashboard_.unavailableReason();
+    sanitizeClamped(m.reason, 80);
   }
 }
 
-void PanelApp::buildS1(S1Model& m) {
-  std::vector<const alert_core::AlertRecord*> vis;
-  m.total = visibleRecords(vis);
-  m.pageCount = (m.total + geom::kRowsPerPage - 1) / geom::kRowsPerPage;
-  if (m.pageCount == 0) m.pageCount = 1;
-  if (tablePage_ >= m.pageCount) tablePage_ = m.pageCount - 1;
-  m.page = tablePage_;
-
-  const size_t begin = tablePage_ * geom::kRowsPerPage;
-  const size_t end = std::min(begin + static_cast<size_t>(geom::kRowsPerPage), m.total);
-  if (focus_ >= end - begin) focus_ = (end > begin) ? (end - begin - 1) : 0;
-  m.selected = focus_;
-
-  for (size_t i = begin; i < end; i++) {
-    const alert_core::AlertRecord& r = *vis[i];
-    S1RowModel row;
-    row.severity = static_cast<uint8_t>(r.severity);
-    row.state = static_cast<uint8_t>(r.state);
-    row.title = r.title.empty() ? r.type : r.title;
-    sanitizeClamped(row.title, 120);
-    std::string tname;
-    row.subtitle = typeName(r.type, tname);
-    row.subtitle += " · ";
-    row.subtitle += r.source.id;
-    sanitizeClamped(row.subtitle, 80);
-    formatAge(r.last_seen, row.age, sizeof(row.age));
-    m.rows.push_back(std::move(row));
+void PanelApp::buildDetail(AlertDetailModel& m) {
+  const DashboardAlertItem* item = detailItem();
+  if (item == nullptr) {
+    m.empty = true;
+    return;
   }
-}
-
-void PanelApp::buildS2(S2Model& m) {
-  const alert_core::AlertRecord* rec = findRecord(detailId_);
-  if (rec == nullptr) return;
-  m.severity = static_cast<uint8_t>(rec->severity);
-  m.state = static_cast<uint8_t>(rec->state);
+  snprintf(m.position, sizeof(m.position), "%u/%u", static_cast<unsigned>(detailIndex_ + 1),
+           static_cast<unsigned>(detailItems_.size()));
+  m.severity = item->severity > 2 ? 2 : item->severity;
+  const alert_core::AlertRecord* rec = detailRecord();
+  if (rec != nullptr) {
+    m.state = static_cast<uint8_t>(rec->state);
+  } else {
+    m.state = item->acknowledged ? 1 : (item->active ? 0 : 2);
+  }
   std::string tname;
-  m.typeName = typeName(rec->type, tname);
+  if (rec != nullptr) {
+    m.typeName = std::string(tr(Str::ExternalAlert)) + " · " + typeName(rec->type, tname);
+  } else {
+    m.typeName = tr(Str::RuleAlert);
+    if (!item->rule_id.empty()) m.typeName += " · " + item->rule_id;
+  }
   sanitizeClamped(m.typeName, 60);
-  m.title = rec->title;
+  m.title = item->title;
   sanitizeClamped(m.title, 120);
-  m.message = rec->message;
+  m.message = item->message;
   sanitizeClamped(m.message, 600);
-  m.canAck = rec->state == alert_core::AlertState::Active;
-  m.canClear = rec->state == alert_core::AlertState::Active ||
-               rec->state == alert_core::AlertState::Acked;
-  m.muted = rec->muted;  // store 级静音（M21）
 
   char buf[40];
-  // meta 值与 title/message 同为不可信字段（ack_by 来自 API 客户端），统一钳制
+  // meta 值与 title/message 同为不可信字段（来自数据源/推送客户端），统一钳制
   auto addMeta = [&m](Str label, std::string value) {
     sanitizeClamped(value, 80);
     m.meta.emplace_back(tr(label), std::move(value));
   };
-  addMeta(Str::LblType, rec->type);
-  addMeta(Str::LblSource, rec->source.id + "/" + rec->source.kind);
-  formatTs(rec->first_seen, buf, sizeof(buf));
-  addMeta(Str::LblFirstSeen, buf);
-  formatTs(rec->last_seen, buf, sizeof(buf));
-  addMeta(Str::LblLastSeen, buf);
-  snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(rec->occurrences));
-  addMeta(Str::LblOccurrences, buf);
-  if (rec->expires_at != 0) {
-    formatTs(rec->expires_at, buf, sizeof(buf));
-    addMeta(Str::LblExpires, buf);
-  } else {
-    addMeta(Str::LblExpires, tr(Str::None));
-  }
-  addMeta(Str::LblAckBy, rec->ack_by.empty() ? tr(Str::Never) : rec->ack_by);
-
-  if (rec->fields.type() == alert_core::JsonValue::Type::Object) {
-    for (const auto& kv : rec->fields.objectItems()) {
-      if (m.fields.size() >= 4) break;
-      std::string key = kv.first;
-      std::string val = kv.second.scalarText();
-      sanitizeClamped(key, 32);
-      sanitizeClamped(val, 64);
-      m.fields.emplace_back(key, val);
+  if (rec != nullptr) {
+    addMeta(Str::LblSource, rec->source.id.empty() ? rec->source.kind : rec->source.id);
+    formatTs(rec->first_seen, buf, sizeof(buf));
+    addMeta(Str::LblFirstSeen, buf);
+    formatTs(rec->last_seen, buf, sizeof(buf));
+    addMeta(Str::LblLastSeen, buf);
+    snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(rec->occurrences));
+    addMeta(Str::LblOccurrences, buf);
+    if (rec->expires_at != 0) {
+      formatTs(rec->expires_at, buf, sizeof(buf));
+      addMeta(Str::LblExpires, buf);
+    } else {
+      addMeta(Str::LblExpires, tr(Str::None));
     }
+    addMeta(Str::LblAckBy, rec->ack_by.empty() ? tr(Str::Never) : rec->ack_by);
+    if (rec->fields.type() == alert_core::JsonValue::Type::Object) {
+      for (const auto& kv : rec->fields.objectItems()) {
+        if (m.fields.size() >= 4) break;
+        std::string key = kv.first;
+        std::string val = kv.second.scalarText();
+        sanitizeClamped(key, 32);
+        sanitizeClamped(val, 64);
+        m.fields.emplace_back(key, val);
+      }
+    }
+  } else {
+    addMeta(Str::LblSource, item->source_id);
+    addMeta(Str::LblRule, item->rule_id);
+    formatTs(item->timestamp_ms > 0 ? static_cast<uint64_t>(item->timestamp_ms / 1000) : 0, buf,
+             sizeof(buf));
+    addMeta(Str::LblTime, buf);
+    formatAge(item->timestamp_ms > 0 ? static_cast<uint64_t>(item->timestamp_ms / 1000) : 0, buf,
+              sizeof(buf));
+    addMeta(Str::LblLastSeen, buf);
   }
 }
 
-void PanelApp::buildS3(S3Model& m) {
+size_t PanelApp::statusPageCount() const {
+  const size_t per = geom::kStatusRowsPerPage;
+  return std::max<size_t>(1, (statusRows_ + per - 1) / per);
+}
+
+void PanelApp::buildStatus(KvModel& m) {
   const eego::net::NetStatusSnapshot& ns = netStatus();
   m.configValid = admin::ConfigStore::instance().valid();
-
-  auto add = [&m](const std::string& label, const std::string& value) {
-    m.rows.emplace_back(label, value);
+  std::vector<std::pair<std::string, std::string>> rows;
+  auto add = [&rows](const std::string& label, std::string value) {
+    sanitizeClamped(value, 80);
+    if (value.empty()) value = "-";
+    rows.emplace_back(label, std::move(value));
   };
-  auto addSection = [&m](Str label) { m.rows.emplace_back(tr(label), ""); };
+  auto section = [&rows](Str label) { rows.emplace_back(tr(label), ""); };
+  char buf[128];
 
-  char buf[96];
-  // 模式/电源
-  const char* pmode = tr(Str::ModeAuto);
-  if (settings_.power_mode == PowerMode::Mains) pmode = tr(Str::ModeMains);
-  if (settings_.power_mode == PowerMode::Battery) pmode = tr(Str::ModeBattery);
-  snprintf(buf, sizeof(buf), "%s -> %s%s", pmode, mains_ ? tr(Str::ModeMains) : tr(Str::ModeBattery),
-           (charging_ || batCache_.charging) ? tr(Str::Charging) : "");
-  add(tr(Str::SetPowerMode), buf);
-  snprintf(buf, sizeof(buf), tr(Str::BatteryFmt), static_cast<unsigned>(batCache_.percent),
-           static_cast<unsigned>(batCache_.millivolts));
-  add(tr(Str::SysStatus), buf);
-
-  // WiFi
-  const char* wst = tr(Str::WifiDisconnected);
-  switch (ns.wifi.state) {
-    case 1: wst = tr(Str::WifiConnecting); break;
-    case 2: wst = tr(Str::WifiConnected); break;
-    case 3: wst = tr(Str::WifiFailed); break;
-    case 4: wst = tr(Str::WifiOffline); break;
-    default: break;
+  // 网络
+  section(Str::SecNetwork);
+  std::string wifi = wifiStateText(ns.wifi.state);
+  if (!ns.wifi.ssid.empty()) wifi += " · " + ns.wifi.ssid;
+  add(tr(Str::LblWifi), wifi);
+  if (ns.wifi.state == 2) {
+    snprintf(buf, sizeof(buf), "%d dBm", ns.wifi.rssi);
+    add(tr(Str::LblSignal), buf);
   }
-  add("WiFi", wst);
-  if (!ns.wifi.ssid.empty()) {
-    snprintf(buf, sizeof(buf), "%s  RSSI %d  %s", ns.wifi.ssid.c_str(), ns.wifi.rssi,
-             ns.wifi.ip.c_str());
-    add("  ", buf);
+  if (!ns.wifi.ip.empty()) {
+    add(tr(Str::LblAddress), "http://" + ns.wifi.ip + "/");
   }
-
-  // 统一时间源（M21）：如实显示来源与可用性，不可用时不拿 0 时间冒充
+  if (admin::ProvisionPortal::instance().apActive()) {
+    snprintf(buf, sizeof(buf), "%s · %s", admin::ProvisionPortal::kApSsid,
+             admin::ProvisionPortal::kApUrl);
+    add(tr(Str::ApFallback), buf);
+  }
   if (ns.time.valid) {
     if (ns.time.sntp_synced) {
       char sync_at[40];
@@ -2632,76 +2716,126 @@ void PanelApp::buildS3(S3Model& m) {
   }
   add(tr(Str::TimeLabel), buf);
 
-  // 源健康
-  addSection(Str::Sources);
-  if (ns.sources.empty()) {
-    add("  ", tr(Str::NoSources));
+  // 设备
+  section(Str::SecDevice);
+  const bool charging = charging_ || batCache_.charging;
+  if (batCache_.millivolts > 0) {
+    snprintf(buf, sizeof(buf), "%u%% · %umV%s%s", static_cast<unsigned>(batCache_.percent),
+             static_cast<unsigned>(batCache_.millivolts), charging ? " · " : "",
+             charging ? tr(Str::Charging) : "");
   } else {
-    size_t shown = 0;
-    for (const auto& s : ns.sources) {
-      if (shown >= 4) {
-        snprintf(buf, sizeof(buf), "+%u", static_cast<unsigned>(ns.sources.size() - shown));
-        add("  ", buf);
-        break;
-      }
-      char age[24];
-      formatAge(s.last_success_at, age, sizeof(age));
-      snprintf(buf, sizeof(buf), "%s · %s %s · FAIL %u",
-               s.consecutive_failures == 0 ? tr(Str::Ok) : tr(Str::Fail), tr(Str::LastOk),
-               age, static_cast<unsigned>(s.consecutive_failures));
-      add(s.id.substr(0, 14), buf);
-      shown++;
-    }
+    snprintf(buf, sizeof(buf), "%s", tr(Str::ModeMains));
   }
-
-  // 存储统计
-  if (snapshot_ != nullptr) {
-    size_t active = 0, acked = 0, term = 0, muted = 0;
-    for (const auto& r : snapshot_->records) {
-      if (r.muted) {
-        muted++;
-        continue;
+  add(tr(Str::LblBattery), buf);
+  const char* pmode = tr(Str::ModeAuto);
+  if (settings_.power_mode == PowerMode::Mains) pmode = tr(Str::ModeMains);
+  if (settings_.power_mode == PowerMode::Battery) pmode = tr(Str::ModeBattery);
+  snprintf(buf, sizeof(buf), "%s → %s", pmode, mains_ ? tr(Str::ModeMains) : tr(Str::ModeBattery));
+  add(tr(Str::LblPower), buf);
+  if (eego::SdCard::instance().ready()) {
+    std::string storage = tr(Str::SdReady);
+    if (ns.alert_db.attached) {
+      char size[24];
+      formatBytes(ns.alert_db.file_bytes, size, sizeof(size));
+      storage += std::string(" · alerts.db ") + size;
+      if (ns.alert_db.io_failures > 0) {
+        snprintf(buf, sizeof(buf), " · IO!%u", static_cast<unsigned>(ns.alert_db.io_failures));
+        storage += buf;
       }
-      if (r.state == alert_core::AlertState::Active) active++;
-      else if (r.state == alert_core::AlertState::Acked) acked++;
-      else term++;
     }
-    snprintf(buf, sizeof(buf), "%s %u · %s %u · T %u · %s %u", tr(Str::StateActive),
-             static_cast<unsigned>(active), tr(Str::StateAcked), static_cast<unsigned>(acked),
-             static_cast<unsigned>(term), tr(Str::MutedCount), static_cast<unsigned>(muted));
-    addSection(Str::StoreStats);
-    add("  ", buf);
+    add(tr(Str::LblStorage), storage);
+  } else {
+    add(tr(Str::LblStorage), tr(Str::SdMissing));
   }
-
-  // 系统
-  addSection(Str::SysStatus);
-  std::string sys;
-  sys += deps_.boot.sdReady ? "SD OK " : "SD FAIL ";
-  sys += deps_.boot.rtcReady ? "RTC OK " : "RTC FAIL ";
-  sys += deps_.boot.touchReady ? "TP OK " : "TP FAIL ";
-  sys += deps_.boot.buttonsReady ? "KEY OK" : "KEY FAIL";
-  add("  ", sys);
-  const int64_t up = nowMs() / 1000;
-  snprintf(buf, sizeof(buf), "%llds", static_cast<long long>(up));
-  add(tr(Str::Uptime), buf);
+  std::string hw;
+  hw += deps_.boot.rtcReady ? "RTC OK" : "RTC FAIL";
+  hw += deps_.boot.touchReady ? " · TP OK" : " · TP FAIL";
+  hw += deps_.boot.buttonsReady ? " · KEY OK" : " · KEY FAIL";
+  hw += eego::FrontlightManager::instance().frontlightAvailable() ? " · FL" : "";
+  add(tr(Str::LblHardware), hw);
   const esp_app_desc_t* d = esp_app_get_description();
   snprintf(buf, sizeof(buf), "%s %s", d->project_name, d->version);
   add(tr(Str::Version), buf);
+  formatUptime(nowMs() / 1000, buf, sizeof(buf));
+  add(tr(Str::Uptime), buf);
+
+  // 数据源（dashboard 是唯一取数模型）
+  section(Str::Sources);
+  if (!dashboard_.available()) {
+    add(tr(Str::LblDashboard), tr(Str::NoDashboard));
+  } else {
+    std::string title = dashboard_.title();
+    add(tr(Str::LblDashboard), title.empty() ? std::string("-") : title);
+    const std::vector<DashboardSourceInfo> sources = dashboard_.sources();
+    if (sources.empty()) add("  ", tr(Str::NoSources));
+    for (const DashboardSourceInfo& src : sources) {
+      std::string value;
+      char age[24];
+      formatAge(src.last_success_ms > 0 ? static_cast<uint64_t>(src.last_success_ms / 1000) : 0,
+                age, sizeof(age));
+      if (!src.enabled) {
+        value = tr(Str::SourceDisabled);
+      } else if (src.consecutive_failures > 0 || src.offline) {
+        snprintf(buf, sizeof(buf), "%s ×%u", tr(Str::Fail),
+                 static_cast<unsigned>(src.consecutive_failures));
+        value = buf;
+        if (src.last_http_status > 0) value += " · HTTP " + std::to_string(src.last_http_status);
+        if (!src.error.empty()) value += " · " + src.error;
+        value += std::string(" · ") + tr(Str::LastOk) + " " + age;
+      } else {
+        value = src.stale && src.has_data ? tr(Str::SourceStale) : tr(Str::SourceOk);
+        value += std::string(" · ") + tr(Str::LastOk) + " " + age;
+      }
+      std::string label = src.id;
+      sanitizeClamped(label, 14);
+      add(label, value);
+    }
+  }
+
+  // 外部告警（POST /alerts 推送）
+  section(Str::SecAlerts);
+  size_t active = 0, acked = 0, muted = 0;
+  if (snapshot_ != nullptr) {
+    for (const auto& r : snapshot_->records) {
+      if (r.muted) {
+        muted++;
+      } else if (r.state == alert_core::AlertState::Active) {
+        active++;
+      } else if (r.state == alert_core::AlertState::Acked) {
+        acked++;
+      }
+    }
+  }
+  snprintf(buf, sizeof(buf), tr(Str::AlertStoreFmt), static_cast<unsigned>(active),
+           static_cast<unsigned>(acked), static_cast<unsigned>(muted));
+  add("  ", buf);
+
+  statusRows_ = rows.size();
+  const size_t pages = statusPageCount();
+  if (statusPage_ >= pages) statusPage_ = pages - 1;
+  const size_t per = geom::kStatusRowsPerPage;
+  const size_t begin = statusPage_ * per;
+  const size_t end = std::min(begin + per, rows.size());
+  for (size_t i = begin; i < end; ++i) m.rows.push_back(std::move(rows[i]));
+  if (pages > 1) {
+    snprintf(m.pageText, sizeof(m.pageText), "%u/%u", static_cast<unsigned>(statusPage_ + 1),
+             static_cast<unsigned>(pages));
+  }
 }
 
-void PanelApp::buildHelp(S3Model& m) {
+void PanelApp::buildHelp(KvModel& m) {
   auto add = [&m](Str label, Str value) {
     m.rows.emplace_back(tr(label), tr(value));
   };
+  add(Str::HelpUpDownShort, Str::HelpScreen);
+  add(Str::HelpUpDownLong, Str::HelpFocus);
   add(Str::HelpPower, Str::HelpActivateBack);
   add(Str::HelpFrontHome, Str::HelpHome);
-  add(Str::HelpFrontGestures, Str::HelpDefaultHelpStatus);
-  add(Str::HelpUpDown, Str::HelpFocusPage);
+  add(Str::HelpFrontGestures, Str::HelpSettingsStatus);
   add(Str::HelpSwipe, Str::HelpPage);
-  add(Str::HelpChord, Str::HelpCustomOnly);
+  add(Str::HelpTapAlert, Str::HelpOpenDetail);
   add(Str::HelpDanger, Str::HelpFreshHold);
-  add(Str::HelpCustomBindings, Str::HelpOverrideOrder);
-  add(Str::HelpLocalReset, Str::HelpResetHere);
+  add(Str::HelpCustomBindings, Str::HelpWebBindings);
 }
 
 void PanelApp::buildS4(S4Model& m) {

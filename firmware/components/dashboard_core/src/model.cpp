@@ -325,12 +325,6 @@ bool interpolateVariables(std::string_view input, const VariableValues& values,
   return true;
 }
 
-const char* unitDimension(std::string_view unit) {
-  if (isTemperature(unit)) return "temperature";
-  const UnitInfo* info = findUnit(unit);
-  return info == nullptr ? nullptr : info->dimension;
-}
-
 bool convertUnit(double value, std::string_view from, std::string_view to, double& out) {
   if (!std::isfinite(value)) return false;
   if (from == to) {

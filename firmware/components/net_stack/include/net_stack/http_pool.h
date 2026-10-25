@@ -99,8 +99,6 @@ class HttpPool {
   // 闲置会话关闭；net_task 每次循环调用。
   void housekeeping(int64_t now_ms);
 
-  // 该 host 是否处于冷却/退避期（诊断用）
-  bool hostThrottled(const std::string& url) const;
   size_t sessionCount() const;
 
  private:

@@ -10,7 +10,8 @@
 //     这里落地）；
 //   * 快照发布方（注入 SnapshotPublisher 后，任何 store 变更——摄入/动作/过期/
 //     加载/静音规则——都由本任务 buildSnapshot + publish；UI/API 无锁 acquire 读）；
-//   * 轮询调度器（每源 interval 或 DeviceSettings 全局覆盖，指数退避）；
+//   * 出站 HTTP 执行方（dashboard data_pipeline 经 NetStackTransport 提交）；
+//   * alerts.db 维护方（启动后按节拍检查大小/死行比例并压缩）；
 //   * WiFi 重连状态机（指数退避 30s→60s→120s…封顶 5min，M13 F3）；
 //   * 时间同步驱动（M21：WiFi 连上触发 SNTP，同步结果由本任务回写 RTC）。
 //
@@ -18,10 +19,14 @@
 //   * 配置/查询/摄入/告警动作 → 命令队列（线程安全，调用方阻塞等结果，有超时）；
 //   * WiFi/源状态变化 → NetEvent 回调（net_task 上下文，必须短平快）。
 //
+// 取数模型：dashboard 数据源（data_pipeline）是唯一的拉取路径；本组件不再
+// 持有任何告警源轮询器。外部告警只经 POST /alerts 推送（pushIngest）、BLE
+// observer 与串口注入（ingestExternal）进入 AlertStore，再由 DashboardRuntime
+// 转为 dashboard 事件。
+//
 // 常供电与电池唤醒同一 API：
-//   * 常供电：start 后自动轮询 + WiFi 常驻；
-//   * 电池唤醒：reconnectNow() → pollNow("") → waitIdle() → 读结果 → powerOff。
-//     轮询/缓存/清除语义完全一致（cache/<source>.json 离线缓存两模式共用）。
+//   * 常供电：start 后 WiFi 常驻（modem-sleep），推送摄入即时可达；
+//   * 电池唤醒：reconnectNow() → dashboard 拉取 → waitIdle() → powerOff。
 
 #include <atomic>
 #include <cstdint>
@@ -30,16 +35,14 @@
 #include <string>
 #include <vector>
 
+#include "alert_core/persistence.h"
 #include "alert_core/snapshot.h"
 #include "alert_core/store.h"
 #include "alert_core/type_registry.h"
 #include "esp_err.h"
 #include "net_stack/alert_actions.h"
 #include "net_stack/http_pool.h"
-#include "net_stack/source_adapter.h"
-#include "net_stack/source_cache.h"
-#include "net_stack/source_config.h"
-#include "net_stack/source_health.h"
+#include "net_stack/net_status.h"
 #include "net_stack/time_sync.h"
 #include "net_stack/wifi_manager.h"
 
@@ -49,13 +52,11 @@ enum class NetEventType : uint8_t {
   Started = 0,
   Stopped,
   WifiStateChanged,
-  SourceHealthChanged,  // 源在 成功↔失败 之间跃迁（状态页可见性，M11 验收 2）
 };
 
 struct NetEvent {
   NetEventType type = NetEventType::Started;
-  int wifi_state = 0;     // WifiState 枚举值
-  std::string source_id;  // SourceHealthChanged 时有效
+  int wifi_state = 0;  // WifiState 枚举值
 };
 
 using NetEventCallback = void (*)(const NetEvent& ev, void* ctx);
@@ -63,11 +64,9 @@ using TimeFn = std::function<uint64_t()>;  // unix 秒（默认 time(nullptr)）
 using TimeValidFn = std::function<bool()>;  // 统一时间源是否可信（M21）
 
 struct NetStackConfig {
-  std::string cache_dir = "/sdcard/alertpanel/cache";
   PoolConfig pool;                          // ≤4 会话、闲置 30s、PSRAM 64K→512K
   bool wifi_auto_reconnect = true;          // 断线指数退避重连
   uint32_t wifi_reconnect_backoff_max_ms = 300000;  // M13 F3：30s 起翻倍封顶 5min
-  uint32_t source_backoff_max_ms = 1800000;         // 源级退避封顶（interval<<n）
   uint8_t task_priority = 5;                // M12 任务表：CPU0/5/16KB
   uint16_t task_stack_bytes = 16384;
   int8_t task_core = 0;                     // M12：net_task 固定 CPU0
@@ -78,6 +77,11 @@ struct NetStackConfig {
   alert_core::SnapshotPublisher* snapshot_publisher = nullptr;
   // expire 过期巡检节拍（秒级 TTL 精度足够；0 = 关闭巡检）
   uint32_t alert_expire_interval_ms = 15000;
+  // alerts.db 压缩检查节拍（0 = 关闭）与策略（大小阈值 / 死行比例）。
+  uint32_t alert_db_check_interval_ms = 600000;
+  // 已 attach 到 store 的 alerts.db（仅用于状态上报文件大小；可空 = 无 SD）。
+  alert_core::AlertDb* alert_db = nullptr;
+  alert_core::AlertStore::CompactPolicy alert_db_policy;
   // SNTP 服务器（空 = cn.pool.ntp.org 优先，按 CONFIG_LWIP_SNTP_MAX_SERVERS
   // 截断）；WiFi 连上即（重）同步。
   std::vector<std::string> sntp_servers;
@@ -105,14 +109,6 @@ class NetStack {
 
   bool running() const { return running_; }
 
-  // ---- 源管理（线程安全；net_task 执行，调用方阻塞至完成或超时）----
-  bool addSource(const SourceConfig& cfg, std::string& err, uint32_t wait_ms = 5000);
-  bool removeSource(const std::string& id, uint32_t wait_ms = 5000);
-  bool setSourceEnabled(const std::string& id, bool enabled, uint32_t wait_ms = 5000);
-  // 立即轮询（"" = 全部源）。常供电即时刷新与电池唤醒批量拉取同一入口。
-  bool pollNow(const std::string& id = "", uint32_t wait_ms = 5000);
-  // 全局调度覆盖：非零值替换所有源的周期；0 恢复各自 cfg.interval_ms。
-  bool setDataRefreshInterval(uint32_t interval_ms, uint32_t wait_ms = 5000);
   // 电池唤醒：立即重置 WiFi 退避并发起连接（不等待结果）
   bool reconnectNow(uint32_t wait_ms = 1000);
   // BLE wifi_prov 验证新凭据期间暂停自动重连，释放后立即恢复既有调度。
@@ -137,9 +133,6 @@ class NetStack {
   bool clearMuteRules(std::string& err, uint32_t wait_ms = 5000);
   bool queryMuteRules(std::vector<alert_core::MuteRule>& out, uint32_t wait_ms = 1000);
 
-  // ---- 快照发布与 admin 注入点（M12/M17）----
-  // 注入的 publisher（可能 nullptr = 未接线；admin 据此 503，不崩溃）。
-  alert_core::SnapshotPublisher* alertPublisher() const { return cfg_.snapshot_publisher; }
   // 现成 functor，admin 直接注入 setAlertSnapshotSource(fn)：无锁 acquire
   // 当前快照；未接线/从未发布返回 nullptr（admin 渲染空表/503）。
   AlertSnapshotSource alertSnapshotSource();
@@ -151,7 +144,7 @@ class NetStack {
   // 时会发布首帧快照。
   bool republishSnapshot(uint32_t wait_ms = 1000);
 
-  // ---- 通用出站（admin sources/test 等；net_task 执行）----
+  // ---- 通用出站（dashboard data_pipeline / sources/test；net_task 执行）----
   // resp 由调用方持有（move-only）；false = 入队/等待失败。
   bool httpSubmit(const NetRequest& req, NetResponse* resp, uint32_t wait_ms = 10000);
 
@@ -185,7 +178,6 @@ class NetStack {
 
   WifiManager& wifi() { return wifi_; }
   const NetStackConfig& config() const { return cfg_; }
-  SourceCache& cache() { return cache_; }
 
  private:
   NetStack();
@@ -195,11 +187,6 @@ class NetStack {
 
   // 命令类型（命令队列模型；负载为 shared_ptr<void>，net_task 处理完释放）
   enum class CmdType : int {
-    AddSource,
-    RemoveSource,
-    SetEnabled,
-    PollNow,
-    SetDataRefresh,
     ReconnectNow,
     HttpSubmit,
     Ingest,
@@ -218,7 +205,6 @@ class NetStack {
 
   NetStackConfig cfg_;
   WifiManager& wifi_;
-  SourceCache cache_;
   alert_core::AlertStore* store_ = nullptr;
   const alert_core::TypeRegistry* registry_ = nullptr;
   TimeFn time_fn_;

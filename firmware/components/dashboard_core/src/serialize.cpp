@@ -244,7 +244,6 @@ JsonValue dashboardToJson(const Dashboard& dashboard) {
     object.emplace_back("title", string(page.title));
     object.emplace_back("visible", boolean(page.visible));
     object.emplace_back("grid_columns", integer(page.grid_columns));
-    object.emplace_back("row_height", integer(page.row_height));
     JsonValue::Array panels;
     for (const auto& panel : page.panels) panels.push_back(panelToJson(panel));
     object.emplace_back("panels", JsonValue::makeArray(std::move(panels)));

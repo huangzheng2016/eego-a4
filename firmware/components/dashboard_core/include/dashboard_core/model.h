@@ -81,8 +81,7 @@ struct GridRect {
 //    rows [s * kGridRowsPerScreen, (s + 1) * kGridRowsPerScreen).
 //  * A panel is never split across screens. Validation rejects a visible
 //    panel taller than one screen or crossing a screen boundary, and rejects
-//    overlapping visible panels. page.row_height is a legacy hint and does
-//    not affect device geometry.
+//    overlapping visible panels.
 inline constexpr uint32_t kGridRowsPerScreen = 8;
 
 // Screen index of a panel. A panel that would cross a screen boundary is
@@ -284,7 +283,6 @@ struct Page {
   std::string title;
   bool visible = true;
   uint32_t grid_columns = 24;
-  uint32_t row_height = 16;
   std::vector<PanelSpec> panels;
 };
 
@@ -320,7 +318,6 @@ bool interpolateVariables(std::string_view input, const VariableValues& values,
 // ratio (ratio/percent), bytes (B/KB/MB/GB/TB/KiB/MiB/GiB/TiB), time
 // (ms/s/min/h/d), and distance (mm/cm/m/km). Units are case-sensitive.
 bool convertUnit(double value, std::string_view from, std::string_view to, double& out);
-const char* unitDimension(std::string_view unit);
 
 // Time expressions: now, now-15m, -1h, or a duration such as 90s.
 bool parseTimeExpression(std::string_view text, int64_t now_ms, int64_t& out);

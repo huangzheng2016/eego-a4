@@ -69,7 +69,20 @@ Uc8279cDisplay::~Uc8279cDisplay() {
 
 // ── 生命周期 ────────────────────────────────────────────────────────────────
 
+esp_err_t Uc8279cDisplay::beginOffscreen() {
+    // 离屏实例：只分配 PSRAM framebuffer，不碰 SPI/GPIO/控制器（与实屏实例共存）。
+    if (spi_ != nullptr) return ESP_ERR_INVALID_STATE;  // 已是实屏实例
+    offscreen_ = true;
+    if (!fb_) {
+        fb_ = static_cast<uint8_t*>(heap_caps_malloc(FRAMEBUFFER_SIZE, MALLOC_CAP_SPIRAM));
+        if (!fb_) return ESP_ERR_NO_MEM;
+    }
+    clear();
+    return ESP_OK;
+}
+
 esp_err_t Uc8279cDisplay::begin() {
+    if (offscreen_) return ESP_ERR_INVALID_STATE;
     // 诊断 PSRAM
     size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     size_t psram_total = esp_psram_get_size();
@@ -125,6 +138,7 @@ void Uc8279cDisplay::end() {
         fbGrayLsb_ = nullptr;
     }
     planesActive_ = false;
+    if (offscreen_) return;  // 离屏实例从未占用 SPI 总线：绝不能释放实屏的总线
     if (spi_) {
         spi_bus_remove_device(spi_);
         spi_ = nullptr;
@@ -347,6 +361,7 @@ bool Uc8279cDisplay::refresh(bool turnOff) {
 }
 
 void Uc8279cDisplay::display(RefreshMode mode, bool turnOff) {
+    if (offscreen_) return;  // 离屏实例没有面板
     // 仅在控制器仍忙时等待（阻塞刷新返回时已空闲，避免每帧白等 settle 窗口）
     waitIfBusy("pre-wait");
     const bool off = turnOff || autoPowerOff_;
@@ -408,12 +423,14 @@ void Uc8279cDisplay::displayBw(bool full, bool turnOff) {
 }
 
 void Uc8279cDisplay::waitRefreshComplete() {
+    if (offscreen_) return;
     waitIfBusy("refresh");
 }
 
 // ── 四级灰阶刷新 ─────────────────────────────────────────────────────────────
 
 void Uc8279cDisplay::displayGray(bool turnOff) {
+    if (offscreen_) return;
     waitIfBusy("gray-pre-wait");
     fullRequested_ = false;
     const bool off = turnOff || autoPowerOff_;
@@ -456,6 +473,7 @@ void Uc8279cDisplay::displayGrayFrame(bool turnOff) {
 // ── 深睡眠 ───────────────────────────────────────────────────────────────────
 
 void Uc8279cDisplay::deepSleep() {
+    if (offscreen_) return;
     fastRefreshesSinceFull_ = 0;
     if (screenOn_) {
         sendCmd(CMD_POWER_OFF);
@@ -669,6 +687,20 @@ void Uc8279cDisplay::drawPixelGray(int16_t x, int16_t y, uint8_t gray) {
         if (!planesActive_) return;
     }
     setGrayPlanes(byteIdx, bit, level);
+}
+
+uint8_t Uc8279cDisplay::grayLevel(int16_t x, int16_t y) const {
+    if (!fb_) return 3;
+    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return 3;
+    const uint16_t nativeX = static_cast<uint16_t>(y);
+    const uint16_t nativeY = static_cast<uint16_t>(PANEL_HEIGHT - 1 - x);
+    const uint32_t byteIdx = static_cast<uint32_t>(nativeY) * PANEL_ROW_BYTES + (nativeX >> 3);
+    const uint8_t bit = 7 - (nativeX & 0x7);
+    if (planesActive_ && fbGrayMsb_ && fbGrayLsb_) {
+        return static_cast<uint8_t>((((fbGrayMsb_[byteIdx] >> bit) & 1) << 1) |
+                                    ((fbGrayLsb_[byteIdx] >> bit) & 1));
+    }
+    return ((fb_[byteIdx] >> bit) & 1) ? 3 : 0;
 }
 
 void Uc8279cDisplay::clearGray() {

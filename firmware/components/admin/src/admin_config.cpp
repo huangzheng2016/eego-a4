@@ -2,6 +2,7 @@
 // 配置存储实现 —— 见 include/admin/admin_config.h。
 #include "admin/admin_config.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <cstdio>
@@ -10,19 +11,18 @@
 #include <unistd.h>
 
 #include "admin/admin_log.h"
+#include "atomic_file.h"
 #include "alert_core/types.h"
 #include "device_settings/device_settings.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "net_stack/credentials.h"
-#include "source_secret_migration.h"
 
 namespace eego::admin {
 
 namespace {
 
 constexpr size_t kMaxConfigBodyBytes = 4 * 1024;  // M13：config body ≤4KB（httpd 强制）
-constexpr size_t kMaxSources = 16;
 constexpr size_t kMaxOverrides = 64;
 constexpr size_t kMaxWifiList = 4;
 constexpr size_t kMaxMuteRules = 32;              // M21：静音规则上限
@@ -121,7 +121,7 @@ alert_core::JsonValue maskDom(const alert_core::JsonValue& v, const std::string&
         if (lower == "header_secret_refs" && kv.second.type() == JsonValue::Type::Object) {
           out.emplace_back(kv.first, cloneDom(kv.second));
         } else if (lower == "headers" && kv.second.type() == JsonValue::Type::Object) {
-          // sources.headers：按头名敏感程度掩码值
+          // headers（遗留文件内容保留时同样掩码）：按头名敏感程度掩码值
           JsonValue::Object hdrs;
           hdrs.reserve(kv.second.objectItems().size());
           for (const auto& h : kv.second.objectItems()) {
@@ -253,12 +253,7 @@ void validateAdminSection(const alert_core::JsonValue& admin, FieldErrors& errs,
         continue;
       }
       for (const auto& nkv : v.objectItems()) {
-        if (nkv.first == "brightness" || nkv.first == "warmth") {
-          if (nkv.second.type() != JsonValue::Type::Int ||
-              nkv.second.intValue() < 0 || nkv.second.intValue() > 100) {
-            addErr(errs, "admin.display." + nkv.first, "must be an integer in [0, 100]");
-          }
-        } else if (nkv.first == "font") {
+        if (nkv.first == "font") {
           if (nkv.second.type() != JsonValue::Type::String ||
               !validFontPath(nkv.second.stringValue())) {
             addErr(errs, "admin.display.font",
@@ -291,39 +286,6 @@ void validateAdminSection(const alert_core::JsonValue& admin, FieldErrors& errs,
     } else {
       if (strict_unknown) addErr(errs, "admin." + k, "unknown field");
     }
-  }
-}
-
-void validateSourcesSection(const alert_core::JsonValue& arr, FieldErrors& errs) {
-  using alert_core::JsonValue;
-  if (arr.type() != JsonValue::Type::Array) {
-    addErr(errs, "sources", "must be an array");
-    return;
-  }
-  if (arr.arrayItems().size() > kMaxSources) {
-    addErr(errs, "sources", "too many sources (max 16)");
-    return;
-  }
-  std::vector<std::string> ids;
-  for (size_t i = 0; i < arr.arrayItems().size(); i++) {
-    net::SourceConfig cfg;
-    alert_core::ValidationError verr;
-    char prefix[32];
-    snprintf(prefix, sizeof(prefix), "sources[%zu].", i);
-    if (!net::SourceConfig::fromJson(arr.arrayItems()[i], cfg, verr)) {
-      addErr(errs, prefix + verr.field, verr.message);
-      continue;
-    }
-    const std::string sem = cfg.validate();
-    if (!sem.empty()) {
-      addErr(errs, std::string(prefix) + "url", sem);
-    }
-    for (const auto& id : ids) {
-      if (id == cfg.id) {
-        addErr(errs, std::string(prefix) + "id", "duplicate source id");
-      }
-    }
-    ids.push_back(cfg.id);
   }
 }
 
@@ -530,14 +492,6 @@ AdminDomainConfig parseAdminView(const alert_core::JsonValue& dom) {
   }
   v = objGet(*admin, "display");
   if (v && v->type() == JsonValue::Type::Object) {
-    if (const JsonValue* b = objGet(*v, "brightness")) {
-      const int64_t t = b->intValue(out.brightness);
-      if (t >= 0 && t <= 100) out.brightness = static_cast<int>(t);
-    }
-    if (const JsonValue* b = objGet(*v, "warmth")) {
-      const int64_t t = b->intValue(out.warmth);
-      if (t >= 0 && t <= 100) out.warmth = static_cast<int>(t);
-    }
     if (const JsonValue* b = objGet(*v, "font")) {
       if (b->type() == JsonValue::Type::String && validFontPath(b->stringValue())) {
         out.font = b->stringValue();
@@ -569,8 +523,6 @@ alert_core::JsonValue makeDefaultDom() {
                         {"login_lock_threshold", JsonValue::makeInt(5)},
                     })},
       {"display", JsonValue::makeObject({
-                       {"brightness", JsonValue::makeInt(0)},
-                       {"warmth", JsonValue::makeInt(50)},
                        {"font", JsonValue::makeString("")},
                    })},
       {"logging", JsonValue::makeObject({
@@ -581,13 +533,12 @@ alert_core::JsonValue makeDefaultDom() {
   return JsonValue::makeObject({
       {"schema_version", JsonValue::makeInt(kSchemaVersion)},
       {"admin", std::move(admin)},
-      {"sources", JsonValue::makeArray({})},
       {"alert_type_overrides", JsonValue::makeObject({})},
       {"mute_rules", JsonValue::makeArray({})},
   });
 }
 
-// 启动校验：schema_version/admin/sources/alert_type_overrides 形状与取值。
+// 启动校验：schema_version/admin/alert_type_overrides 形状与取值。
 // 未知顶层键容忍（保留策略）；admin 内未知键容忍（忽略但保留）。
 bool validateLoadedDom(const alert_core::JsonValue& dom, FieldErrors& errs) {
   using alert_core::JsonValue;
@@ -634,11 +585,6 @@ bool validateLoadedDom(const alert_core::JsonValue& dom, FieldErrors& errs) {
       errs.push_back(e);
     }
   }
-  if (const JsonValue* src = objGet(dom, "sources")) {
-    const size_t before = errs.size();
-    validateSourcesSection(*src, errs);
-    if (errs.size() != before) return false;
-  }
   if (const JsonValue* ov = objGet(dom, "alert_type_overrides")) {
     const size_t before = errs.size();
     validateOverridesSection(*ov, errs);
@@ -652,83 +598,17 @@ bool validateLoadedDom(const alert_core::JsonValue& dom, FieldErrors& errs) {
   return errs.empty();
 }
 
-bool migrateLegacySourceSecrets(alert_core::JsonValue& dom,
-                                internal::SourceSecretMigration& migration, bool& changed,
-                                std::string& error) {
-  using alert_core::JsonValue;
-  JsonValue* sources = const_cast<JsonValue*>(objGet(dom, "sources"));
-  if (sources == nullptr || sources->type() != JsonValue::Type::Array) return true;
-  auto& items = const_cast<JsonValue::Array&>(sources->arrayItems());
-  for (size_t i = 0; i < items.size(); ++i) {
-    JsonValue& source = items[i];
-    if (source.type() != JsonValue::Type::Object) continue;
-    JsonValue* headers = const_cast<JsonValue*>(objGet(source, "headers"));
-    if (headers == nullptr || headers->type() != JsonValue::Type::Object) continue;
-    JsonValue* existing_refs = const_cast<JsonValue*>(objGet(source, "header_secret_refs"));
-    if (existing_refs != nullptr && existing_refs->type() != JsonValue::Type::Object) {
-      error = "legacy header_secret_refs must be an object";
-      return false;
-    }
-    JsonValue::Object plain;
-    JsonValue::Object refs;
-    if (existing_refs != nullptr) refs = existing_refs->objectItems();
-    const JsonValue* id_value = objGet(source, "id");
-    const std::string id = id_value != nullptr && id_value->type() == JsonValue::Type::String
-                               ? id_value->stringValue()
-                               : std::to_string(i);
-    for (const auto& header : headers->objectItems()) {
-      if (header.second.type() != JsonValue::Type::String) {
-        plain.emplace_back(header.first, header.second);
-        continue;
-      }
-      std::string lowered = header.first;
-      for (char& c : lowered) {
-        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-      }
-      const bool authorization = lowered == "authorization";
-      if (!authorization && !net::CredentialStore::sensitiveHeaderName(header.first)) {
-        plain.emplace_back(header.first, header.second);
-        continue;
-      }
-      if (existing_refs != nullptr && existing_refs->find(header.first) != nullptr) {
-        error = "legacy plain and referenced secret headers are ambiguous";
-        return false;
-      }
-      std::string secret = header.second.stringValue();
-      if (authorization) {
-        const JsonValue* existing_auth = objGet(source, "auth_token_ref");
-        if (existing_auth != nullptr &&
-            (existing_auth->type() != JsonValue::Type::String ||
-             !existing_auth->stringValue().empty())) {
-          net::CredentialStore::secureErase(secret);
-          error = "legacy Authorization conflicts with auth_token_ref";
-          return false;
-        }
-        std::string scheme = secret.substr(0, 7);
-        for (char& c : scheme) {
-          if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-        }
-        if (secret.size() < 8 || scheme != "bearer ") {
-          net::CredentialStore::secureErase(secret);
-          error = "legacy Authorization must use Bearer; re-enter it via credentials API";
-          return false;
-        }
-        secret = secret.substr(7);
-      }
-      const std::string ref = migration.add("legacy/" + id, header.first, secret, error);
-      net::CredentialStore::secureErase(secret);
-      if (ref.empty()) return false;
-      if (authorization) {
-        objSet(source, "auth_token_ref", JsonValue::makeString(ref));
-      } else {
-        refs.emplace_back(header.first, JsonValue::makeString(ref));
-      }
-      changed = true;
-    }
-    objSet(source, "headers", JsonValue::makeObject(std::move(plain)));
-    if (!refs.empty()) objSet(source, "header_secret_refs", JsonValue::makeObject(std::move(refs)));
-  }
-  return true;
+// Top-level keys written by older firmware that must not linger in config.json.
+// `sources` (pre-dashboard data sources) could carry plaintext HTTP headers or
+// tokens; data sources now live in the dashboard bundle with secrets in NVS.
+bool dropLegacyTopLevelKeys(alert_core::JsonValue& dom) {
+  if (dom.type() != alert_core::JsonValue::Type::Object) return false;
+  auto& items = mutableItems(dom);
+  const size_t before = items.size();
+  items.erase(std::remove_if(items.begin(), items.end(),
+                             [](const auto& kv) { return kv.first == "sources"; }),
+              items.end());
+  return items.size() != before;
 }
 
 bool atomicConfigWrite(const std::string& path, const std::string& text, bool& replaced) {
@@ -740,18 +620,9 @@ bool atomicConfigWrite(const std::string& path, const std::string& text, bool& r
       // fopen below reports the authoritative error without exposing contents.
     }
   }
-  const std::string tmp = path + ".tmp";
-  bool ok = false;
-  if (FILE* f = fopen(tmp.c_str(), "wb")) {
-    ok = fwrite(text.data(), 1, text.size(), f) == text.size();
-    if (ok) ok = fflush(f) == 0;
-    if (ok) ok = fsync(fileno(f)) == 0;
-    if (fclose(f) != 0) ok = false;
-  }
-  if (ok) {
-    ok = rename(tmp.c_str(), path.c_str()) == 0;
-    replaced = ok;
-  }
+  // FatFS-safe replace (tmp + fsync, target -> .bak, tmp -> target, drop .bak).
+  bool ok = fsutil::atomicWriteFile(path, text);
+  replaced = ok;
   if (ok) {
     std::string back;
     if (FILE* f = fopen(path.c_str(), "rb")) {
@@ -765,20 +636,10 @@ bool atomicConfigWrite(const std::string& path, const std::string& text, bool& r
     }
     ok = ok && back == text;
   }
-  if (!ok && !replaced) remove(tmp.c_str());
   return ok;
 }
 
 }  // namespace
-
-void validateLegacyDisplayCapability(const alert_core::JsonValue& display_patch,
-                                     FieldErrors& errors) {
-  const settings::Snapshot snap = settings::DeviceSettings::instance().snapshot();
-  settings::FieldErrors capability_errors;
-  settings::validateLegacyDisplayCapability(display_patch, snap.values,
-                                            snap.capabilities.frontlight, capability_errors);
-  for (const auto& error : capability_errors) errors.push_back({error.field, error.message});
-}
 
 // ===========================================================================
 // ConfigStore
@@ -799,6 +660,8 @@ esp_err_t ConfigStore::init(const std::string& path) {
   admin_ = AdminDomainConfig{};
   valid_ = true;
 
+  // 上次替换中途断电：只剩 config.json.bak → 恢复（见 atomic_file.h）。
+  if (fsutil::recoverFile(path_)) ADMIN_LOG_WARN("config.json restored from interrupted replace");
   // 读文件
   std::string text;
   bool read_ok = false;
@@ -816,44 +679,39 @@ esp_err_t ConfigStore::init(const std::string& path) {
     FieldErrors errs;
     const bool parse_ok = alert_core::jsonParse(text, parsed, perr);
     net::CredentialStore::secureErase(text);
-    bool migration_failed = false;
     if (parse_ok) {
-      internal::SourceSecretMigration migration;
-      bool migrated = false;
-      bool replaced = false;
-      std::string migration_error;
-      bool migration_ok = migrateLegacySourceSecrets(parsed, migration, migrated, migration_error);
-      if (migration_ok) migration_ok = migration.persist(migration_error);
-      if (migration_ok && migrated) {
-        migration_ok = atomicConfigWrite(path_, parsed.toString(), replaced);
-      }
-      if (!migration_ok) {
-        if (!replaced) migration.rollback();
-        migration_failed = true;
-        valid_ = false;
-        ADMIN_LOG_ERROR("config secret migration failed; configuration not loaded");
-      }
-      migration.finish();
-      if (!migration_failed) {
-        validateLoadedDom(parsed, errs);
-        if (errs.empty()) {
-          dom_ = std::move(parsed);
-          admin_ = parseAdminView(dom_);
-        } else {
-          valid_ = false;
+      validateLoadedDom(parsed, errs);
+      if (errs.empty()) {
+        dom_ = std::move(parsed);
+        admin_ = parseAdminView(dom_);
+        // One-time cleanup: drop the legacy `sources` section (possible
+        // plaintext headers) and rewrite the file atomically so it is gone on
+        // disk too; later boots find nothing to drop, so this logs once.
+        if (dropLegacyTopLevelKeys(dom_)) {
+          std::string cleaned = dom_.toString();
+          bool replaced = false;
+          if (atomicConfigWrite(path_, cleaned, replaced)) {
+            ADMIN_LOG_WARN("config.json: removed legacy top-level 'sources' section");
+          } else {
+            ADMIN_LOG_ERROR("config.json: legacy 'sources' dropped in RAM; rewrite failed");
+          }
+          net::CredentialStore::secureErase(cleaned);
         }
+      } else {
+        valid_ = false;
       }
     } else {
       valid_ = false;
     }
-    if (!valid_ && !migration_failed) {
-      // 坏文件改名 config.bak（M13 F6），加载默认；迁移失败时保留原路径以便明确恢复。
-      const std::string bak = path_ + ".bak";
+    if (!valid_) {
+      // 坏文件改名 config.json.corrupt（M13 F6），加载默认。.bak 保留给
+      // 原子替换的恢复路径，避免下次启动把坏文件当作中断替换恢复回来。
+      const std::string bak = path_ + ".corrupt";
       remove(bak.c_str());
       if (rename(path_.c_str(), bak.c_str()) != 0) {
         ADMIN_LOG_ERROR("config corrupt; backup rename failed (%s)", path_.c_str());
       } else {
-        ADMIN_LOG_ERROR("config corrupt; backed up to config.bak, loading defaults");
+        ADMIN_LOG_ERROR("config corrupt; backed up to config.json.corrupt, loading defaults");
       }
     }
   } else if (!read_ok) {
@@ -919,7 +777,7 @@ bool ConfigStore::validateAndMerge(const std::string& body, alert_core::JsonValu
 
   // 顶层白名单（M13：未知顶层字段拒绝）；文件内未知键保留不动
   for (const auto& kv : patch.objectItems()) {
-    if (kv.first != "schema_version" && kv.first != "admin" && kv.first != "sources" &&
+    if (kv.first != "schema_version" && kv.first != "admin" &&
         kv.first != "alert_type_overrides" && kv.first != "mute_rules") {
       addErr(errs, kv.first, "unknown top-level field");
     }
@@ -931,9 +789,6 @@ bool ConfigStore::validateAndMerge(const std::string& body, alert_core::JsonValu
   }
   if (const JsonValue* admin = objGet(patch, "admin")) {
     validateAdminSection(*admin, errs, current_wifi, true);
-  }
-  if (const JsonValue* src = objGet(patch, "sources")) {
-    validateSourcesSection(*src, errs);
   }
   if (const JsonValue* ov = objGet(patch, "alert_type_overrides")) {
     validateOverridesSection(*ov, errs);
@@ -981,21 +836,6 @@ bool ConfigStore::commit(const alert_core::JsonValue& merged, std::string& err) 
 AdminDomainConfig ConfigStore::admin() const {
   xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex_), portMAX_DELAY);
   const AdminDomainConfig out = admin_;
-  xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
-  return out;
-}
-
-std::vector<net::SourceConfig> ConfigStore::sources() const {
-  std::vector<net::SourceConfig> out;
-  xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex_), portMAX_DELAY);
-  if (const alert_core::JsonValue* src = objGet(dom_, "sources")) {
-    out.reserve(src->arrayItems().size());
-    for (const auto& item : src->arrayItems()) {
-      net::SourceConfig cfg;
-      alert_core::ValidationError verr;
-      if (net::SourceConfig::fromJson(item, cfg, verr)) out.push_back(std::move(cfg));
-    }
-  }
   xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
   return out;
 }
@@ -1048,10 +888,10 @@ bool ConfigStore::setWifiListInDom(
 }
 
 const char* ConfigStore::schemaJson() {
-  // GET /config/schema 静态响应（M13 §3 admin 域 v1 + sources/overrides 引用）。
+  // GET /config/schema 静态响应（M13 §3 admin 域 v1 + overrides/mute_rules）。
   return R"JSON({
   "schema_version": 1,
-  "description": "EEGO A4 alert panel config v1. PUT replaces the top-level sections present in the body. Unknown top-level fields in the body are rejected; unknown fields inside stored sections are preserved. Secrets live only in NVS; this file carries *_ref references.",
+  "description": "EEGO A4 device config v1 (data sources live in the dashboard bundle, not here). PUT replaces the top-level sections present in the body. Unknown top-level fields in the body are rejected; unknown fields inside stored sections are preserved. Secrets live only in NVS; this file carries *_ref references.",
   "top_level": {
     "schema_version": {"type": "int", "const": 1},
     "admin": {
@@ -1064,18 +904,12 @@ const char* ConfigStore::schemaJson() {
           "session_ttl_s": {"type": "int", "range": [300, 86400], "default": 86400},
           "login_lock_threshold": {"type": "int", "range": [3, 10], "default": 5}}},
         "display": {"type": "object", "fields": {
-          "brightness": {"type": "int", "range": [0, 100], "default": 0},
-          "warmth": {"type": "int", "range": [0, 100], "default": 50},
           "font": {"type": "string", "max_len": 128, "note": "absolute path, no '..'; empty = built-in"}}},
         "logging": {"type": "object", "fields": {
           "level": {"type": "string", "enum": ["ERROR", "WARN", "INFO", "DEBUG"], "default": "INFO"},
           "sd_log": {"type": "bool", "default": false}}}
       }
     },
-    "sources": {"type": "array", "max_items": 16,
-      "auth_token_ref": "\"nvs:source/<key>\"; manage via /api/v1/sources/credentials",
-      "headers": "object of non-secret literal values only",
-      "header_secret_refs": "object of header name -> \"nvs:source/<key>\"; Authorization uses auth_token_ref"},
     "alert_type_overrides": {"type": "object", "max_entries": 64,
       "value": {"severity": "critical|warning|info", "ttl_s": "int 0..31622400",
                 "name_zh": "string <=64B", "name_en": "string <=64B", "muted": "bool"}},

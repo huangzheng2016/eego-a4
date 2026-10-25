@@ -24,7 +24,7 @@
 namespace eego::admin {
 
 enum class AdminCommandType : uint8_t {
-  ApplyConfig = 0,  // 校验后的合并 DOM：原子持久化 + 热生效（sources/overrides/admin 域）
+  ApplyConfig = 0,  // 校验后的合并 DOM：原子持久化 + 热生效（admin 域/overrides/mute_rules）
   ApplyWifi,        // WiFi 账号变更（NVS 权威 + config wifi_list 同步 + 重连）
   ApplySettings,    // typed patch → app_task 对最新快照合并 + NVS commit
   WifiReset,        // 仅清 WiFi 凭据并打开限时恢复 AP（保留管理密码和偏好）
@@ -36,15 +36,16 @@ enum class AdminCommandType : uint8_t {
   BleClearBonds,       // 停止 BLE 角色并清 NimBLE bond/NVS；不开放远程配网
   WriteSourceCredential,  // 写入/轮换 source 命名空间凭据；值仅命令内存持有
   DeleteSourceCredential, // 删除未被任何活动配置引用的 source 凭据
+  RenderPreview,          // 候选 bundle 离屏渲染预览（app_task 调 render_preview provider）
 };
+
+struct RenderPreviewJob;
 
 struct AdminCommand {
   AdminCommandType type = AdminCommandType::Reboot;
 
   // ApplyConfig：校验合并后的完整 DOM。
   alert_core::JsonValue config;
-  // ApplyConfig：原始 admin.display patch（仅显示节；用于精确能力校验与迁移）。
-  alert_core::JsonValue display_patch;
 
   // ApplySettings：httpd 已预校验的 partial typed patch；执行时基于最新快照重验。
   alert_core::JsonValue settings_patch;
@@ -52,10 +53,8 @@ struct AdminCommand {
   // ApplyConfig：变更的顶层 section 位掩码（httpd 按 PUT body 出现情况设置），
   // 供处理器避免不必要的全量热生效。
   static constexpr uint32_t kChangedAdmin = 1u << 0;
-  static constexpr uint32_t kChangedSources = 1u << 1;
   static constexpr uint32_t kChangedOverrides = 1u << 2;
   static constexpr uint32_t kChangedMuteRules = 1u << 3;
-  static constexpr uint32_t kChangedAdminDisplay = 1u << 4;
   uint32_t changed_sections = 0;
 
   // ApplyDashboard：不可变候选配置，默认处理器在 app_task 一次性提交。
@@ -76,6 +75,9 @@ struct AdminCommand {
   // Write/DeleteSourceCredential：固定 source 命名空间内的 key；value 仅写入时携带。
   std::string credential_key;
   std::string credential_value;
+
+  // RenderPreview：请求 + PSRAM 输出缓冲（shared_ptr：httpd 超时后 app_task 仍可安全写）。
+  std::shared_ptr<RenderPreviewJob> preview;
 
   // Reboot：重启前延迟（毫秒，M13：≥2s 让 202 响应发出）。
   uint32_t delay_ms = 2000;

@@ -16,7 +16,6 @@ namespace {
 constexpr char kTag[] = "settings";
 constexpr char kNvsNamespace[] = "device";
 constexpr char kNvsRecordKey[] = "prefs";
-constexpr char kLegacyNamespace[] = "ui";
 constexpr size_t kMaxRecordBytes = 4000;
 
 esp_err_t ensureNvs() {
@@ -73,51 +72,18 @@ bool loadRecord(Settings& values, uint32_t& revision) {
   const alert_core::JsonValue* version = root.find("schema_version");
   if (version == nullptr || version->type() != alert_core::JsonValue::Type::Int ||
       version->intValue() != kSchemaVersion) {
-    ESP_LOGW(kTag, "unsupported settings schema; trying legacy migration");
+    ESP_LOGW(kTag, "unsupported settings schema; using defaults");
     return false;
   }
   Settings parsed;
   FieldErrors errors;
   if (!mergePatch(Settings{}, root, parsed, errors)) {
-    ESP_LOGW(kTag, "invalid settings record; trying legacy migration");
+    ESP_LOGW(kTag, "invalid settings record; using defaults");
     return false;
   }
   values = parsed;
   revision = stored_revision;
   return true;
-}
-
-bool loadLegacyUi(Settings& values) {
-  nvs_handle_t handle;
-  if (nvs_open(kLegacyNamespace, NVS_READONLY, &handle) != ESP_OK) return false;
-  bool found = false;
-  uint8_t byte = 0;
-  if (nvs_get_u8(handle, "lang", &byte) == ESP_OK) {
-    values.language = byte == 1 ? "en" : "zh";
-    found = true;
-  }
-  if (nvs_get_u8(handle, "pmode", &byte) == ESP_OK && byte <= 2) {
-    values.power_mode = static_cast<PowerMode>(byte);
-    found = true;
-  }
-  uint32_t poll = 0;
-  if (nvs_get_u32(handle, "bpoll", &poll) == ESP_OK && poll >= 60 && poll <= 21600) {
-    values.battery_poll_s = poll;
-    found = true;
-  }
-  nvs_close(handle);
-  return found;
-}
-
-void eraseLegacyUiPrefs() {
-  nvs_handle_t handle;
-  if (nvs_open(kLegacyNamespace, NVS_READWRITE, &handle) != ESP_OK) return;
-  nvs_erase_key(handle, "lang");
-  nvs_erase_key(handle, "pmode");
-  nvs_erase_key(handle, "bpoll");
-  // The legacy mute key is owned by the existing store-rule migration.
-  nvs_commit(handle);
-  nvs_close(handle);
 }
 
 }  // namespace
@@ -131,7 +97,7 @@ void DeviceSettings::ensureMutex() const {
   if (mutex_ == nullptr) mutex_ = xSemaphoreCreateMutex();
 }
 
-esp_err_t DeviceSettings::init(const alert_core::JsonValue* legacy_admin_display) {
+esp_err_t DeviceSettings::init() {
   ensureMutex();
   xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex_), portMAX_DELAY);
   if (loaded_) {
@@ -156,18 +122,14 @@ esp_err_t DeviceSettings::init(const alert_core::JsonValue* legacy_admin_display
 
   values_ = Settings{};
   revision_ = 1;
-  const bool legacy_ui = loadLegacyUi(values_);
-  if (legacy_admin_display != nullptr) applyLegacyDisplay(*legacy_admin_display, values_);
-  migrated_ = legacy_ui || legacy_admin_display != nullptr;
 
   std::string error;
   const esp_err_t err = saveRecord(values_, revision_, error);
   if (err == ESP_OK) {
     loaded_ = true;
-    eraseLegacyUiPrefs();
-    ESP_LOGI(kTag, "device settings initialized (legacy migration=%d)", migrated_ ? 1 : 0);
+    ESP_LOGI(kTag, "device settings initialized with defaults");
   } else {
-    ESP_LOGE(kTag, "settings migration persist failed: %s", error.c_str());
+    ESP_LOGE(kTag, "settings defaults persist failed: %s", error.c_str());
   }
   xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
   return err;
@@ -176,7 +138,7 @@ esp_err_t DeviceSettings::init(const alert_core::JsonValue* legacy_admin_display
 Snapshot DeviceSettings::snapshot() const {
   ensureMutex();
   xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex_), portMAX_DELAY);
-  Snapshot out{values_, capabilities_, revision_, migrated_, loaded_};
+  Snapshot out{values_, capabilities_, revision_, loaded_};
   xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
   return out;
 }
@@ -256,15 +218,6 @@ int DeviceSettings::subscribe(Callback callback, void* ctx) {
   }
   xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
   return id;
-}
-
-void DeviceSettings::unsubscribe(int id) {
-  ensureMutex();
-  xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex_), portMAX_DELAY);
-  for (Slot& slot : slots_) {
-    if (slot.id == id) slot = Slot{};
-  }
-  xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
 }
 
 esp_err_t DeviceSettings::erasePersisted() {

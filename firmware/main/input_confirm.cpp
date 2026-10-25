@@ -47,7 +47,6 @@ bool FreshHoldConfirm::completeHold(ConfirmSource source, int64_t event_us,
 bool confirmRecordTargetCurrent(const ConfirmTarget& target, ConfirmRecordRule rule,
                                 const alert_core::AlertSnapshot* snapshot) {
   if (snapshot == nullptr || snapshot->seq != target.snapshot_epoch) return false;
-  if (rule == ConfirmRecordRule::AckAll) return true;
   for (const auto& record : snapshot->records) {
     if (record.id != target.record_id) continue;
     if (rule == ConfirmRecordRule::Mute) return !record.muted;

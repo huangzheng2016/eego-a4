@@ -31,7 +31,6 @@ struct Snapshot {
   Settings values;
   Capabilities capabilities;
   uint32_t revision = 0;
-  bool migrated = false;
   bool loaded = false;
 };
 
@@ -41,9 +40,9 @@ class DeviceSettings {
 
   static DeviceSettings& instance();
 
-  // Loads the versioned record. If absent, migrates NVS "ui" preferences and
-  // the supplied admin.display object, then persists before erasing legacy keys.
-  esp_err_t init(const alert_core::JsonValue* legacy_admin_display);
+  // Loads the versioned record. A missing or invalid record is replaced by
+  // persisted defaults.
+  esp_err_t init();
 
   Snapshot snapshot() const;
   void setCapabilities(const Capabilities& capabilities);
@@ -53,7 +52,6 @@ class DeviceSettings {
   bool update(const Settings& candidate, uint32_t* changed, std::string& error);
 
   int subscribe(Callback callback, void* ctx);  // -1 when the fixed table is full
-  void unsubscribe(int id);
 
   // Factory recovery only; does not notify because the caller reboots.
   static esp_err_t erasePersisted();
@@ -66,7 +64,6 @@ class DeviceSettings {
   Settings values_;
   Capabilities capabilities_;
   uint32_t revision_ = 0;
-  bool migrated_ = false;
   bool loaded_ = false;
 
   struct Slot {

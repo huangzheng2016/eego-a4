@@ -69,7 +69,6 @@ class BleManager {
 
   bool beginRecoveryAp();
   void endRecoveryAp();
-  bool recoveryApActive() const;
 
   esp_err_t clearBonds();
   Status status() const;

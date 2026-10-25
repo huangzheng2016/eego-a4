@@ -64,15 +64,12 @@ class CredentialStore {
   static esp_err_t deleteSourceCredential(const std::string& key);
   static esp_err_t resolveSourceCredential(const std::string& ref, std::string& value);
   static esp_err_t listSourceCredentials(std::vector<SourceCredentialMetadata>& out);
-  static esp_err_t clearSourceCredentials();
 
   static bool validHeaderName(const std::string& name);
   static bool safeHeaderValue(const std::string& value);
   static bool sensitiveHeaderName(const std::string& name);
   static void secureErase(std::string& value);
 
-  // 供管理端/日志使用的安全标识：仅说明 ref 指向的 命名空间/键，绝不返回值。
-  static std::string describeRef(const std::string& ref);
 };
 
 }  // namespace eego::net

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// EEGO A4 告警/数据面板 —— FW5 组合根（M18）+ FW5B（M21）+ DP4 dashboard（M26）。
+// EEGO A4 监控面板 —— 组合根。产品模型：web 端配置的 dashboard 是唯一主界面；
+// dashboard 数据源（data_pipeline）是唯一取数路径；外部告警经 POST /alerts 推送
+// 进入 alert_core store（ack/静音/持久化），再作为 dashboard 事件呈现。
 //
 // 启动流程（顺序即接线合同，M12 架构）：
 //   1. board::beginStandardHardware() 板级启动合同（GPIO4 锁存 → 触控/按键 →
@@ -9,11 +11,11 @@
 //   3. NVS（CredentialStore::ensureNvs）+ AuthManager + ConfigStore(config.json)
 //      + 类型覆盖应用到注册表 + AdminLog（级别取 admin.log_level）
 //   4. 字体：admin.font 指定路径 > SD 卡首个 .eefont/.bin > 内置 5x7 回退
-//   5. 告警库：SdAlertFileIo + AlertDb(/sdcard/alertpanel/alerts.db) →
-//      AlertStore.loadFrom 恢复 → attachDb（此后 store 写只在 net_task）
+//   5. 外部告警库：SdAlertFileIo + AlertDb(/sdcard/alertpanel/alerts.db) →
+//      AlertStore.loadFrom 恢复 → 有死行即压缩 → attachDb（此后 store 写只在
+//      net_task；net_task 按节拍检查大小/死行再压缩）
 //   6. NetStack::start（注入 SnapshotPublisher/统一时间源/RTC 回写；expire
-//      巡检与首帧快照发布由 net_task 承担）→ 按 config.sources 逐个 addSource
-//      → 恢复静音规则（config.mute_rules；FW5 NVS 指纹表一次性迁移并入）
+//      巡检与首帧快照发布由 net_task 承担）→ 恢复静音规则（config.mute_rules）
 //   7. admin 注入：快照源/动作 sink（薄适配）/命令处理器/事件回调
 //   8. 模式判定：无管理密码 → 配网门户 + UI 配网页；否则 startAdminApi
 //   9. diag::start（串口命令钩子全部在 app_task 上下文执行）+ PanelApp.begin
@@ -25,6 +27,7 @@
 //
 // 串口诊断入口：USB Serial/JTAG 115200，输入 help 查看命令。
 
+#include "atomic_file.h"
 #include "board/board_boot.h"
 #include "eego_hal.h"
 #include "eego_ui.h"
@@ -34,14 +37,16 @@
 #include <strings.h>  // strcasecmp
 
 #include "admin/admin.h"
+#include "admin/dashboard_config.h"
 #include "admin/display_snapshot.h"
+#include "admin/render_preview.h"
 #include "alert_core/persistence.h"
 #include "alert_core/store.h"
 #include "alert_core/type_registry.h"
 #include "ble/ble_manager.h"
 #include "diag/diag.h"
-#include "device_prefs.h"
 #include "device_settings/device_settings.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
@@ -203,8 +208,7 @@ void tryLoadUiFont() {
 // ── 跨任务事件回调（短平快：只置原子标志/投小信箱，不做渲染/IO）──────────────
 
 void onNetEvent(const eego::net::NetEvent& ev, void* ctx) {
-  static_cast<panel::PanelApp*>(ctx)->notifyNetEvent(
-      ev.wifi_state, ev.type == eego::net::NetEventType::SourceHealthChanged);
+  static_cast<panel::PanelApp*>(ctx)->notifyNetEvent(ev.wifi_state);
 }
 
 void onAdminEvent(const eego::admin::AdminEvent& ev, void* ctx) {
@@ -308,7 +312,7 @@ esp_err_t saveBleWifiCredentials(const char* ssid, const char* password, void* c
 }  // namespace
 
 extern "C" void app_main(void) {
-  ESP_LOGI(TAG, "EEGO A4 alert panel boot (FW5 panel app + diagnostics)");
+  ESP_LOGI(TAG, "EEGO A4 monitoring panel boot");
 
   // 1. 板级启动合同（顺序即合同，见 board_boot.h）
   bootStatus = eego::board::beginStandardHardware(display, touch);
@@ -336,6 +340,7 @@ extern "C" void app_main(void) {
   if (!config.valid()) {
     ESP_LOGW(TAG, "config.json invalid (backup made), running on defaults");
   }
+  admin::DashboardStore::instance().init("/sdcard/alertpanel/dashboard.json");
   const alert_core::JsonValue dom = config.rawDom();
   const alert_core::JsonValue* overrides = dom.find("alert_type_overrides");
   if (overrides != nullptr) {
@@ -352,11 +357,8 @@ extern "C" void app_main(void) {
     eego::admin::AdminLog::instance().init();
   }
 
-  const alert_core::JsonValue* adminSection = dom.find("admin");
-  const alert_core::JsonValue* legacyDisplay =
-      adminSection != nullptr ? adminSection->find("display") : nullptr;
   auto& deviceSettings = eego::settings::DeviceSettings::instance();
-  const esp_err_t settingsErr = deviceSettings.init(legacyDisplay);
+  const esp_err_t settingsErr = deviceSettings.init();
   if (settingsErr != ESP_OK) {
     ESP_LOGE(TAG, "device settings init failed: %s", esp_err_to_name(settingsErr));
   }
@@ -409,10 +411,47 @@ extern "C" void app_main(void) {
   // 4. 字体
   tryLoadUiFont();
 
-  // 5. 告警库恢复（store 写自此只在 net_task；load 先于 start，首帧快照覆盖）
-  if (eego::SdCard::instance().ready()) {
+  // 5. 外部告警库恢复（store 写自此只在 net_task；load 先于 start，首帧快照覆盖）。
+  //    启动即压缩：append-only JSONL 的被覆盖行/墓碑在每次启动时清掉，
+  //    运行期由 net_task 按大小/死行比例再压缩（见 NetStackConfig）。
+  const bool alertDbReady = eego::SdCard::instance().ready();
+  if (alertDbReady) {
+    // 上次压缩替换中途断电：原文件在 .bak（eego_hal atomic_file 替换路径）。
+    if (eego::fsutil::recoverFile(alertDb.path())) {
+      ESP_LOGW(TAG, "alerts.db restored from interrupted replace");
+    }
     const size_t loaded = store.loadFrom(alertDb);
-    ESP_LOGI(TAG, "alerts.db restored: %u record(s)", static_cast<unsigned>(loaded));
+    ESP_LOGI(TAG, "alerts.db restored: %u record(s), %u dead line(s)",
+             static_cast<unsigned>(loaded), static_cast<unsigned>(alertDb.deadLines()));
+    if (alertDb.deadLines() > 0) {
+      // 压缩已是逐条流式写 + 分块回读校验（不整份复制），但仍需几十 KB 内部
+      // RAM（CONFIG_SPIRAM_USE_CAPS_ALLOC：malloc 只走内部堆）。堆紧张时跳过，
+      // 交给 net_task 按策略稍后压缩。另以标记文件防"压缩中崩溃 → 重启 → 再压缩
+      // → 再崩溃"的循环：上次启动压缩未走完（标记仍在）则本次跳过并清标记。
+      const std::string marker = alertDb.path() + ".compacting";
+      const size_t freeInternal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      const size_t largestInternal =
+          heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      constexpr size_t kBootCompactMinFree = 48 * 1024;
+      constexpr size_t kBootCompactMinBlock = 16 * 1024;
+      if (alertFileIo.exists(marker)) {
+        alertFileIo.remove(marker);
+        ESP_LOGW(TAG, "alerts.db boot compaction skipped: previous attempt did not finish");
+      } else if (freeInternal < kBootCompactMinFree || largestInternal < kBootCompactMinBlock) {
+        ESP_LOGW(TAG, "alerts.db boot compaction deferred: internal heap free=%u largest=%u",
+                 static_cast<unsigned>(freeInternal), static_cast<unsigned>(largestInternal));
+      } else {
+        alertFileIo.writeAll(marker, "1");
+        std::string compactErr;
+        if (store.compactDb(compactErr)) {
+          ESP_LOGI(TAG, "alerts.db compacted at boot: %u bytes",
+                   static_cast<unsigned>(store.lastCompactBytes()));
+        } else {
+          ESP_LOGW(TAG, "alerts.db boot compaction failed: %s", compactErr.c_str());
+        }
+        alertFileIo.remove(marker);
+      }
+    }
   } else {
     ESP_LOGW(TAG, "SD not ready: alerts.db unavailable, running in-memory");
   }
@@ -424,16 +463,11 @@ extern "C" void app_main(void) {
   netCfg.snapshot_publisher = &publisher;
   netCfg.rtc_write_fn = &panel::TimeSource::writeRtc;
   netCfg.time_valid_fn = &panel::TimeSource::valid;
+  netCfg.alert_db = alertDbReady ? &alertDb : nullptr;
   const esp_err_t netErr =
       eego::net::NetStack::instance().start(netCfg, &store, &registry, &panel::TimeSource::now);
   if (netErr != ESP_OK) {
     ESP_LOGE(TAG, "net_task start failed: %s", esp_err_to_name(netErr));
-  }
-  for (const eego::net::SourceConfig& sc : config.sources()) {
-    std::string err;
-    if (!eego::net::NetStack::instance().addSource(sc, err)) {
-      ESP_LOGW(TAG, "source add failed: id=%s (%s)", sc.id.c_str(), err.c_str());
-    }
   }
   const esp_err_t bleErr = eego::ble::BleManager::instance().init(&saveBleWifiCredentials, nullptr);
   if (bleErr != ESP_OK) {
@@ -441,48 +475,9 @@ extern "C" void app_main(void) {
   }
 
   // 6b. 静音规则恢复（M21）：config.mute_rules → net_task（重估已恢复记录的
-  //     muted 标志 + 快照发布）。FW5 的 NVS UI 指纹表在此一次性迁移为 store
-  //     级指纹规则：合并表先落盘 config.json（与面板 persistMuteRules 同路径），
-  //     成功后才清 NVS 键——commit 失败时 NVS 是唯一副本，保留待下次启动重试。
+  //     muted 标志 + 快照发布）。
   {
-    std::vector<alert_core::MuteRule> mute_rules = config.muteRules();
-    panel::DevicePrefs& legacy_prefs = panel::DevicePrefs::instance();
-    legacy_prefs.load();  // 只读旧 mute 键；其他 ui 偏好已由 DeviceSettings 迁移
-    size_t migrated = 0;
-    for (const std::string& fp : legacy_prefs.mutes()) {
-      bool dup = false;
-      for (const auto& r : mute_rules) {
-        if (r.match_by == alert_core::MuteRule::MatchBy::Fingerprint && r.value == fp) {
-          dup = true;
-          break;
-        }
-      }
-      if (!dup) {
-        alert_core::MuteRule rule;
-        rule.match_by = alert_core::MuteRule::MatchBy::Fingerprint;
-        rule.value = fp;
-        rule.expires_at = 0;  // 面板静音语义：不过期
-        mute_rules.push_back(std::move(rule));
-        migrated++;
-      }
-    }
-    bool persist_ok = true;
-    if (migrated > 0) {
-      alert_core::JsonValue dom = config.rawDom();
-      std::string cerr;
-      persist_ok = config.setMuteRulesInDom(dom, mute_rules) && config.commit(dom, cerr);
-      if (persist_ok) {
-        ESP_LOGI(TAG, "legacy UI mutes migrated to store rules: %u (persisted to config.json)",
-                 static_cast<unsigned>(migrated));
-      } else {
-        ESP_LOGE(TAG, "legacy mute migration persist failed, NVS copy kept (%s)",
-                 cerr.c_str());
-      }
-    }
-    if (!legacy_prefs.mutes().empty() && persist_ok) {
-      legacy_prefs.clearMutes();
-      legacy_prefs.save();
-    }
+    const std::vector<alert_core::MuteRule> mute_rules = config.muteRules();
     std::string mute_err;
     if (!eego::net::NetStack::instance().setMuteRules(mute_rules, mute_err)) {
       ESP_LOGW(TAG, "mute rules restore failed: %s", mute_err.c_str());
@@ -523,6 +518,12 @@ extern "C" void app_main(void) {
       }
     }
     return true;
+  });
+  // POST /api/v1/dashboard/render-preview：httpd 校验后经 AdminCommand 队列在
+  // app_task（UI 属主）执行；离屏 framebuffer，不影响实屏。
+  admin::setRenderPreviewProvider([](const admin::RenderPreviewRequest& request, uint8_t* rows,
+                                     size_t stride, admin::RenderPreviewResult& result) {
+    return app.renderDashboardPreview(request, rows, stride, result);
   });
   net.setEventCallback(&onNetEvent, &app);
 

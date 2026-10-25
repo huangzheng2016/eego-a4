@@ -25,7 +25,6 @@ public:
     // 前光是否可用 = 覆盖设置（Present/Absent）或 Auto 时的芯片探测结果。
     // UI/能力门控应使用此函数；不可用时 setBrightness/setWarm/on 为空操作。
     bool frontlightAvailable();
-    bool present() { return frontlightAvailable(); }  // 兼容旧调用点
 
     void setOverride(FrontlightOverride mode);  // 变为不可用时立即关闭前光
     FrontlightOverride overrideMode() const { return _override; }

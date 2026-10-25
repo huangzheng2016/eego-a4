@@ -5,7 +5,7 @@
 // 并发边界（M12 定稿，强制）：本文件一切 handler 运行在 httpd 任务上下文，
 // 只做解析/校验/限速/入队：
 //   * 配置持久化 / 恢复出厂 / 重启 / WiFi 落 NVS → AdminCommand → app_task；
-//   * 告警摄入 / sources/test 出网 → NetStack 命令队列 → net_task；
+//   * 告警摄入 → NetStack 命令队列 → net_task（dashboard 出网测试见 dashboard_api）；
 //   * 告警读 → SnapshotPublisher 快照（未接线 → 503）；
 //   * 告警写（ack/clear）→ AlertActionSink（未接线 → 503）。
 //
@@ -36,10 +36,9 @@
 #include "admin_internal.h"
 #include "admin/input_bindings.h"
 #include "ble/ble_manager.h"
-#include "admin_page.h"
 #include "dashboard_api.h"
-#include "dashboard_page.h"
 #include "dashboard_path.h"
+#include "loader_page.h"
 #include "device_settings/device_settings.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -52,7 +51,6 @@
 #include "lwip/sockets.h"
 #include "net_stack/http_push_bridge.h"
 #include "net_stack/net_task.h"
-#include "net_stack/source_presets.h"
 #include "net_stack/wifi_manager.h"
 #include "admin/provision_portal.h"
 #include "sd_card.h"
@@ -97,17 +95,14 @@ const char* statusText(int status) {
   }
 }
 
-void setSecurityHeaders(httpd_req_t* req, bool html) {
+void setSecurityHeaders(httpd_req_t* req) {
   httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-  if (html) {
-    httpd_resp_set_hdr(req, "Content-Security-Policy", "default-src 'self'");
-  }
 }
 
 esp_err_t sendBody(httpd_req_t* req, int status, const char* content_type,
-                   const std::string& body, bool html) {
-  setSecurityHeaders(req, html);
+                   const std::string& body) {
+  setSecurityHeaders(req);
   httpd_resp_set_type(req, content_type);
   httpd_resp_set_status(req, statusText(status));
   httpd_resp_send(req, body.c_str(), body.size());
@@ -132,15 +127,15 @@ const char* staticEtag() {
   return etag;
 }
 
-// Static pages live in flash (.rodata); send them straight from there instead
-// of copying 40 KB into a std::string per request. Browsers revalidate with
+// Static loader assets live in flash (.rodata); send them straight from there. Browsers revalidate with
 // If-None-Match and get a body-less 304 while the firmware build is unchanged.
-esp_err_t sendStatic(httpd_req_t* req, const char* content_type, const char* body, bool html,
-                     const char* csp = "default-src 'self'") {
+// csp is set only for HTML documents (nullptr for scripts).
+esp_err_t sendStatic(httpd_req_t* req, const char* content_type, const char* body,
+                     const char* csp) {
   httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
   httpd_resp_set_hdr(req, "ETag", staticEtag());
-  if (html) httpd_resp_set_hdr(req, "Content-Security-Policy", csp);
+  if (csp) httpd_resp_set_hdr(req, "Content-Security-Policy", csp);
   char presented[40];
   if (httpd_req_get_hdr_value_str(req, "If-None-Match", presented, sizeof(presented)) == ESP_OK &&
       strcmp(presented, staticEtag()) == 0) {
@@ -155,7 +150,7 @@ esp_err_t sendStatic(httpd_req_t* req, const char* content_type, const char* bod
 }
 
 esp_err_t sendJson(httpd_req_t* req, int status, const std::string& body) {
-  return sendBody(req, status, "application/json; charset=utf-8", body, false);
+  return sendBody(req, status, "application/json; charset=utf-8", body);
 }
 
 // 统一错误信封（M13 定稿）。retry_after_s > 0 时带 Retry-After 头。
@@ -475,7 +470,7 @@ esp_err_t h_logout(httpd_req_t* req) {
   AuthManager::instance().revokeSession(token);
   ADMIN_LOG_INFO("logout");
   httpd_resp_set_status(req, statusText(204));
-  setSecurityHeaders(req, false);
+  setSecurityHeaders(req);
   httpd_resp_send(req, "", 0);
   return ESP_OK;
 }
@@ -523,7 +518,7 @@ esp_err_t h_change_password(httpd_req_t* req) {
   }
   ADMIN_LOG_INFO("password changed; all sessions revoked");
   httpd_resp_set_status(req, statusText(204));
-  setSecurityHeaders(req, false);
+  setSecurityHeaders(req);
   httpd_resp_send(req, "", 0);
   return ESP_OK;
 }
@@ -1013,30 +1008,8 @@ namespace {
 // ---------------------------------------------------------------------------
 // 配置端点
 // ---------------------------------------------------------------------------
-alert_core::JsonValue configWithSettingsMirror() {
-  using alert_core::JsonValue;
-  JsonValue dom = ConfigStore::instance().maskedDom();
-  const settings::Settings values = settings::DeviceSettings::instance().snapshot().values;
-  for (auto& admin_kv : mutableItems(dom)) {
-    if (admin_kv.first != "admin" || admin_kv.second.type() != JsonValue::Type::Object) continue;
-    for (auto& section : mutableItems(admin_kv.second)) {
-      if (section.first != "display" || section.second.type() != JsonValue::Type::Object) continue;
-      for (auto& field : mutableItems(section.second)) {
-        if (field.first == "brightness") {
-          field.second = JsonValue::makeInt(values.frontlight_enabled
-                                                ? values.frontlight_brightness
-                                                : 0);
-        } else if (field.first == "warmth") {
-          field.second = JsonValue::makeInt(values.frontlight_warmth);
-        }
-      }
-    }
-  }
-  return dom;
-}
-
 esp_err_t h_config_get(httpd_req_t* req) {
-  return sendJson(req, 200, configWithSettingsMirror().toString());
+  return sendJson(req, 200, ConfigStore::instance().maskedDom().toString());
 }
 
 esp_err_t h_config_put(httpd_req_t* req) {
@@ -1054,40 +1027,27 @@ esp_err_t h_config_put(httpd_req_t* req) {
   }
 
   uint32_t mask = 0;
-  alert_core::JsonValue displayPatch;
   {
     alert_core::JsonValue patch;
     alert_core::JsonParseError perr;
     if (alert_core::jsonParse(body, patch, perr) &&
         patch.type() == alert_core::JsonValue::Type::Object) {
       if (patch.find("admin") != nullptr) mask |= AdminCommand::kChangedAdmin;
-      if (const alert_core::JsonValue* admin = patch.find("admin");
-          admin != nullptr && admin->find("display") != nullptr) {
-        mask |= AdminCommand::kChangedAdminDisplay;
-        displayPatch = *admin->find("display");
-      }
-      if (patch.find("sources") != nullptr) mask |= AdminCommand::kChangedSources;
       if (patch.find("alert_type_overrides") != nullptr) {
         mask |= AdminCommand::kChangedOverrides;
       }
       if (patch.find("mute_rules") != nullptr) mask |= AdminCommand::kChangedMuteRules;
     }
   }
-  validateLegacyDisplayCapability(displayPatch, errs);
-  if (!errs.empty()) {
-    return sendError(req, 400, errc::kValidationFailed, "config validation failed", &errs);
-  }
-
   AdminCommand cmd;
   cmd.type = AdminCommandType::ApplyConfig;
   cmd.config = std::move(merged);
-  cmd.display_patch = displayPatch;
   cmd.changed_sections = mask;
   AdminResult res;
   if (!runCommand(req, cmd, res)) return ESP_OK;
 
   ADMIN_LOG_INFO("config updated");
-  return sendJson(req, 200, configWithSettingsMirror().toString());
+  return sendJson(req, 200, ConfigStore::instance().maskedDom().toString());
 }
 
 esp_err_t h_config_schema(httpd_req_t* req) {
@@ -1159,7 +1119,6 @@ esp_err_t h_settings_get(httpd_req_t* req) {
                   JsonValue::makeObject({
                       {"schema_version", JsonValue::makeInt(settings::kSchemaVersion)},
                       {"revision", JsonValue::makeInt(snap.revision)},
-                      {"migrated", JsonValue::makeBool(snap.migrated)},
                       {"settings", settings::toJson(snap.values)},
                       {"capabilities", capabilities},
                       {"power", power},
@@ -1355,57 +1314,9 @@ esp_err_t h_wifi_remove(httpd_req_t* req) {
   if (!runCommand(req, cmd, res)) return ESP_OK;
   ADMIN_LOG_INFO("wifi account removed via api: ssid=%s", ssid.c_str());
   httpd_resp_set_status(req, statusText(204));
-  setSecurityHeaders(req, false);
+  setSecurityHeaders(req);
   httpd_resp_send(req, "", 0);
   return ESP_OK;
-}
-
-// ---------------------------------------------------------------------------
-// sources/presets（Bearer，只读；静态预设数据，无出网无 secrets）
-//
-// M22 任务 2：把 net_stack sourcePresets()/findSourcePreset()（M16 任务 4，
-// 此前全树无调用方）暴露给管理 API/UI。预设只是 SourceConfig 起点：用户改
-// url/token/interval 后经 PUT /config 生效，校验链路与手写配置完全一致。
-// http_push 预设无 config_template（null）——面板侧无需 sources[] 项。
-// ---------------------------------------------------------------------------
-alert_core::JsonValue presetToJson(const net::SourcePreset& p) {
-  using alert_core::JsonValue;
-  return JsonValue::makeObject({
-      {"id", JsonValue::makeString(p.id)},
-      {"label_zh", JsonValue::makeString(p.label_zh)},
-      {"label_en", JsonValue::makeString(p.label_en)},
-      {"kind_hint", JsonValue::makeString(p.kind_hint)},
-      {"builtin_poll", JsonValue::makeBool(p.builtin_poll)},
-      {"config_template", p.config_template},
-      {"notes", JsonValue::makeString(p.notes)},
-      {"notes_en", JsonValue::makeString(p.notes_en)},
-  });
-}
-
-esp_err_t h_source_presets(httpd_req_t* req) {
-  using alert_core::JsonValue;
-  JsonValue::Array arr;
-  for (const auto& p : net::sourcePresets()) arr.push_back(presetToJson(p));
-  return sendJson(req, 200,
-                  JsonValue::makeObject({{"presets", JsonValue::makeArray(std::move(arr))}})
-                      .toString());
-}
-
-esp_err_t h_source_preset_get(httpd_req_t* req, const std::string& id) {
-  const net::SourcePreset* p = net::findSourcePreset(id);
-  if (p == nullptr) {
-    return sendError(req, 404, errc::kNotFound, "unknown source preset");
-  }
-  return sendJson(req, 200, presetToJson(*p).toString());
-}
-
-// 路径段提取：/sources/presets/<id>（id 非空且不含 '/'）。
-bool presetIdFromPath(const char* path, std::string& id) {
-  if (strncmp(path, "sources/presets/", 16) != 0) return false;
-  const char* seg = path + 16;
-  if (seg[0] == '\0' || strchr(seg, '/') != nullptr) return false;
-  id = seg;
-  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1488,113 +1399,6 @@ esp_err_t h_source_credentials_write(httpd_req_t* req, bool remove) {
                       {"ref", JsonValue::makeString(net::CredentialStore::sourceRef(key))},
                       {"deleted", JsonValue::makeBool(remove)},
                   }).toString());
-}
-
-// ---------------------------------------------------------------------------
-// sources/test（Bearer，每令牌 5 次/分钟；出网 10s；不回显目标 body）
-// ---------------------------------------------------------------------------
-esp_err_t h_source_test(httpd_req_t* req) {
-  std::string token;
-  if (!requireBearer(req, token)) return ESP_OK;
-  if (!rateLimit(req, "test:" + token.substr(0, 8), 60, 5)) return ESP_OK;
-  if (!contentTypeJsonOk(req)) {
-    return sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
-  }
-  std::string body;
-  const int rb = readBodyBudget(req, kBodyBudgetSmall, body);
-  if (rb != 0) return ESP_OK;
-  alert_core::JsonValue root;
-  if (!parseJsonBody(req, body, root)) return ESP_OK;
-  if (root.type() != alert_core::JsonValue::Type::Object) {
-    return sendError(req, 400, errc::kInvalidRequest, "body must be an object");
-  }
-
-  using alert_core::JsonValue;
-  // 目标来源：{id} 引用已配置源，或 {url,...} 直接给出（不落盘）。
-  net::SourceConfig source;
-  std::string src_id;
-  jsonStringField(root, "id", src_id);
-  if (!src_id.empty()) {
-    const auto sources = ConfigStore::instance().sources();
-    const net::SourceConfig* hit = nullptr;
-    for (const auto& candidate : sources) {
-      if (candidate.id == src_id) hit = &candidate;
-    }
-    if (hit == nullptr) {
-      FieldErrors errs = fieldErr("id", "unknown source id");
-      return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
-    }
-    source = *hit;
-  } else {
-    if (root.find("id") == nullptr) {
-      mutableItems(root).emplace_back("id", JsonValue::makeString("source-test"));
-    }
-    alert_core::ValidationError validation;
-    if (!net::SourceConfig::fromJson(root, source, validation)) {
-      FieldErrors errs = fieldErr(validation.field, validation.message);
-      return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
-    }
-  }
-  source.timeout_ms = 10000;
-  net::NetRequest nreq;
-  std::string request_error;
-  if (!net::buildSourceRequest(source, nreq, request_error)) {
-    return sendError(req, 400, errc::kValidationFailed,
-                     "request validation failed: " + request_error);
-  }
-
-  const int64_t t0 = esp_timer_get_time();
-  net::NetResponse nresp;
-  if (!net::NetStack::instance().httpSubmit(nreq, &nresp, 12000)) {
-    return sendError(req, 503, errc::kUnavailable, "net_task unavailable");
-  }
-  const int64_t latency_ms = (esp_timer_get_time() - t0) / 1000;
-
-  // 结果摘要（M13：不回显目标 body——防 secrets 经设备反射）
-  JsonValue::Object out;
-  out.emplace_back("status_code", JsonValue::makeInt(nresp.status));
-  out.emplace_back("latency_ms", JsonValue::makeInt(latency_ms));
-  if (!nresp.error.empty()) out.emplace_back("error", JsonValue::makeString(nresp.error));
-  bool json_valid = false;
-  int64_t schema_matches = 0;
-  bool truncated = false;
-  if (nresp.ok() && nresp.length() > 0) {
-    // 解析预算 64KB（M13：响应截断 64KB）
-    std::string text(nresp.data(), nresp.length());
-    if (text.size() > 64 * 1024) {
-      text.resize(64 * 1024);
-      truncated = true;
-    }
-    JsonValue doc;
-    alert_core::JsonParseError perr;
-    if (alert_core::jsonParse(text, doc, perr)) {
-      json_valid = true;
-      // schema 匹配计数：单对象 / 根数组 / {"alerts":[...]} 中能过事件校验的条数
-      std::vector<const JsonValue*> candidates;
-      if (doc.type() == JsonValue::Type::Array) {
-        for (const auto& item : doc.arrayItems()) candidates.push_back(&item);
-      } else if (doc.type() == JsonValue::Type::Object) {
-        if (const JsonValue* arr = doc.find("alerts");
-            arr != nullptr && arr->type() == JsonValue::Type::Array) {
-          for (const auto& item : arr->arrayItems()) candidates.push_back(&item);
-        } else {
-          candidates.push_back(&doc);
-        }
-      }
-      for (const JsonValue* c : candidates) {
-        alert_core::AlertEvent ev;
-        alert_core::ValidationError verr;
-        if (alert_core::eventFromJson(*c, ev, verr)) schema_matches++;
-      }
-    }
-  }
-  out.emplace_back("bytes", JsonValue::makeInt(static_cast<int64_t>(nresp.length())));
-  out.emplace_back("json_valid", JsonValue::makeBool(json_valid));
-  out.emplace_back("schema_matches", JsonValue::makeInt(schema_matches));
-  out.emplace_back("truncated", JsonValue::makeBool(truncated));
-  ADMIN_LOG_INFO("source test: status=%d latency=%lldms", nresp.status,
-                 static_cast<long long>(latency_ms));
-  return sendJson(req, 200, JsonValue::makeObject(std::move(out)).toString());
 }
 
 // ---------------------------------------------------------------------------
@@ -1681,32 +1485,14 @@ esp_err_t h_ingest_rotate(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-// 静态管理页（免认证零数据；CSP default-src 'self'；M13 T11）
+// GET / and /loader.js: zero-data loader for the externally hosted React app.
+// The page CSP allows scripts/styles from EEGO_WEB_APP_ORIGIN only.
 // ---------------------------------------------------------------------------
-// GET / : loader for the externally hosted app, with its own CSP that allows
-// scripts/styles from EEGO_WEB_APP_ORIGIN only.
 esp_err_t h_root_page(httpd_req_t* req) {
-  return sendStatic(req, "text/html; charset=utf-8", pages::kLoaderHtml, true,
-                    pages::kLoaderCsp);
+  return sendStatic(req, "text/html; charset=utf-8", pages::kLoaderHtml, pages::kLoaderCsp);
 }
 esp_err_t h_loader_js(httpd_req_t* req) {
-  return sendStatic(req, "application/javascript; charset=utf-8", pages::kLoaderJs, false);
-}
-// GET /legacy : the fully embedded admin page (works without internet).
-esp_err_t h_legacy_page(httpd_req_t* req) {
-  return sendStatic(req, "text/html; charset=utf-8", pages::kAdminHtml, true);
-}
-esp_err_t h_admin_js(httpd_req_t* req) {
-  return sendStatic(req, "application/javascript; charset=utf-8", pages::kAdminJs, false);
-}
-esp_err_t h_admin_css(httpd_req_t* req) {
-  return sendStatic(req, "text/css; charset=utf-8", pages::kAdminCss, false);
-}
-esp_err_t h_dashboard_js(httpd_req_t* req) {
-  return sendStatic(req, "application/javascript; charset=utf-8", pages::kDashboardJs, false);
-}
-esp_err_t h_dashboard_css(httpd_req_t* req) {
-  return sendStatic(req, "text/css; charset=utf-8", pages::kDashboardCss, false);
+  return sendStatic(req, "application/javascript; charset=utf-8", pages::kLoaderJs, nullptr);
 }
 
 }  // namespace
@@ -1798,6 +1584,9 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     } else if (m == HTTP_POST && strcmp(canonical_path.c_str(), "dashboard/sources/probe") == 0) {
       // Outbound fetch that echoes a (masked, bounded) body: own small bucket.
       if (!rateLimit(req, "dashboard-probe:" + token.substr(0, 8), 60, 5)) return ESP_OK;
+    } else if (m == HTTP_POST && strcmp(canonical_path.c_str(), "dashboard/render-preview") == 0) {
+      // Offscreen render on app_task (~400 KB PSRAM, blocks the UI loop briefly).
+      if (!rateLimit(req, "dashboard-preview:" + token.substr(0, 8), 60, 10)) return ESP_OK;
     } else if (!rateLimit(req, "dashboard-write:" + token.substr(0, 8), 60, 30)) {
       return ESP_OK;
     }
@@ -1850,18 +1639,6 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
       if (!bearer()) return ESP_OK;
       return h_source_credentials_get(req);
     }
-    if (strcmp(path, "sources/presets") == 0) {
-      if (!bearer()) return ESP_OK;
-      return h_source_presets(req);
-    }
-    // GET /sources/presets/{id}
-    {
-      std::string pid;
-      if (presetIdFromPath(path, pid)) {
-        if (!bearer()) return ESP_OK;
-        return h_source_preset_get(req, pid);
-      }
-    }
     if (strcmp(path, "alerts") == 0) {
       if (!bearer()) return ESP_OK;
       return h_alerts_list(req);
@@ -1909,9 +1686,6 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     if (strcmp(path, "config/wifi") == 0) {
       if (!bearer()) return ESP_OK;
       return h_wifi_add(req);
-    }
-    if (strcmp(path, "sources/test") == 0) {
-      return h_source_test(req);  // 内含 Bearer + 每令牌限速
     }
     if (strcmp(path, "input-bindings/reset") == 0) {
       if (!bearer()) return ESP_OK;
@@ -1987,11 +1761,6 @@ esp_err_t wildcardHandler(httpd_req_t* req) {
   if (req->method == HTTP_GET) {
     if (strcmp(uri, "/") == 0 || strncmp(uri, "/?", 2) == 0) return h_root_page(req);
     if (strcmp(uri, "/loader.js") == 0) return h_loader_js(req);
-    if (strcmp(uri, "/legacy") == 0 || strcmp(uri, "/legacy/") == 0) return h_legacy_page(req);
-    if (strcmp(uri, "/admin.js") == 0) return h_admin_js(req);
-    if (strcmp(uri, "/admin.css") == 0) return h_admin_css(req);
-    if (strcmp(uri, "/dashboard.js") == 0) return h_dashboard_js(req);
-    if (strcmp(uri, "/dashboard.css") == 0) return h_dashboard_css(req);
   }
   if (strncmp(uri, "/api/v1/", 8) == 0) {
     std::string path(uri + 8);
@@ -2014,25 +1783,13 @@ esp_err_t startAdminApi(const AdminConfig& cfg) {
   // 80 端口互斥（防御性检查；模式判定本就在 app_task 上下文）
   if (ProvisionPortal::instance().isOpen()) return ESP_ERR_INVALID_STATE;
 
+  // AdminLog / AuthManager / ConfigStore / DashboardStore are initialized
+  // exactly once by the composition root (app_main) before this is called.
   g_cfg = cfg;
-  AdminLog::instance().init();
-  esp_err_t err = AuthManager::instance().init();
-  if (err != ESP_OK) return err;
-  err = ConfigStore::instance().init(cfg.config_path);
-  if (err != ESP_OK) return err;
-  std::string dashboard_path = "dashboard.json";
-  const size_t config_slash = cfg.config_path.find_last_of('/');
-  if (config_slash != std::string::npos) {
-    dashboard_path = cfg.config_path.substr(0, config_slash + 1) + "dashboard.json";
-  }
-  err = DashboardStore::instance().init(dashboard_path);
-  if (err != ESP_OK) return err;
   internal::setRegistry(cfg.registry);
 
   // 应用 admin 域运行参数
   const AdminDomainConfig admin = ConfigStore::instance().admin();
-  LogLevel lv;
-  if (logLevelFromString(admin.log_level, lv)) AdminLog::instance().setMinLevel(lv);
   AuthManager::instance().setSessionTtl(admin.session_ttl_s);
   AuthManager::instance().setLockThreshold(admin.login_lock_threshold);
 
@@ -2046,7 +1803,7 @@ esp_err_t startAdminApi(const AdminConfig& cfg) {
   config.keep_alive_enable = false;  // 无 keep-alive（M13 传输约定）
   config.uri_match_fn = httpd_uri_match_wildcard;
 
-  err = httpd_start(&g_server, &config);
+  esp_err_t err = httpd_start(&g_server, &config);
   if (err != ESP_OK) {
     g_server = nullptr;
     return err;
@@ -2063,14 +1820,6 @@ esp_err_t startAdminApi(const AdminConfig& cfg) {
   }
   ADMIN_LOG_INFO("admin api started on port %u", static_cast<unsigned>(cfg.port));
   return ESP_OK;
-}
-
-void stopAdminApi() {
-  if (g_server == nullptr) return;
-  httpd_stop(g_server);
-  g_server = nullptr;
-  internal::setRegistry(nullptr);
-  ADMIN_LOG_INFO("admin api stopped");
 }
 
 bool adminApiRunning() { return g_server != nullptr; }

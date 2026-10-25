@@ -57,12 +57,6 @@ const char* windowKindName(WindowKind kind) { return enumName(kind, kWindows); }
 bool windowKindFromString(std::string_view text, WindowKind& out) {
   return enumValue(text, out, kWindows);
 }
-const char* aggregationName(Aggregation aggregation) {
-  return enumName(aggregation, kAggregations);
-}
-bool aggregationFromString(std::string_view text, Aggregation& out) {
-  return enumValue(text, out, kAggregations);
-}
 
 int64_t SourceResult::resetAtFor(std::string_view metric) const {
   const auto exact = reset_at_ms.find(std::string(metric));

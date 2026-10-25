@@ -628,34 +628,6 @@ uint32_t changedFields(const Settings& a, const Settings& b) {
   return changed;
 }
 
-void applyLegacyDisplay(const JsonValue& display, Settings& settings) {
-  if (display.type() != JsonValue::Type::Object) return;
-  if (const JsonValue* value = display.find("brightness");
-      value != nullptr && isInt(*value) && value->intValue() >= 0 && value->intValue() <= 100) {
-    const int brightness = static_cast<int>(value->intValue());
-    settings.frontlight_enabled = brightness > 0;
-    if (brightness > 0) settings.frontlight_brightness = static_cast<uint8_t>(brightness);
-  }
-  if (const JsonValue* value = display.find("warmth");
-      value != nullptr && isInt(*value) && value->intValue() >= 0 && value->intValue() <= 100) {
-    settings.frontlight_warmth = static_cast<uint8_t>(value->intValue());
-  }
-}
-
-void validateLegacyDisplayCapability(const JsonValue& display_patch, const Settings& current,
-                                     bool frontlight_available, FieldErrors& errors) {
-  if (frontlight_available || display_patch.type() != JsonValue::Type::Object) return;
-  const int current_brightness = current.frontlight_enabled ? current.frontlight_brightness : 0;
-  if (const JsonValue* value = display_patch.find("brightness");
-      value != nullptr && isInt(*value) && value->intValue() != current_brightness) {
-    addError(errors, "admin.display.brightness", "frontlight hardware is unavailable");
-  }
-  if (const JsonValue* value = display_patch.find("warmth");
-      value != nullptr && isInt(*value) && value->intValue() != current.frontlight_warmth) {
-    addError(errors, "admin.display.warmth", "frontlight hardware is unavailable");
-  }
-}
-
 bool scheduledSleep(const Settings& settings, uint64_t now_unix, uint64_t& wake_at_unix,
                     uint32_t& remaining_s) {
   wake_at_unix = 0;

@@ -2,7 +2,7 @@
 #pragma once
 
 // alerts.db persistence: JSONL append + compaction (M11 §4: "SD alerts.db,
-// JSONL 追加 + 定期压缩") and the cache/<source>.json offline-cache helpers.
+// JSONL 追加 + 定期压缩").
 //
 // File access goes through IAlertFileIo so alert_core stays free of SD/FatFS
 // or any other platform dependency. The firmware wires an SD-backed
@@ -13,12 +13,16 @@
 // so a torn tail loses at most the newest mutations and never corrupts older
 // records. Ring evictions append `{"tombstone":"<id>"}` lines; tombstoned ids
 // never re-enter the live set, so the retention ring survives reboot.
-// Compaction rewrites the live set: write tmp → read back → verify
-// (line count and id sequence) → rename over the original; any failure
-// removes the tmp file and leaves the original intact (rollback).
+// Compaction rewrites the live set: stream one line per record into tmp →
+// stream it back verifying byte count, line count and an FNV-1a hash of what
+// was written → rename over the original; any failure removes the tmp file and
+// leaves the original intact (rollback). Neither load nor compaction holds the
+// whole file in RAM (internal-heap only on device): both stream in small
+// chunks, so peak memory is one record line plus the live record set.
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -39,9 +43,22 @@ class IAlertFileIo {
   virtual bool readAll(const std::string& path, std::string& out) = 0;
   virtual bool exists(const std::string& path) const = 0;
   virtual bool remove(const std::string& path) = 0;
-  // Same-directory rename (atomic on POSIX and FatFS).
+  // Same-directory rename that replaces an existing `to`. POSIX rename does this
+  // atomically; on FatFS (rename never overwrites) SdAlertFileIo goes through
+  // eego_hal atomic_file replaceFile (to -> to.bak, from -> to, drop .bak).
   virtual bool rename(const std::string& from, const std::string& to) = 0;
   virtual bool fileSize(const std::string& path, size_t& out) const = 0;
+
+  // Streaming access (bounded RAM). A ChunkSink returns false to abort.
+  using ChunkSink = std::function<bool(const char* data, size_t n)>;
+  // Creates or truncates `path`, then calls `producer` with a sink that writes
+  // to the open file; flushes/syncs and closes afterwards. False when opening,
+  // any write, the producer, or close fails.
+  virtual bool writeStream(const std::string& path,
+                           const std::function<bool(const ChunkSink& sink)>& producer) = 0;
+  // Reads `path` front to back in small chunks into `sink`. False when missing,
+  // unreadable, or the sink aborts.
+  virtual bool readStream(const std::string& path, const ChunkSink& sink) = 0;
 };
 
 class AlertDb {
@@ -66,11 +83,19 @@ class AlertDb {
   // Rewrites the db with exactly `records` via tmp + read-back verify +
   // rename. On failure `err` explains and the original file is untouched.
   bool compact(const std::vector<AlertRecord>& records, std::string& err);
+  // Visitor form: records are pulled one at a time through `at(i)` for
+  // i in [0, count) (no copy of the live set). `at` must stay valid and return
+  // non-null for the whole call — the single store owner calls this inline.
+  using RecordAt = std::function<const AlertRecord*(size_t index)>;
+  bool compact(size_t count, const RecordAt& at, std::string& err);
 
   // Failed write/rename operations since construction — the ingest owner
   // polls this (or IngestOutcome::persist_failed) to react to SD trouble
   // instead of silently diverging from memory.
   size_t ioFailures() const { return io_failures_; }
+
+  // Current on-disk size of the db file; false when missing/unreadable.
+  bool fileSize(size_t& out) const { return io_.fileSize(path_, out); }
 
   // Appended-but-superseded lines since construction/load; the ingest owner
   // uses this to decide when to compact (e.g. dead ratio > 50%).
@@ -89,14 +114,5 @@ class AlertDb {
   size_t io_failures_ = 0;
   std::unordered_set<std::string> live_ids_;  // ids with a live (latest) line
 };
-
-// Offline cache for http_poll sources (M11 §2): cache/<source>.json holding
-// the last good response body. source_id is restricted to [A-Za-z0-9_-] so it
-// can never escape the cache directory.
-bool writeSourceCache(IAlertFileIo& io, const std::string& dir, const std::string& source_id,
-                      const std::string& body, std::string& err);
-bool readSourceCache(IAlertFileIo& io, const std::string& dir, const std::string& source_id,
-                     std::string& body_out);
-bool removeSourceCache(IAlertFileIo& io, const std::string& dir, const std::string& source_id);
 
 }  // namespace alert_core

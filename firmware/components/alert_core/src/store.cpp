@@ -271,13 +271,6 @@ const AlertRecord* AlertStore::find(const std::string& id) const {
   return nullptr;
 }
 
-const AlertRecord* AlertStore::findByFingerprint(const std::string& fingerprint) const {
-  for (const Entry& e : entries_) {
-    if (e.record.fingerprint == fingerprint) return &e.record;
-  }
-  return nullptr;
-}
-
 std::vector<const AlertRecord*> AlertStore::list(const std::string& state,
                                                  const std::string& severity,
                                                  const std::string& type,
@@ -333,18 +326,6 @@ StoreStats AlertStore::stats() const {
   return s;
 }
 
-std::vector<std::pair<std::string, std::string>> AlertStore::activeIdsBySource(
-    const std::string& source_id) const {
-  std::vector<std::pair<std::string, std::string>> out;
-  for (const Entry& e : entries_) {
-    const AlertRecord& r = e.record;
-    if (r.source.id == source_id && !isTerminal(r.state)) {
-      out.emplace_back(r.id, r.fingerprint);
-    }
-  }
-  return out;
-}
-
 std::vector<AlertRecord> AlertStore::allRecords() const {
   std::vector<AlertRecord> out;
   out.reserve(entries_.size());
@@ -366,7 +347,7 @@ size_t AlertStore::loadFrom(AlertDb& db) {
     entries_.push_back(std::move(e));
   }
   // Boot-time retention: tombstones already prevent evicted ids from coming
-  // back; this also enforces the (possibly re-configured) cap on legacy dbs,
+  // back; this also enforces the (possibly re-configured) cap on stored dbs,
   // appending tombstones for anything it has to drop. Returns the live record
   // count after enforcement.
   purge();
@@ -377,10 +358,34 @@ size_t AlertStore::dbIoFailures() const { return db_ != nullptr ? db_->ioFailure
 
 bool AlertStore::compactDb(std::string& err) {
   if (db_ == nullptr) return false;
-  std::vector<AlertRecord> records;
-  records.reserve(entries_.size());
-  for (const Entry& e : entries_) records.push_back(e.record);
-  return db_->compact(records, err);
+  // Visitor over the live entries — no copy of the record set (internal RAM
+  // only on device). Single-owner store: nothing mutates entries_ meanwhile.
+  const size_t count = entries_.size();
+  if (!db_->compact(
+          count,
+          [this, count](size_t i) -> const AlertRecord* {
+            return (i < count && i < entries_.size()) ? &entries_[i].record : nullptr;
+          },
+          err)) {
+    return false;
+  }
+  size_t bytes = 0;
+  last_compact_bytes_ = db_->fileSize(bytes) ? bytes : 0;
+  return true;
+}
+
+bool AlertStore::maybeCompactDb(const CompactPolicy& policy, std::string& err, bool* attempted) {
+  if (attempted != nullptr) *attempted = false;
+  if (db_ == nullptr) return false;
+  size_t bytes = 0;
+  const bool have_size = db_->fileSize(bytes);
+  const size_t dead = db_->deadLines();
+  const size_t total = db_->totalLines();
+  const bool too_big = have_size && bytes > policy.max_bytes && bytes > 2 * last_compact_bytes_;
+  const bool mostly_dead = dead >= policy.min_dead_lines && dead * 2 > total;
+  if (!too_big && !mostly_dead) return false;
+  if (attempted != nullptr) *attempted = true;
+  return compactDb(err);
 }
 
 }  // namespace alert_core

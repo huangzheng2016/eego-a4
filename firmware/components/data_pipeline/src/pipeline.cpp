@@ -1077,17 +1077,6 @@ bool DataPipeline::refreshSource(const std::string& source_id) {
   return true;
 }
 
-bool DataPipeline::refreshPanel(const std::string& panel_id) {
-  const auto panel = panels_.find(panel_id);
-  if (panel == panels_.end()) return false;
-  panel->second.pending = true;
-  panel->second.next_refresh_ms = 0;
-  SourceRuntime& source = *sources_[panel->second.binding.source_id];
-  detachAsync(source);
-  source.next_poll_ms = 0;
-  return true;
-}
-
 std::shared_ptr<const SourceResult> DataPipeline::sourceResult(const std::string& source_id) const {
   const auto source = sources_.find(source_id);
   return source == sources_.end() ? nullptr : source->second->result;

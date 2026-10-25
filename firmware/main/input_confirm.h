@@ -21,7 +21,7 @@ struct ConfirmTarget {
   bool physical_power_only = false;
 };
 
-enum class ConfirmRecordRule : uint8_t { AckAll, Mute, Clear };
+enum class ConfirmRecordRule : uint8_t { Mute, Clear };
 
 bool confirmRecordTargetCurrent(const ConfirmTarget& target, ConfirmRecordRule rule,
                                 const alert_core::AlertSnapshot* snapshot);

@@ -47,7 +47,10 @@ esp_err_t saveRecord(const InputBindingSet& values, std::string& error) {
 
 enum class LoadResult { Missing, Valid, Corrupt };
 
-LoadResult loadRecord(InputBindingSet& out) {
+// `reason` explains a Corrupt result (NVS error, bad JSON, or a record from an
+// older firmware whose page/builtin names no longer validate).
+LoadResult loadRecord(InputBindingSet& out, std::string& reason) {
+  reason = "NVS read failed";
   nvs_handle_t handle;
   esp_err_t err = nvs_open(kNamespace, NVS_READONLY, &handle);
   if (err == ESP_ERR_NVS_NOT_FOUND) return LoadResult::Missing;
@@ -67,15 +70,7 @@ LoadResult loadRecord(InputBindingSet& out) {
   nvs_close(handle);
   if (err != ESP_OK) return LoadResult::Corrupt;
   if (!text.empty() && text.back() == '\0') text.pop_back();
-  alert_core::JsonValue root;
-  alert_core::JsonParseError parse_error;
-  if (!alert_core::jsonParse(text, root, parse_error)) return LoadResult::Corrupt;
-  InputBindingSet candidate;
-  InputBindingErrors errors;
-  if (!inputBindingsFromJson(root, true, candidate, errors)) return LoadResult::Corrupt;
-  candidate.loaded = true;
-  out = std::move(candidate);
-  return LoadResult::Valid;
+  return parseStoredInputBindings(text, out, reason) ? LoadResult::Valid : LoadResult::Corrupt;
 }
 
 const dashboard::Dashboard* usableDashboard(const dashboard::Dashboard* dashboard) {
@@ -108,16 +103,24 @@ esp_err_t InputBindings::init() {
   }
 
   InputBindingSet loaded;
-  const LoadResult result = loadRecord(loaded);
+  std::string reason;
+  const LoadResult result = loadRecord(loaded, reason);
   if (result == LoadResult::Valid) {
     values_ = std::move(loaded);
     xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
     return ESP_OK;
   }
 
+  // Missing (first boot) or rejected (corrupt, or written by an older firmware
+  // whose page/builtin names were removed): run the default profile and
+  // overwrite the stored record right away, so the warning is logged once and
+  // the next boot loads a valid record instead of failing again.
   values_ = InputBindingSet{};
   values_.recovered = result == LoadResult::Corrupt;
-  if (values_.recovered) ESP_LOGW(kTag, "corrupt NVS record; restoring safe default profile");
+  if (values_.recovered) {
+    ESP_LOGW(kTag, "stored input bindings rejected (%s); replaced with the default profile",
+             reason.c_str());
+  }
   std::string error;
   const esp_err_t err = saveRecord(values_, error);
   values_.loaded = err == ESP_OK;

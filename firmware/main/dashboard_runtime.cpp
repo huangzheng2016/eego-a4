@@ -23,6 +23,9 @@
 #include "dashboard_core/json.h"
 #include "dashboard_ui/layout.h"
 #include "dashboard_ui/image_result.h"
+#include "dashboard_ui/panel_hit.h"
+#include "dashboard_ui/preview_data.h"
+#include "dashboard_ui/preview_render.h"
 #include "dashboard_ui/renderer.h"
 #include "dashboard_ui/text.h"
 #include "data_pipeline/data_pipeline.h"
@@ -122,24 +125,11 @@ bool parseConfig(const std::string& text, dash::Dashboard& dashboard,
             json_error.message;
     return false;
   }
-  // Defensive: configurations written before the screen layout rule may still
-  // be on the card (e.g. the admin store could not persist its repair). Repair
-  // them exactly like the admin store does before strict validation.
-  const size_t repaired = dash::repairLegacyStoredLayout(root);
-  if (repaired > 0) {
-    ESP_LOGW(kTag, "dashboard layout: repaired %u legacy panel(s) before validation",
-             static_cast<unsigned>(repaired));
-  }
   const dash::JsonValue* schema = root.find("schema");
   const bool bundle = schema != nullptr && schema->type() == dash::JsonValue::Type::String &&
                       schema->stringValue() == "eego.dashboard-bundle/1";
   if (!bundle) {
-    if (repaired > 0 && text.size() > dash::Limits{}.max_json_bytes) {
-      error = "configuration exceeds max_json_bytes";
-      return false;
-    }
-    const dash::ParseResult parsed =
-        repaired > 0 ? dash::dashboardFromJson(root) : dash::parseDashboard(text);
+    const dash::ParseResult parsed = dash::dashboardFromJson(root);
     if (!parsed.ok()) {
       error = firstParseError(parsed);
       return false;
@@ -295,6 +285,15 @@ struct DashboardRuntime::Impl {
   size_t focus = 0;
   size_t action_focus = 0;
   std::string focused_event_id;
+  // 面板焦点框只在用户显式选择面板（长按 ↑/↓、点按面板）后显示；翻屏清除。
+  bool focus_visible = false;
+  // 本次重建中因已确认而在视图里降为 Cleared 的事件（详情页显示「已确认」）。
+  std::set<std::string> acknowledged_events;
+  // 告警详情请求（PanelApp::service 取走）。
+  bool detail_requested = false;
+  std::string detail_panel;
+  std::string detail_identity;
+  uint32_t global_refresh_ms = 0;
   ui::PageLayout layout;
   std::vector<Location> navigation;
   uint64_t page_epoch = 1;
@@ -496,6 +495,29 @@ struct DashboardRuntime::Impl {
     return commit_err == ESP_OK;
   }
 
+  // 面板刷新周期覆盖：用户在面板上单独设定的优先，其次全局覆盖
+  // （DeviceSettings.data_refresh_s），都没有则按配置。未调度的面板忽略。
+  void applyRefreshOverrides(dp::DataPipeline& target, const dash::Dashboard& model) {
+    for (const dash::Page& current : model.pages) {
+      for (const dash::PanelSpec& panel : current.panels) {
+        if (panel.source_id.empty()) continue;
+        const auto custom = refresh_overrides.find(panel.id);
+        const uint32_t interval =
+            custom != refresh_overrides.end() ? custom->second : global_refresh_ms;
+        std::string ignored;
+        target.setPanelRefreshOverride(panel.id, interval, ignored);
+      }
+    }
+  }
+
+  void setGlobalRefresh(uint32_t refresh_ms) {
+    if (refresh_ms == global_refresh_ms) return;
+    global_refresh_ms = refresh_ms;
+    if (!ready || pipeline == nullptr) return;
+    applyRefreshOverrides(*pipeline, config);
+    force_tick = true;
+  }
+
   void ensureCache() {
     if (cache != nullptr || !eego::SdCard::instance().ready()) return;
     std::string relative = deps.cache_dir;
@@ -582,10 +604,7 @@ struct DashboardRuntime::Impl {
         }
       }
     }
-    for (const auto& item : refresh_overrides) {
-      std::string ignored;
-      candidate->setPanelRefreshOverride(item.first, item.second, ignored);
-    }
+    applyRefreshOverrides(*candidate, next_config);
 
     const bool suspend = dashboardReloadShouldSuspend(
         battery_cycle_cancelled, mains, battery_cycle_active, monotonicMs(),
@@ -616,6 +635,8 @@ struct DashboardRuntime::Impl {
     navigation.clear();
     ++page_epoch;
     focused_event_id.clear();
+    focus_visible = false;
+    detail_requested = false;
     chart_selection.clear();
     const dash::Page* initial = page(config, page_id);
     if (initial == nullptr) initial = defaultPage(config);
@@ -652,6 +673,7 @@ struct DashboardRuntime::Impl {
     focus = 0;
     action_focus = 0;
     focused_event_id.clear();
+    focus_visible = false;
     ++page_epoch;
     rebuildLayout();
     dirty = true;
@@ -677,6 +699,7 @@ struct DashboardRuntime::Impl {
         break;
       }
     }
+    focus_visible = true;
     invalidateFocus();
     return true;
   }
@@ -712,8 +735,52 @@ struct DashboardRuntime::Impl {
     setPage(pages[static_cast<size_t>(next)]->id, 0, false);
   }
 
+  // 上/下一屏：子屏优先，跨页循环（向前跨页落在上一页的最后一个子屏）。
+  void moveScreen(int delta) {
+    const std::vector<const dash::Page*> pages = visiblePages();
+    if (pages.empty() || delta == 0) return;
+    int remaining = delta;
+    while (remaining != 0) {
+      const int step = remaining > 0 ? 1 : -1;
+      remaining -= step;
+      if (step > 0 && page_index + 1 < layout.page_count) {
+        setPage(page_id, page_index + 1, false);
+        continue;
+      }
+      if (step < 0 && page_index > 0) {
+        setPage(page_id, page_index - 1, false);
+        continue;
+      }
+      size_t index = 0;
+      for (size_t i = 0; i < pages.size(); ++i) {
+        if (pages[i]->id == page_id) index = i;
+      }
+      const size_t next = (index + pages.size() + static_cast<size_t>(step)) % pages.size();
+      setPage(pages[next]->id, 0, false);
+      if (step < 0 && layout.page_count > 1) setPage(page_id, layout.page_count - 1, false);
+    }
+  }
+
+  void home() {
+    const dash::Page* initial = defaultPage(view);
+    if (initial == nullptr) return;
+    navigation.clear();
+    setPage(initial->id, 0, false);
+  }
+
+  bool atHome() const {
+    const dash::Page* initial = defaultPage(view);
+    return initial != nullptr && initial->id == page_id && page_index == 0;
+  }
+
   void moveFocus(int delta) {
     if (delta == 0) return;
+    if (!focus_visible && !layout.panels.empty()) {
+      // 第一次长按只显示焦点框（落在当前面板），不跳过它。
+      focus_visible = true;
+      invalidateFocus();
+      return;
+    }
     const std::string old = focusedPanel() == nullptr ? "" : focusedPanel()->id;
     int remaining = delta;
     while (remaining != 0) {
@@ -749,6 +816,7 @@ struct DashboardRuntime::Impl {
     }
     focused_event_id.clear();
     action_focus = 0;
+    focus_visible = true;
     invalidateFocus(old);
   }
 
@@ -834,8 +902,10 @@ struct DashboardRuntime::Impl {
     if (view.events.size() >= kMaxEvents || !seen.insert(eventKey(event)).second) return;
     const uint64_t generation = event_tracker.observe(event);
     view.events.push_back(event);
-    if (event_tracker.suppressed(event, generation))
+    if (event_tracker.suppressed(event, generation)) {
       view.events.back().state = dash::EventState::Cleared;
+      acknowledged_events.insert(dashboardEventIdentity(event));
+    }
   }
 
   bool usesSeries(const dash::PanelSpec& panel) const {
@@ -1138,6 +1208,7 @@ struct DashboardRuntime::Impl {
 
     view.samples.clear();
     view.events.clear();
+    acknowledged_events.clear();
     std::set<std::string> seen_samples;
     std::set<std::string> seen_events;
     for (dash::Page& current : view.pages) {
@@ -1218,17 +1289,9 @@ struct DashboardRuntime::Impl {
     return true;
   }
 
+  // Display order of the panel's alert list (shared with the renderer).
   std::vector<const dash::Event*> eventsForPanel(const dash::PanelSpec& panel) const {
-    std::vector<const dash::Event*> out;
-    for (const dash::Event& event : view.events) {
-      if (out.size() >= 256) break;
-      if (eventMatches(panel, event)) out.push_back(&event);
-    }
-    std::stable_sort(out.begin(), out.end(), [](const dash::Event* left, const dash::Event* right) {
-      if (left->state != right->state) return left->state == dash::EventState::Active;
-      return left->timestamp_ms > right->timestamp_ms;
-    });
-    return out;
+    return ui::alertPanelEvents(view, panel);
   }
 
   const dash::Event* findEvent(std::string_view id) const {
@@ -1540,6 +1603,11 @@ struct DashboardRuntime::Impl {
       showMessage("No active alert to acknowledge");
       return false;
     }
+    return acknowledgeEvent(*event);
+  }
+
+  bool acknowledgeEvent(const dash::Event& target_event) {
+    const dash::Event* event = &target_event;
     const std::string identity = dashboardEventIdentity(*event);
     const std::string core_id = dashboardCoreRecordId(*event);
     if (!core_id.empty() && deps.alerts != nullptr && deps.net != nullptr) {
@@ -1709,7 +1777,44 @@ struct DashboardRuntime::Impl {
     return target.panel->id + "/" + target.action->id;
   }
 
+  void requestDetail(const std::string& panel_id, const std::string& identity) {
+    detail_requested = true;
+    detail_panel = panel_id;
+    detail_identity = identity;
+  }
+
+  // 告警面板的首条（活动优先、最新优先）事件；无事件返回 nullptr。
+  const dash::Event* topEvent(const dash::PanelSpec& panel) const {
+    const std::vector<const dash::Event*> events = eventsForPanel(panel);
+    return events.empty() ? nullptr : events.front();
+  }
+
+  // Power 短按（选择/确认）：
+  //   * 已显式选中面板（焦点框可见）→ 按面板类型执行：告警面板打开详情，
+  //     按钮执行动作，多图表轮换；
+  //   * 未选中面板 → 本屏有告警面板则打开其告警详情；否则显示焦点框，
+  //     再按一次执行（避免误触发按钮动作）。
   void activate() {
+    if (!focus_visible) {
+      for (const ui::PanelLayout& item : layout.panels) {
+        if (item.panel == nullptr || item.panel->kind != dash::PanelKind::Alert) continue;
+        if (const dash::Event* event = topEvent(*item.panel)) {
+          requestDetail(item.panel->id, dashboardEventIdentity(*event));
+          return;
+        }
+      }
+      if (layout.panels.empty()) return;
+      for (size_t i = 0; i < layout.panels.size(); ++i) {
+        const dash::PanelSpec* candidate = layout.panels[i].panel;
+        if (candidate != nullptr && !candidate->actions.empty()) {
+          focus = i;
+          break;
+        }
+      }
+      focus_visible = true;
+      invalidateFocus();
+      return;
+    }
     const dash::PanelSpec* selected = focusedPanel();
     if (selected == nullptr) return;
     if (selected->kind == dash::PanelKind::Button && !selected->actions.empty()) {
@@ -1723,18 +1828,13 @@ struct DashboardRuntime::Impl {
     }
     if (selected->kind == dash::PanelKind::Alert) {
       const dash::Event* event = findEvent(focused_event_id);
-      if (event == nullptr) {
-        const std::vector<const dash::Event*> events = eventsForPanel(*selected);
-        if (!events.empty()) event = events.front();
-      }
+      if (event == nullptr) event = topEvent(*selected);
       if (event != nullptr) {
-        const std::string linked = linkedForEvent(*event);
-        if (!linked.empty()) {
-          const std::string event_id = dashboardEventIdentity(*event);
-          if (focusPanel(linked)) focused_event_id = event_id;
-          return;
-        }
+        requestDetail(selected->id, dashboardEventIdentity(*event));
+        return;
       }
+      showMessage("No alerts");
+      return;
     }
     if (!selected->actions.empty()) {
       dispatchAction(*selected, selected->actions.front());
@@ -1746,7 +1846,7 @@ struct DashboardRuntime::Impl {
   void touch(int16_t x, int16_t y) {
     if (!ready) return;
     if (y >= kStatusLineY) {
-      movePage(x < 276 ? -1 : 1);
+      moveScreen(x < 276 ? -1 : 1);
       return;
     }
     ui::HitTarget target;
@@ -1756,6 +1856,7 @@ struct DashboardRuntime::Impl {
         if (layout.panels[i].panel == target.panel) focus = i;
       }
       action_focus = target.action_index;
+      focus_visible = true;
       invalidateFocus(old);
       dispatchAction(*target.panel, *target.action);
       return;
@@ -1769,26 +1870,16 @@ struct DashboardRuntime::Impl {
       action_focus = 0;
 
       if (item.panel->kind == dash::PanelKind::Alert) {
-        ui::Rect body = item.content;
-        if (!item.panel->title.empty()) {
-          const int16_t title_height = eego::FontManager::instance().uiFontHeight() + 5;
-          body.y += title_height;
-          body.h -= title_height;
+        // Same row geometry the renderer used to draw this panel.
+        if (const dash::Event* hit = ui::alertEventAt(view, item, x, y)) {
+          requestDetail(item.panel->id, dashboardEventIdentity(*hit));
+          return;
         }
-        const int16_t row_height = std::max<int16_t>(
-            eego::FontManager::instance().uiFontHeight() + 7, 14);
-        const std::vector<const dash::Event*> events = eventsForPanel(*item.panel);
-        if (body.h > 0 && y >= body.y) {
-          const size_t row = static_cast<size_t>((y - body.y) / row_height);
-          if (row < events.size()) {
-            const std::string event_id = dashboardEventIdentity(*events[row]);
-            focused_event_id = event_id;
-            const std::string linked = linkedForEvent(*events[row]);
-            if (!linked.empty()) {
-              if (focusPanel(linked)) focused_event_id = event_id;
-              return;
-            }
-          }
+        const std::vector<const dash::Event*> events = ui::alertPanelEvents(view, *item.panel);
+        // 标题/空白处：打开该面板的首条告警。
+        if (!events.empty()) {
+          requestDetail(item.panel->id, dashboardEventIdentity(*events.front()));
+          return;
         }
       } else if (already_focused && item.panel->kind == dash::PanelKind::Chart) {
         cycleChart(1);
@@ -1796,6 +1887,7 @@ struct DashboardRuntime::Impl {
       } else {
         focused_event_id.clear();
       }
+      focus_visible = true;
       invalidateFocus(old);
       return;
     }
@@ -2067,6 +2159,7 @@ struct DashboardRuntime::Impl {
   }
 
   void drawFocus() {
+    if (!focus_visible) return;
     const ui::PanelLayout* selected = focusedLayout();
     if (selected == nullptr || selected->panel == nullptr) return;
     const ui::Rect& bounds = selected->bounds;
@@ -2107,9 +2200,7 @@ struct DashboardRuntime::Impl {
     if (!message.empty()) return message;
     if (const dash::Event* event = bannerEvent()) {
       banner_id = dashboardEventIdentity(*event);
-      std::string text = std::string(dash::severityName(event->severity)) + " " + event->title;
-      if (!linkedForEvent(*event).empty()) text += "  [TREND]";
-      return text;
+      return std::string(dash::severityName(event->severity)) + " " + event->title + "  >";
     }
     const std::vector<const dash::Page*> pages = visiblePages();
     size_t number = 0;
@@ -2129,9 +2220,15 @@ struct DashboardRuntime::Impl {
     const char* clock = TimeSource::valid() ? clock_label : "NOCLK";
     if (TimeSource::valid() && std::string_view(clock) == "NOCLK") clock = "RTC";
     char status[160];
-    std::snprintf(status, sizeof(status), "P%u/%u.%u %s DATA %u/%u OFF %u  U/D NAV PWR OPEN",
-                  static_cast<unsigned>(number), static_cast<unsigned>(pages.size()),
-                  static_cast<unsigned>(page_index + 1), clock,
+    char screen[24];
+    if (layout.page_count > 1) {
+      std::snprintf(screen, sizeof(screen), "%u/%u.%u", static_cast<unsigned>(number),
+                    static_cast<unsigned>(pages.size()), static_cast<unsigned>(page_index + 1));
+    } else {
+      std::snprintf(screen, sizeof(screen), "%u/%u", static_cast<unsigned>(number),
+                    static_cast<unsigned>(pages.size()));
+    }
+    std::snprintf(status, sizeof(status), "%s  %s  DATA %u/%u  OFF %u", screen, clock,
                   static_cast<unsigned>(cached - std::min(cached, offline)),
                   static_cast<unsigned>(config.sources.size()), static_cast<unsigned>(offline));
     return status;
@@ -2147,6 +2244,42 @@ struct DashboardRuntime::Impl {
         kStatusLineY + 1 + std::max(0, (kStatusLineH - 1 - text_h) / 2));
     ui::drawTextFit(*deps.canvas, eego::FontManager::instance(), 28 + 12, text_y, 496 - 24, text,
                     1, false, 0);
+  }
+
+  bool renderPreview(eego::PortraitCanvas& canvas, const dash::Dashboard& candidate,
+                     const std::string& wanted_page, size_t screen,
+                     DashboardRuntime::PreviewInfo& info) const {
+    dash::Dashboard preview = candidate;
+    const ui::PreviewData data =
+        ui::fillPreviewData(preview, ready ? &view : nullptr, pipelineMs());
+    info.data = ui::previewDataName(data);
+    ui::PreviewRenderOptions options;
+    options.page_id = wanted_page;
+    options.screen = screen;
+    options.layout_config = layoutConfig();
+    // No network image provider: a preview never fetches remote assets (SD-local
+    // images still load through the renderer's built-in SD provider).
+    const ui::PreviewRenderResult result = ui::renderPreviewPage(canvas, preview, options);
+    info.bad_request = result.bad_request;
+    info.error = result.error;
+    info.page_id = result.page_id;
+    info.screen = result.screen;
+    info.screen_count = result.screen_count;
+    if (!result.ok) return false;
+    // Status line like the live dashboard (divider + page/screen), marked as preview.
+    canvas.drawLine(28, kStatusLineY, 28 + 496 - 1, kStatusLineY, 0);
+    std::string title = info.page_id;
+    for (const dash::Page& item : preview.pages) {
+      if (item.id == info.page_id && !item.title.empty()) title = item.title;
+    }
+    const std::string text = "Preview  " + title + "  " + std::to_string(info.screen + 1) + "/" +
+                             std::to_string(info.screen_count);
+    const int16_t text_h = eego::FontManager::instance().uiFontHeight();
+    const int16_t text_y = static_cast<int16_t>(
+        kStatusLineY + 1 + std::max(0, (kStatusLineH - 1 - text_h) / 2));
+    ui::drawTextFit(canvas, eego::FontManager::instance(), 28 + 12, text_y, 496 - 24, text, 1,
+                    false, 0);
+    return true;
   }
 
   bool needsRender() const {
@@ -2263,7 +2396,7 @@ struct DashboardRuntime::Impl {
 
   void diagStatus() {
     if (!ready) {
-      printf("dashboard: loaded=0 (legacy alert UI active)\n");
+      printf("dashboard: loaded=0 (onboarding screen) reason=%s\n", config_error.c_str());
       return;
     }
     printf("dashboard: loaded=1 id=%s revision=%u page=%s subpage=%u focus=%s\n",
@@ -2458,6 +2591,12 @@ DashboardRuntime::~DashboardRuntime() = default;
 bool DashboardRuntime::begin(const Deps& deps) { return impl_ != nullptr && impl_->begin(deps); }
 bool DashboardRuntime::reload() { return impl_ != nullptr && impl_->reload(); }
 bool DashboardRuntime::available() const { return impl_ != nullptr && impl_->ready; }
+std::string DashboardRuntime::unavailableReason() const {
+  return impl_ == nullptr ? std::string("out of memory") : impl_->config_error;
+}
+std::string DashboardRuntime::title() const {
+  return impl_ == nullptr || !impl_->ready ? std::string() : impl_->config.title;
+}
 void DashboardRuntime::service(bool mains) {
   if (impl_ != nullptr) impl_->service(mains);
 }
@@ -2488,8 +2627,28 @@ void DashboardRuntime::moveFocus(int delta, bool adjust) {
 void DashboardRuntime::movePage(int delta) {
   if (impl_ != nullptr && impl_->ready) impl_->movePage(delta);
 }
+void DashboardRuntime::moveScreen(int delta) {
+  if (impl_ != nullptr && impl_->ready) impl_->moveScreen(delta);
+}
+void DashboardRuntime::home() {
+  if (impl_ != nullptr && impl_->ready) impl_->home();
+}
+bool DashboardRuntime::atHome() const {
+  return impl_ == nullptr || !impl_->ready || impl_->atHome();
+}
+bool DashboardRuntime::firstScreen() const {
+  if (impl_ == nullptr || !impl_->ready) return true;
+  const std::vector<const eego::dashboard::Page*> pages = impl_->visiblePages();
+  return impl_->page_index == 0 && (pages.empty() || pages.front()->id == impl_->page_id);
+}
 void DashboardRuntime::refreshCurrent() {
   if (impl_ != nullptr && impl_->ready) impl_->refresh("current");
+}
+void DashboardRuntime::refreshAll() {
+  if (impl_ != nullptr && impl_->ready) impl_->refresh("all");
+}
+void DashboardRuntime::setGlobalRefresh(uint32_t refresh_ms) {
+  if (impl_ != nullptr) impl_->setGlobalRefresh(refresh_ms);
 }
 void DashboardRuntime::activate() {
   if (impl_ != nullptr && impl_->ready) impl_->activate();
@@ -2497,13 +2656,9 @@ void DashboardRuntime::activate() {
 void DashboardRuntime::touch(int16_t x, int16_t y) {
   if (impl_ == nullptr || !impl_->ready) return;
   if (y >= Impl::kStatusLineY && !impl_->banner_event_id.empty()) {
-    if (const dash::Event* event = impl_->findEvent(impl_->banner_event_id)) {
-      const std::string linked = impl_->linkedForEvent(*event);
-      if (!linked.empty()) {
-        const std::string event_id = dashboardEventIdentity(*event);
-        if (impl_->focusPanel(linked)) impl_->focused_event_id = event_id;
-        return;
-      }
+    if (impl_->findEvent(impl_->banner_event_id) != nullptr) {
+      impl_->requestDetail({}, impl_->banner_event_id);
+      return;
     }
   }
   impl_->touch(x, y);
@@ -2555,6 +2710,17 @@ std::string DashboardRuntime::pageContext() const {
 std::string DashboardRuntime::focusedControl() const {
   return impl_ == nullptr || !impl_->ready ? std::string() : impl_->focusedControl();
 }
+bool DashboardRuntime::renderPreview(eego::PortraitCanvas& canvas,
+                                     const eego::dashboard::Dashboard& candidate,
+                                     const std::string& page_id, size_t screen,
+                                     PreviewInfo& info) const {
+  if (impl_ == nullptr) {
+    info.error = "dashboard runtime unavailable";
+    return false;
+  }
+  return impl_->renderPreview(canvas, candidate, page_id, screen, info);
+}
+
 std::string DashboardRuntime::touchControl(int16_t x, int16_t y) const {
   return impl_ == nullptr || !impl_->ready ? std::string() : impl_->touchControl(x, y);
 }
@@ -2564,6 +2730,79 @@ void DashboardRuntime::showStatusMessage(const std::string& text, uint32_t durat
 std::string DashboardRuntime::linkedPanelForAlert(const alert_core::AlertRecord& record) const {
   return impl_ == nullptr || !impl_->ready ? std::string() : impl_->linkedForRecord(record);
 }
+bool DashboardRuntime::consumeDetailRequest(std::string& panel_id, std::string& identity) {
+  if (impl_ == nullptr || !impl_->detail_requested) return false;
+  impl_->detail_requested = false;
+  panel_id = std::move(impl_->detail_panel);
+  identity = std::move(impl_->detail_identity);
+  impl_->detail_panel.clear();
+  impl_->detail_identity.clear();
+  return impl_->ready;
+}
+
+std::vector<DashboardAlertItem> DashboardRuntime::alertItems(const std::string& panel_id) const {
+  std::vector<DashboardAlertItem> out;
+  if (impl_ == nullptr || !impl_->ready) return out;
+  std::vector<const dash::Event*> events;
+  if (!panel_id.empty()) {
+    const dash::PanelSpec* panel = impl_->findPanel(panel_id);
+    if (panel == nullptr) return out;
+    events = impl_->eventsForPanel(*panel);
+  } else {
+    events.reserve(impl_->view.events.size());
+    for (const dash::Event& event : impl_->view.events) events.push_back(&event);
+    ui::orderAlertEvents(events);  // same order + cap as the panel lists
+  }
+  out.reserve(events.size());
+  for (const dash::Event* event : events) {
+    DashboardAlertItem item;
+    item.identity = dashboardEventIdentity(*event);
+    item.core_id = dashboardCoreRecordId(*event);
+    item.title = event->title;
+    item.message = event->message;
+    item.source_id = event->source_id;
+    item.rule_id = event->rule_id;
+    item.linked_panel_id = impl_->linkedForEvent(*event);
+    item.severity = static_cast<uint8_t>(event->severity);
+    item.acknowledged = impl_->acknowledged_events.count(item.identity) != 0;
+    item.active = event->state == dash::EventState::Active || item.acknowledged;
+    item.timestamp_ms = event->timestamp_ms;
+    out.push_back(std::move(item));
+  }
+  return out;
+}
+
+bool DashboardRuntime::acknowledgeEvent(const std::string& identity) {
+  if (impl_ == nullptr || !impl_->ready) return false;
+  const dash::Event* event = impl_->findEvent(identity);
+  if (event == nullptr || event->state != dash::EventState::Active) return false;
+  const dash::Event copy = *event;
+  return impl_->acknowledgeEvent(copy);
+}
+
+std::vector<DashboardSourceInfo> DashboardRuntime::sources() const {
+  std::vector<DashboardSourceInfo> out;
+  if (impl_ == nullptr || !impl_->ready || impl_->pipeline == nullptr) return out;
+  for (const dash::Source& source : impl_->config.sources) {
+    DashboardSourceInfo info;
+    info.id = source.id;
+    info.enabled = source.enabled;
+    info.has_data = impl_->currentResult(source.id) != nullptr;
+    dp::SourceStatus status;
+    if (impl_->pipeline->sourceStatus(source.id, status)) {
+      info.offline = status.offline;
+      info.stale = status.stale;
+      info.consecutive_failures = status.consecutive_failures;
+      info.last_http_status = status.last_http_status;
+      info.last_success_ms = status.last_success_ms;
+      info.last_attempt_ms = status.last_attempt_ms;
+      info.error = ui::sanitizeText(status.error.empty() ? status.cache_error : status.error, false, 80);
+    }
+    out.push_back(std::move(info));
+  }
+  return out;
+}
+
 void DashboardRuntime::diag(const char* args) {
   if (impl_ != nullptr) impl_->diag(args);
 }

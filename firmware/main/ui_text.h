@@ -18,21 +18,18 @@ enum class Lang : uint8_t {
 
 // X(键, 中文, English)
 #define PANEL_STR_LIST(X) \
-  X(AppName, "告警面板", "ALERT PANEL") \
-  X(PageOverview, "总览", "OVERVIEW") \
-  X(PageTable, "告警列表", "ALERTS") \
-  X(PageDetail, "详情", "DETAIL") \
-  X(PageStatus, "状态", "STATUS") \
+  X(PageDetail, "告警详情", "ALERT") \
+  X(PageStatus, "设备状态", "STATUS") \
   X(PageSettings, "设置", "SETTINGS") \
+  X(PageOnboarding, "开始使用", "GET STARTED") \
   X(Back, "返回", "BACK") \
   X(Refresh, "刷新", "REFRESH") \
-  X(Open, "打开", "OPEN") \
-  X(List, "列表", "LIST") \
-  X(AckAll, "全部已读", "READ ALL") \
-  X(Ack, "标记已读", "MARK READ") \
+  X(Ack, "确认", "ACK") \
   X(Mute, "静音", "MUTE") \
   X(Clear, "删除", "DELETE") \
+  X(Trend, "趋势", "TREND") \
   X(SettingsKey, "设置", "SETTINGS") \
+  X(StatusKey, "状态", "STATUS") \
   X(On, "开", "ON") \
   X(Off, "关", "OFF") \
   X(Ok, "正常", "OK") \
@@ -40,20 +37,17 @@ enum class Lang : uint8_t {
   X(SevCritical, "严重", "CRITICAL") \
   X(SevWarning, "警告", "WARNING") \
   X(SevInfo, "提示", "INFO") \
-  X(ActiveTotal, "活动告警", "ACTIVE") \
-  X(AckedCount, "已读", "READ") \
   X(MutedCount, "已静音", "MUTED") \
-  X(NoAlerts, "无活动告警", "NO ACTIVE ALERTS") \
-  X(SourcesHealthy, "数据源正常", "SOURCES OK") \
-  X(UpdatedAt, "更新时间", "UPDATED") \
-  X(AlertsCountFmt, "告警 %u 条", "ALERTS %u") \
-  X(PageFmt, "第 %u/%u 页", "PAGE %u/%u") \
-  X(EmptyList, "无告警记录", "NO ALERTS") \
-  X(StateActive, "活动", "ACT") \
-  X(StateAcked, "已读", "READ") \
-  X(StateCleared, "已清除", "CLR") \
-  X(StateExpired, "已过期", "EXP") \
+  X(EmptyList, "告警已全部恢复", "NO ALERTS LEFT") \
+  X(StateActive, "活动", "ACTIVE") \
+  X(StateAcked, "已确认", "ACKED") \
+  X(StateCleared, "已恢复", "CLEARED") \
+  X(StateExpired, "已过期", "EXPIRED") \
   X(LblSource, "来源", "SOURCE") \
+  X(LblRule, "规则", "RULE") \
+  X(LblTime, "时间", "TIME") \
+  X(ExternalAlert, "外部告警", "EXTERNAL ALERT") \
+  X(RuleAlert, "规则告警", "RULE ALERT") \
   X(LblState, "状态", "STATE") \
   X(LblFirstSeen, "首次", "FIRST") \
   X(LblLastSeen, "最近", "LAST") \
@@ -66,7 +60,7 @@ enum class Lang : uint8_t {
   X(Never, "从未", "NEVER") \
   X(None, "无", "NONE") \
   X(ConfirmHold, "按住同一按钮 0.7 秒确认", "HOLD SAME BUTTON 0.7S TO CONFIRM") \
-  X(DoneAck, "已标记已读", "MARKED READ") \
+  X(DoneAck, "已确认", "ACKNOWLEDGED") \
   X(DoneClear, "已删除", "DELETED") \
   X(DoneMute, "已静音", "MUTED") \
   X(ActionFailed, "操作失败", "ACTION FAILED") \
@@ -80,11 +74,26 @@ enum class Lang : uint8_t {
   X(WifiConnected, "WiFi 已连接", "CONNECTED") \
   X(WifiFailed, "WiFi 连接失败", "FAILED") \
   X(WifiOffline, "WiFi 离线", "OFFLINE") \
-  X(Sources, "告警源", "SOURCES") \
-  X(NoSources, "无源", "NO SOURCES") \
-  X(NextDueIn, "下次", "NEXT") \
-  X(LastOk, "上次成功", "LAST OK") \
-  X(StoreStats, "存储", "STORE") \
+  X(Sources, "数据源", "DATA SOURCES") \
+  X(NoSources, "未配置数据源", "NO SOURCES") \
+  X(NoDashboard, "未配置仪表盘", "NO DASHBOARD") \
+  X(LastOk, "更新", "UPDATED") \
+  X(SourceOk, "正常", "OK") \
+  X(SourceStale, "缓存", "CACHED") \
+  X(SourceOffline, "离线", "OFFLINE") \
+  X(SourceDisabled, "停用", "DISABLED") \
+  X(SecNetwork, "网络", "NETWORK") \
+  X(SecDevice, "设备", "DEVICE") \
+  X(SecAlerts, "外部告警（推送）", "EXTERNAL ALERTS (PUSH)") \
+  X(LblWifi, "WiFi", "WIFI") \
+  X(LblSignal, "信号", "SIGNAL") \
+  X(LblAddress, "管理地址", "ADDRESS") \
+  X(LblBattery, "电池", "BATTERY") \
+  X(LblPower, "供电", "POWER") \
+  X(LblStorage, "存储", "STORAGE") \
+  X(LblHardware, "硬件", "HARDWARE") \
+  X(LblDashboard, "仪表盘", "DASHBOARD") \
+  X(AlertStoreFmt, "活动 %u · 已确认 %u · 静音 %u", "ACTIVE %u · ACKED %u · MUTED %u") \
   X(SysStatus, "系统", "SYSTEM") \
   X(TimeLabel, "时间", "TIME") \
   X(TimeRtc, "RTC", "RTC") \
@@ -101,14 +110,12 @@ enum class Lang : uint8_t {
   X(SetFrontlight, "前光", "FRONTLIGHT") \
   X(SetMutes, "静音列表", "MUTED LIST") \
   X(SetPollNow, "立即刷新数据", "REFRESH NOW") \
-  X(SetAdmin, "管理后台", "ADMIN") \
   X(MutesFmt, "静音 %u 条", "MUTED %u") \
   X(ClearMutes, "取消全部静音", "CLEAR MUTES") \
   X(PollNowStarted, "已开始刷新数据", "REFRESH STARTED") \
   X(FrontlightMissing, "无前光", "NO FRONTLIGHT") \
   X(PollEveryFmt, "每 %u 秒", "EVERY %us") \
   X(ProvTitle, "首次配网", "SETUP") \
-  X(ProvAp, "连接热点", "CONNECT AP") \
   X(ProvStep1, "1. 手机连接 EEGO-A4-Setup", "1. Join EEGO-A4-Setup") \
   X(ProvStep2, "2. 浏览器打开 192.168.4.1", "2. Open http://192.168.4.1") \
   X(ProvStep3, "3. 选 WiFi 并设管理密码", "3. Pick WiFi + set password") \
@@ -119,6 +126,17 @@ enum class Lang : uint8_t {
   X(Sleeping, "电池供电：休眠中", "BATTERY: SLEEPING") \
   X(WakeHint, "按电源键唤醒", "PRESS POWER TO WAKE") \
   X(Polling, "正在刷新...", "REFRESHING...") \
+  X(OnbOpen, "在浏览器中打开", "OPEN IN A BROWSER") \
+  X(OnbNoAddress, "等待网络连接…", "WAITING FOR NETWORK…") \
+  X(OnbStep1, "1. 电脑或手机连接与本机相同的网络", "1. Join the same network as this device") \
+  X(OnbStep2, "2. 打开上面的地址并登录管理后台", "2. Open the address above and sign in") \
+  X(OnbStep3, "3. 选择模板或新建仪表盘，应用到设备", "3. Pick a template or build a dashboard, then apply") \
+  X(OnbApStep1, "1. 手机连接热点 EEGO-A4-Setup", "1. Join Wi-Fi EEGO-A4-Setup") \
+  X(OnbApStep2, "2. 打开上面的地址，选择 WiFi", "2. Open the address above and pick Wi-Fi") \
+  X(OnbApStep3, "3. 联网后用新地址配置仪表盘", "3. Then configure the dashboard at the new address") \
+  X(OnbNoWifi, "WiFi 未配置：设置 → 开启配网热点", "NO WIFI: SETTINGS → RECOVERY AP") \
+  X(OnbInvalidFmt, "仪表盘配置无效：%s", "DASHBOARD CONFIG INVALID: %s") \
+  X(OnbKeys, "前置键：长按 设置 · 双击 状态", "FRONT KEY: HOLD = SETTINGS · DOUBLE = STATUS") \
   X(AgeNow, "刚刚", "NOW") \
   X(AgeMinFmt, "%u 分钟前", "%um ago") \
   X(AgeHourFmt, "%u 小时前", "%uh ago") \
@@ -171,24 +189,24 @@ enum class Lang : uint8_t {
   X(InputResetDone, "按键映射已恢复默认", "INPUT DEFAULTS RESTORED") \
   X(SetInputHelp, "输入帮助", "INPUT HELP") \
   X(SetInputReset, "重置按键映射", "RESET INPUT MAPPINGS") \
+  X(HelpUpDownShort, "↑/↓ 短按", "UP/DOWN SHORT") \
+  X(HelpScreen, "上/下一屏；列表中上/下一项", "PREV/NEXT SCREEN; ITEM IN LISTS") \
+  X(HelpUpDownLong, "↑/↓ 长按", "UP/DOWN LONG") \
+  X(HelpFocus, "选择面板（焦点框）", "SELECT PANEL (FOCUS)") \
   X(HelpPower, "Power 短按 / 长按", "POWER SHORT / LONG") \
-  X(HelpActivateBack, "确认 / 返回（固定）", "ACTIVATE / BACK (FIXED)") \
-  X(HelpFrontHome, "Front 短按", "FRONT SHORT") \
-  X(HelpHome, "返回主页（固定）", "HOME ESCAPE (FIXED)") \
-  X(HelpFrontGestures, "Front 长按 / 双击", "FRONT LONG / DOUBLE") \
-  X(HelpDefaultHelpStatus, "帮助 / 状态（默认）", "HELP / STATUS (DEFAULT)") \
-  X(HelpUpDown, "Up/Down 短按 / 长按", "UP/DOWN SHORT / LONG") \
-  X(HelpFocusPage, "焦点 / 翻页（默认）", "FOCUS / PAGE (DEFAULT)") \
-  X(HelpSwipe, "滑动（左/上 · 右/下）", "SWIPE (LEFT/UP · RIGHT/DOWN)") \
-  X(HelpPage, "下一页 / 上一页；首页右滑返回", "NEXT / PREV PAGE; RIGHT ON FIRST = BACK") \
-  X(HelpChord, "Up+Down 组合键", "UP+DOWN CHORD") \
-  X(HelpCustomOnly, "仅自定义动作", "CUSTOM ACTION ONLY") \
+  X(HelpActivateBack, "确认 / 返回", "SELECT / BACK") \
+  X(HelpFrontHome, "前置键 短按", "FRONT SHORT") \
+  X(HelpHome, "回到主页（固定）", "HOME (FIXED)") \
+  X(HelpFrontGestures, "前置键 长按 / 双击", "FRONT LONG / DOUBLE") \
+  X(HelpSettingsStatus, "设置 / 状态", "SETTINGS / STATUS") \
+  X(HelpSwipe, "滑动 左/上 · 右/下", "SWIPE LEFT/UP · RIGHT/DOWN") \
+  X(HelpPage, "下一屏 / 上一屏；首屏右滑返回", "NEXT / PREV; RIGHT ON FIRST = BACK") \
+  X(HelpTapAlert, "点按告警", "TAP AN ALERT") \
+  X(HelpOpenDetail, "告警详情：确认 / 静音", "ALERT DETAIL: ACK / MUTE") \
   X(HelpDanger, "危险操作", "DANGEROUS ACTION") \
   X(HelpFreshHold, "按住同一按钮 0.7 秒", "HOLD SAME BUTTON 0.7S") \
   X(HelpCustomBindings, "自定义按键", "CUSTOM BINDINGS") \
-  X(HelpOverrideOrder, "页面设置优先；默认安全", "PAGE FIRST; SAFE DEFAULTS") \
-  X(HelpLocalReset, "本地恢复", "LOCAL RESET") \
-  X(HelpResetHere, "设置 → 重置按键映射", "SETTINGS → RESET INPUT") \
+  X(HelpWebBindings, "网页端设置；设置 → 重置按键映射", "WEB ADMIN; SETTINGS → RESET INPUT") \
   X(LangZh, "中文", "CHINESE") \
   X(LangEn, "英文", "ENGLISH") \
   X(PrevPage, "上一页", "PREV") \

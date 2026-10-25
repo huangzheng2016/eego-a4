@@ -7,7 +7,6 @@
 #include <limits>
 
 #include "config_internal.h"
-#include "migration.h"
 
 namespace eego::dashboard {
 namespace {
@@ -529,12 +528,11 @@ void parseV2(const JsonValue& root, Dashboard& out, const ParseOptions& options,
                  Page page;
                  if (reader.object(item, path, "page")) {
                    reader.known(item, path,
-                                {"id", "title", "visible", "grid_columns", "row_height", "panels"});
+                                {"id", "title", "visible", "grid_columns", "panels"});
                    reader.string(item, "id", path, page.id, kMaxIdCodePoints, true);
                    reader.string(item, "title", path, page.title, kMaxTitleCodePoints);
                    reader.boolean(item, "visible", path, page.visible);
                    reader.uint32(item, "grid_columns", path, page.grid_columns, 1, 64);
-                   reader.uint32(item, "row_height", path, page.row_height, 1, 256);
                    reader.array(item, "panels", path, options.limits.max_panels_per_page, false,
                                 [&](const JsonValue& panel_value, const std::string& panel_path) {
                                   PanelSpec panel;
@@ -607,18 +605,6 @@ bool domKeysUnique(const JsonValue& value) {
     }
   }
   return true;
-}
-
-bool schemaVersion(const std::string& schema, uint32_t& version) {
-  if (schema == "eego.dashboard/1") {
-    version = 1;
-    return true;
-  }
-  if (schema == kSchemaName) {
-    version = kSchemaVersion;
-    return true;
-  }
-  return false;
 }
 
 }  // namespace
@@ -694,48 +680,19 @@ ParseResult dashboardFromJson(const JsonValue& root, const ParseOptions& options
     result.errors.push_back({"", "dashboard must be an object"});
     return result;
   }
-  uint32_t version = 0;
-  uint32_t schema_version = 0;
-  if (const JsonValue* schema = root.find("schema")) {
-    if (schema->type() != JsonValue::Type::String || !schemaVersion(schema->stringValue(), schema_version)) {
-      result.errors.push_back({"schema", "unsupported dashboard schema"});
-      return result;
-    }
-    version = schema_version;
-  }
-  if (const JsonValue* number = root.find("schema_version")) {
-    if (number->type() != JsonValue::Type::Int ||
-        (number->intValue() != 1 && number->intValue() != static_cast<int64_t>(kSchemaVersion))) {
-      result.errors.push_back({"schema_version", "unsupported dashboard schema_version"});
-      return result;
-    }
-    if (version != 0 && version != static_cast<uint32_t>(number->intValue())) {
-      result.errors.push_back({"schema_version", "schema and schema_version disagree"});
-      return result;
-    }
-    version = static_cast<uint32_t>(number->intValue());
-  }
-  if (version == 0) {
-    result.errors.push_back({"schema_version", "missing dashboard schema version"});
+  const JsonValue* schema = root.find("schema");
+  if (schema == nullptr || schema->type() != JsonValue::Type::String ||
+      schema->stringValue() != kSchemaName) {
+    result.errors.push_back({"schema", std::string("expected ") + kSchemaName});
     return result;
   }
-  if (version == kSchemaVersion && root.find("schema") == nullptr) {
-    result.errors.push_back({"schema", "missing required canonical schema"});
+  const JsonValue* number = root.find("schema_version");
+  if (number == nullptr || number->type() != JsonValue::Type::Int ||
+      number->intValue() != static_cast<int64_t>(kSchemaVersion)) {
+    result.errors.push_back({"schema_version", "expected " + std::to_string(kSchemaVersion)});
     return result;
   }
-  if (version == kSchemaVersion && root.find("schema_version") == nullptr) {
-    result.errors.push_back({"schema_version", "missing required canonical schema_version"});
-    return result;
-  }
-  result.source_version = version;
-  JsonValue migrated;
-  const JsonValue* effective = &root;
-  if (version == 1) {
-    if (!migrateV1ToV2(root, migrated, result.errors)) return result;
-    result.migrated = true;
-    effective = &migrated;
-  }
-  parseV2(*effective, result.dashboard, options, result.errors);
+  parseV2(root, result.dashboard, options, result.errors);
   if (result.errors.empty())
     validateDashboardSemantics(result.dashboard, options.limits, result.errors);
   return result;

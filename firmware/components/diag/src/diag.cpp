@@ -57,7 +57,7 @@ void printHelp() {
       "  smoke           - run self-check sequence\n"
       "  version         - firmware/chip/heap/framebuffer info\n"
       "  lang zh|en      - switch panel UI language\n"
-      "  page s0|s1|s2|s3|s4|dashboard - jump to screen (bench aid)\n"
+      "  page home|dashboard|detail|status|settings|help - jump to screen (bench aid)\n"
       "  dashboard <cmd> - status/vars/panels/refresh/inject/interval/smoke\n");
   fflush(stdout);
 }

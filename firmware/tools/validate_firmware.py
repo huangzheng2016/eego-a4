@@ -20,7 +20,7 @@
   6. sdkconfig       sdkconfig.defaults 关键键齐全且与 partitions.csv 一致
   7. admin_schema    GET /config/schema 的 JSON 与 C++ 常量静态一致
                      （schema_version/默认值/上限 ↔ kSchemaVersion/AdminDomainConfig/
-                     kMaxSources/kMaxTtlSeconds）
+                     kMaxOverrides/kMaxTtlSeconds）
   8. dashboard_presets 30 个预设与 4 个完整示例：v2 schema、目录/来源/变量/
                      面板/动作/资源引用、source plan、布局及 128/192/32KiB 预算
 
@@ -45,7 +45,8 @@ from dashboard_validation import check_library
 ALLOWED_DEPS: dict[str, set[str]] = {
     "main": {"board", "eego_hal", "eego_ui", "admin", "alert_core", "net_stack", "diag"},
     "admin": {"alert_core", "net_stack", "eego_hal"},
-    "alert_core": set(),
+    "alert_core": {"json_dom"},
+    "json_dom": set(),
     "diag": set(),
     "net_stack": {"alert_core", "eego_hal"},
     "eego_ui": {"eego_hal", "lodepng"},
@@ -57,6 +58,8 @@ ALLOWED_DEPS: dict[str, set[str]] = {
 # 头文件级禁令：component -> 禁止出现的 include 前缀（CMake 之外的第二道防线）
 FORBIDDEN_INCLUDES: dict[str, set[str]] = {
     "alert_core": {"esp_", "freertos", "eego_hal", "eego_ui", "net_stack", "admin/", "board/", "diag/"},
+    "json_dom": {"esp_", "freertos", "eego_hal", "eego_ui", "net_stack", "admin/", "board/", "diag/",
+                 "alert_core", "dashboard_core"},
     "net_stack": {"eego_ui", "admin/", "diag/"},
     "admin": {"eego_ui", "diag/"},
     "eego_ui": {"net_stack", "admin/", "alert_core", "diag/"},
@@ -122,7 +125,6 @@ REQUIRED_FILES = [
     "main/CMakeLists.txt",
     "main/app_main.cpp",
     "tools/validate_firmware.py",
-    "tools/mock_alert_server.py",
     "tools/smoke_serial_test.py",
     "README.md",
     "LICENSE",
@@ -510,8 +512,9 @@ def check_admin_schema(root: Path, rep: Report) -> None:
     rep.ok("admin_schema", "schemaJson() 解析成功")
 
     top = set(schema.get("top_level", {}).keys())
-    rep.check(top == {"schema_version", "admin", "sources", "alert_type_overrides", "mute_rules"},
-              "admin_schema", "顶层键与 M13 §3 + M21 mute_rules 一致",
+    rep.check(top == {"schema_version", "admin", "alert_type_overrides", "mute_rules"},
+              "admin_schema", "顶层键 = schema_version/admin/alert_type_overrides/mute_rules"
+              "（数据源只在 dashboard bundle）",
               f"顶层键异常: {sorted(top)}")
 
     k_ver = extract_const_int(cpp_text, "kSchemaVersion")
@@ -519,12 +522,6 @@ def check_admin_schema(root: Path, rep: Report) -> None:
     rep.check(k_ver is not None and k_ver == s_ver, "admin_schema",
               f"schema_version const={s_ver} == kSchemaVersion",
               f"schema const={s_ver} vs kSchemaVersion={k_ver}")
-
-    k_sources = extract_const_int(cpp_text, "kMaxSources")
-    s_sources = schema["top_level"]["sources"].get("max_items")
-    rep.check(k_sources == s_sources, "admin_schema",
-              f"sources.max_items={s_sources} == kMaxSources",
-              f"sources.max_items={s_sources} vs kMaxSources={k_sources}")
 
     k_overrides = extract_const_int(cpp_text, "kMaxOverrides")
     s_overrides = schema["top_level"]["alert_type_overrides"].get("max_entries")
@@ -546,8 +543,6 @@ def check_admin_schema(root: Path, rep: Report) -> None:
         ("network", "auto_ap_fallback", r"auto_ap_fallback\s*=\s*(\w+)", "false"),
         ("security", "session_ttl_s", r"session_ttl_s\s*=\s*(\d+)", "86400"),
         ("security", "login_lock_threshold", r"login_lock_threshold\s*=\s*(\d+)", "5"),
-        ("display", "brightness", r"brightness\s*=\s*(-?\d+)", "0"),
-        ("display", "warmth", r"warmth\s*=\s*(-?\d+)", "50"),
         ("logging", "sd_log", r"sd_log\s*=\s*(\w+)", "false"),
     ]
     bad: list[str] = []
@@ -568,8 +563,6 @@ def check_admin_schema(root: Path, rep: Report) -> None:
     ranges = [
         ("security", "session_ttl_s", (300, 86400)),
         ("security", "login_lock_threshold", (3, 10)),
-        ("display", "brightness", (0, 100)),
-        ("display", "warmth", (0, 100)),
     ]
     bad_r = [f"{s}.{k} range={fields[s]['fields'][k].get('range')} != {r}"
              for s, k, r in ranges if tuple(fields[s]["fields"][k].get("range", ())) != r]

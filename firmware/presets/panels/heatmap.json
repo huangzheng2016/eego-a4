@@ -39,7 +39,6 @@
         "title": "Overview",
         "visible": true,
         "grid_columns": 24,
-        "row_height": 16,
         "panels": [
           {
             "id": "heatmap",

@@ -15,9 +15,6 @@ namespace alert_core {
 
 constexpr size_t kUlidStrLen = 26;
 
-// Encodes one ULID from a unix-ms timestamp and 16 bytes of entropy.
-std::string ulidEncode(uint64_t unix_ms, const uint8_t entropy[16]);
-
 // Monotonic generator: within the same millisecond the randomness component is
 // incremented instead of re-drawn, and timestamps never move backwards, so
 // ids generated in one clock tick still sort strictly by creation order.

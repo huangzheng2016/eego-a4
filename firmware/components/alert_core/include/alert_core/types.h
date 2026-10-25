@@ -6,7 +6,7 @@
 // Canonical record shape (persistence and API use the same form):
 //   { "schema": "eego.alert/1", "id": <ULID>, "fingerprint": <sha1 hex>,
 //     "type": "host.disk_almost_full", "severity": "critical|warning|info",
-//     "source": { "id": "...", "kind": "http_poll|http_push|...", "ref": "..." },
+//     "source": { "id": "...", "kind": "http_push|ble_scan|serial_inject", "ref": "..." },
 //     "title": "...", "message": "...", "fields": { ... scalars ... },
 //     "state": "active|acked|cleared|expired", "muted": false,
 //     "first_seen": "2026-10-21T08:00:00Z", "last_seen": "...",
@@ -67,7 +67,6 @@ enum class AlertState : uint8_t {
 
 // Well-known source kind strings (stored as plain strings so future adapters
 // like ble_scan/serial inject need no core change).
-constexpr char kSourceKindHttpPoll[] = "http_poll";
 constexpr char kSourceKindHttpPush[] = "http_push";
 constexpr char kSourceKindBleScan[] = "ble_scan";
 constexpr char kSourceKindSerialInject[] = "serial_inject";

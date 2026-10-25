@@ -10,6 +10,7 @@
 
 #include "admin_internal.h"
 #include "admin/input_bindings.h"
+#include "admin/render_preview.h"
 #include "ble/ble_manager.h"
 #include "config_transaction.h"
 #include "device_settings/device_settings.h"
@@ -57,44 +58,20 @@ bool removeFactoryConfigs() {
       "/sdcard/alertpanel/config.json",
       "/sdcard/alertpanel/config.json.tmp",
       "/sdcard/alertpanel/config.json.bak",
+      "/sdcard/alertpanel/config.json.corrupt",
       "/sdcard/alertpanel/alerts.db",
       "/sdcard/alertpanel/alerts.db.tmp",
+      "/sdcard/alertpanel/alerts.db.bak",
       "/sdcard/alertpanel/dashboard.json",
       "/sdcard/alertpanel/dashboard.json.tmp",
       "/sdcard/alertpanel/dashboard.json.bak",
+      "/sdcard/alertpanel/dashboard.json.corrupt",
   };
   bool ok = true;
   for (const char* path : kPaths) {
     if (remove(path) != 0 && errno != ENOENT) ok = false;
   }
   return ok;
-}
-
-bool syncSources(const std::vector<net::SourceConfig>& desired, std::string& error) {
-  net::NetStack& ns = net::NetStack::instance();
-  if (!ns.running()) {
-    error = "net_task is unavailable";
-    return false;
-  }
-  net::NetStatusSnapshot snap;
-  if (!ns.queryStatus(snap)) {
-    error = "cannot query current sources";
-    return false;
-  }
-  for (const auto& health : snap.sources) {
-    if (!ns.removeSource(health.id)) {
-      error = "failed to remove existing source: " + health.id;
-      return false;
-    }
-  }
-  for (const auto& config : desired) {
-    std::string detail;
-    if (!ns.addSource(config, detail)) {
-      error = "failed to add source " + config.id + ": " + detail;
-      return false;
-    }
-  }
-  return true;
 }
 
 bool syncMuteRules(const std::vector<alert_core::MuteRule>& rules, std::string& error) {
@@ -109,7 +86,6 @@ bool syncMuteRules(const std::vector<alert_core::MuteRule>& rules, std::string& 
 struct RuntimeConfig {
   AdminDomainConfig admin;
   alert_core::JsonValue overrides = alert_core::JsonValue::makeObject({});
-  std::vector<net::SourceConfig> sources;
   std::vector<alert_core::MuteRule> mute_rules;
 };
 
@@ -119,7 +95,6 @@ RuntimeConfig captureRuntime(ConfigStore& store, const alert_core::JsonValue& do
   if (const alert_core::JsonValue* overrides = dom.find("alert_type_overrides")) {
     out.overrides = *overrides;
   }
-  out.sources = store.sources();
   out.mute_rules = store.muteRules();
   return out;
 }
@@ -144,10 +119,6 @@ bool applyRuntime(const RuntimeConfig& config, uint32_t sections, std::string& e
       error = "type overrides apply failed: " + detail.field + "." + detail.message;
       return false;
     }
-  }
-  if ((sections & AdminCommand::kChangedSources) != 0 &&
-      !syncSources(config.sources, error)) {
-    return false;
   }
   if ((sections & AdminCommand::kChangedMuteRules) != 0 &&
       !syncMuteRules(config.mute_rules, error)) {
@@ -195,25 +166,13 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
 
   switch (cmd.type) {
     case AdminCommandType::ApplyConfig: {
-      FieldErrors capability_errors;
-      validateLegacyDisplayCapability(cmd.display_patch, capability_errors);
-      if (!capability_errors.empty()) {
-        res.ok = false;
-        res.err = capability_errors.front().field + ": " + capability_errors.front().message;
-        return;
-      }
       if ((cmd.changed_sections & AdminCommand::kChangedOverrides) != 0 && g_registry == nullptr) {
         res.ok = false;
         res.err = "alert type registry is unavailable";
         return;
       }
-      if ((cmd.changed_sections & (AdminCommand::kChangedSources |
-                                   AdminCommand::kChangedMuteRules)) != 0) {
-        net::NetStack& net = net::NetStack::instance();
-        net::NetStatusSnapshot status;
-        if (!net.running() ||
-            ((cmd.changed_sections & AdminCommand::kChangedSources) != 0 &&
-             !net.queryStatus(status))) {
+      if ((cmd.changed_sections & AdminCommand::kChangedMuteRules) != 0) {
+        if (!net::NetStack::instance().running()) {
           res.ok = false;
           res.err = "net_task is unavailable; config was not committed";
           return;
@@ -222,41 +181,15 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
 
       const alert_core::JsonValue previous_dom = store.rawDom();
       const RuntimeConfig previous_runtime = captureRuntime(store, previous_dom);
-      const settings::Snapshot previous_settings =
-          settings::DeviceSettings::instance().snapshot();
-      settings::Settings desired_settings = previous_settings.values;
-      if ((cmd.changed_sections & AdminCommand::kChangedAdminDisplay) != 0) {
-        settings::applyLegacyDisplay(cmd.display_patch, desired_settings);
-      }
-      settings::FieldErrors validation;
-      settings::validate(desired_settings, validation);
-      if (!validation.empty()) {
-        res.ok = false;
-        res.err = validation.front().field + ": " + validation.front().message;
-        return;
-      }
-      const bool settings_changed =
-          settings::changedFields(previous_settings.values, desired_settings) != 0;
 
       internal::ConfigTransactionHooks hooks;
       hooks.commit_config = [&](std::string& error) { return store.commit(cmd.config, error); };
-      hooks.apply_settings = [&](std::string& error) {
-        if (!settings_changed) return true;
-        uint32_t changed = 0;
-        return settings::DeviceSettings::instance().update(desired_settings, &changed, error);
-      };
       hooks.apply_runtime = [&](std::string& error) {
         const RuntimeConfig desired = captureRuntime(store, cmd.config);
         return applyRuntime(desired, cmd.changed_sections, error);
       };
       hooks.rollback_config = [&](std::string& error) {
         return store.commit(previous_dom, error);
-      };
-      hooks.rollback_settings = [&](std::string& error) {
-        if (!settings_changed) return true;
-        uint32_t changed = 0;
-        return settings::DeviceSettings::instance().update(previous_settings.values, &changed,
-                                                            error);
       };
       hooks.rollback_runtime = [&](std::string& error) {
         return applyRuntime(previous_runtime, cmd.changed_sections, error);
@@ -456,7 +389,7 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
         ok = false;
       }
       net::NetStack::instance().stop();
-      for (const char* ns : {"sec", "source", "wifi", "ui", "ble", "nimble_bond", "dashboard"}) {
+      for (const char* ns : {"sec", "source", "wifi", "nimble_bond", "dashboard"}) {
         if (net::CredentialStore::clearNamespace(ns) != ESP_OK) {
           ADMIN_LOG_ERROR("factory reset: clear namespace failed: %s", ns);
           ok = false;
@@ -489,6 +422,13 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       const esp_err_t err = ble::BleManager::instance().clearBonds();
       res.ok = err == ESP_OK;
       if (!res.ok) res.err = "BLE stop/bond clear failed";
+      return;
+    }
+
+    case AdminCommandType::RenderPreview: {
+      // app_task (UI owner): offscreen render via the registered provider.
+      res.ok = cmd.preview != nullptr && internal::runRenderPreviewJob(*cmd.preview, res.err);
+      if (cmd.preview == nullptr) res.err = "render preview job missing";
       return;
     }
 

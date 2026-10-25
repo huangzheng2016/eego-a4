@@ -67,7 +67,6 @@ class TypeRegistry {
 
   // The 40 built-ins (39 presets + generic.any), in stable order.
   const std::vector<AlertTypeDescriptor>& builtins() const { return builtins_; }
-  size_t builtinCount() const { return builtins_.size(); }
   const AlertTypeOverride* findOverride(const std::string& type_id) const;
   bool isKnown(const std::string& type_id) const;
   const AlertTypeDescriptor* findBuiltin(const std::string& type_id) const;
@@ -91,7 +90,6 @@ class TypeRegistry {
   //                    "name_en": "...", "muted": true } }
   // All members optional; unknown members ignored; invalid values error.
   bool applyOverridesJson(const JsonValue& obj, ValidationError& err);
-  JsonValue overridesJson() const;
 
   static const AlertTypeDescriptor& generic();
 

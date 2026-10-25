@@ -54,7 +54,6 @@ class WifiManager {
   // 连接指定账号（阻塞，含关联+握手+DHCP，timeout_ms 单次超时）。
   WifiState connect(const WifiAccount& acc, uint32_t timeout_ms = 15000);
 
-  void disconnect();
   // 断开并停止驱动（电池唤醒流程结束前调用）
   void powerOff();
 

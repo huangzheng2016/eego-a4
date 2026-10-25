@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-#include "dashboard_core/json.h"
+#include "json_dom/json.h"
 
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
-namespace eego::dashboard {
+namespace eego::json {
 namespace {
 
 const JsonValue::Array kEmptyArray;
@@ -560,4 +560,4 @@ std::string jsonEscape(std::string_view text) {
   return out;
 }
 
-}  // namespace eego::dashboard
+}  // namespace eego::json

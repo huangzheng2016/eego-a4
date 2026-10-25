@@ -8,19 +8,23 @@
 
 namespace panel {
 
+// 设备屏幕。主页 = Dashboard（已配置）或 Onboarding（未配置：引导到 web 配置）。
 enum class Page : uint8_t {
-  Overview = 0,
-  Table,
-  Detail,
+  Dashboard = 0,
+  Onboarding,
+  AlertDetail,  // 告警详情（从告警面板/横幅进入；↑/↓ 浏览同一列表）
   Status,
   Settings,
-  Provision,
-  Dashboard,
   Help,
+  Provision,
 };
 
-constexpr Page dashboardStartupPage(Page current, bool dashboard_loaded) {
-  return dashboard_loaded && current != Page::Provision ? Page::Dashboard : current;
+constexpr Page homePage(bool dashboard_loaded) {
+  return dashboard_loaded ? Page::Dashboard : Page::Onboarding;
+}
+
+constexpr bool isHomePage(Page page) {
+  return page == Page::Dashboard || page == Page::Onboarding;
 }
 
 constexpr bool dashboardUsesRuntimeStatus(Page current) { return current == Page::Dashboard; }
@@ -64,7 +68,6 @@ enum class SettingId : uint8_t {
 // 5 秒模态窗口；恢复动作只能由实体 Power 的全新持续按住完成。
 enum class ConfirmKind : uint8_t {
   None = 0,
-  AckAll,
   Mute,
   Clear,
   ClearMutes,

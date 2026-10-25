@@ -31,7 +31,7 @@ namespace eego::admin {
 
 namespace {
 
-constexpr char kApSsid[] = "EEGO-A4-Setup";  // 固定 SSID，不含设备唯一标识（M13 F2）
+constexpr const char* kApSsid = ProvisionPortal::kApSsid;  // 固定 SSID，不含设备唯一标识（M13 F2）
 constexpr uint32_t kWindowMs = 600000;       // 10 分钟窗口（M13 T8）
 constexpr int64_t kConnectTimeoutUs = 15000000;  // STA 试连 15s 超时（M13 F1）
 constexpr uint32_t kRebootDelayMs = 3000;    // 配网成功后给手机回显再重启
@@ -491,8 +491,8 @@ esp_err_t ProvisionPortal::open() {
   if (adminApiRunning()) return ESP_ERR_INVALID_STATE;
   if (!ble::BleManager::instance().beginRecoveryAp()) return ESP_ERR_INVALID_STATE;
 
-  esp_err_t err = AuthManager::instance().init();  // NVS 就绪（幂等）
-  if (err == ESP_OK) err = startAp();
+  // AuthManager (and NVS) are initialized once by app_main before any portal.
+  esp_err_t err = startAp();
   if (err != ESP_OK) {
     ble::BleManager::instance().endRecoveryAp();
     return err;

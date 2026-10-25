@@ -30,8 +30,6 @@ struct DashboardDocument {
 struct DashboardParseResult {
   DashboardDocument document;
   std::vector<dashboard::ValidationError> errors;
-  uint32_t source_version = 0;
-  bool migrated = false;
 
   bool ok() const { return errors.empty(); }
 };
@@ -41,14 +39,14 @@ class DashboardStore {
   static DashboardStore& instance();
 
   // Missing files are an unconfigured, valid store. Invalid files are backed up
-  // to dashboard.json.bak and never exposed as a partially parsed configuration.
+  // to dashboard.json.corrupt and never exposed as a partially parsed configuration.
   esp_err_t init(const std::string& path);
   bool valid() const;
   const std::string& path() const { return path_; }
 
   std::shared_ptr<const DashboardDocument> snapshot() const;
 
-  // Accepts a bundle or a raw v1/v2 dashboard. Plain sensitive headers are rejected;
+  // Accepts a bundle or a raw eego.dashboard/2 dashboard. Plain sensitive headers are rejected;
   // credential refs remain metadata and are never resolved into serialized output.
   // The input revision is informational; commit() assigns the next authoritative revision.
   static DashboardParseResult parse(const std::string& json,
