@@ -23,6 +23,20 @@ idf.py -C firmware -B .tmp/firmware-build size-components
 刷写或真机验收。分区使用 `firmware/partitions.csv`，刷写时只使用同一构建目录生成
 的镜像。预留 A/B 分区不代表已开放 OTA。
 
+## 本机默认凭据（可选）
+
+不想使用配网热点时，可在 `firmware/main/local_secrets.h` 定义本机默认值：
+
+```cpp
+#define EEGO_LOCAL_WIFI_SSID "your-ssid"
+#define EEGO_LOCAL_WIFI_PASSWORD "your-wifi-password"
+#define EEGO_LOCAL_ADMIN_PASSWORD "your-admin-password"
+```
+
+该文件被 `.gitignore` 排除。仅当 NVS 中没有 WiFi 账号或管理密码时，固件会在首次
+启动写入对应默认值，之后不覆盖修改。**这样构建的固件和备份都含明文秘密，必须
+私有保存，不得上传 GitHub、Release 或公开分享。**
+
 ## 刷写与首次配置
 
 刷写前按[备份与恢复](../docs/RECOVERY.md)保存整片 Flash。确认端口后执行：

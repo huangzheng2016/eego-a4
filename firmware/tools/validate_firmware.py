@@ -95,8 +95,10 @@ FORBIDDEN_FILE_PATTERNS = [
 
 # 内容扫描豁免：本策略文件自身含检测 token 定义；NOTICE/README 等审计声明文件
 # 必须点名 weread_crypto/boot_logo/miniz 以记录「未复用/未采用」，属声明而非残留。
+# main/local_secrets.h 是 .gitignore 排除的本机凭据，只供私有构建，不得提交。
 CONTENT_SCAN_EXCLUDE = {
     "tools/validate_firmware.py",
+    "main/local_secrets.h",
     "README.md",
     "LICENSE",
     "NOTICE.md",

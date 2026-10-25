@@ -18,3 +18,5 @@ compile_commands.json
 venv/
 # 本地自备字体，不随仓库分发
 /firmware/components/eego_ui/fonts/*.eefont
+# 本机默认凭据，禁止提交
+/firmware/main/local_secrets.h

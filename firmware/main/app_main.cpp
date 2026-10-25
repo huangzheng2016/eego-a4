@@ -50,6 +50,10 @@
 #include "panel_app.h"
 #include "time_source.h"
 
+#if __has_include("local_secrets.h")
+#include "local_secrets.h"
+#endif
+
 namespace admin = eego::admin;
 namespace diag = eego::diag;
 
@@ -58,6 +62,33 @@ namespace {
 const char* TAG = "app";
 
 constexpr uint32_t kTouchPollMs = 8;  // GSLX680 轮询周期（触控合同）
+
+#if defined(EEGO_LOCAL_WIFI_SSID) || defined(EEGO_LOCAL_ADMIN_PASSWORD)
+void seedLocalCredentials() {
+#ifdef EEGO_LOCAL_WIFI_SSID
+  std::vector<eego::net::WifiAccount> accounts;
+  eego::net::CredentialStore::loadWifiAccounts(accounts);
+  if (accounts.empty()) {
+    accounts.push_back({EEGO_LOCAL_WIFI_SSID, EEGO_LOCAL_WIFI_PASSWORD});
+    const esp_err_t err = eego::net::CredentialStore::saveWifiAccounts(accounts);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "local WiFi defaults save failed: %s", esp_err_to_name(err));
+    }
+  }
+  for (auto& account : accounts) eego::net::CredentialStore::secureErase(account.password);
+#endif
+#ifdef EEGO_LOCAL_ADMIN_PASSWORD
+  if (!admin::AuthManager::instance().hasPassword()) {
+    std::string password = EEGO_LOCAL_ADMIN_PASSWORD;
+    const esp_err_t err = admin::AuthManager::instance().setPassword(password);
+    eego::net::CredentialStore::secureErase(password);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "local admin password init failed: %s", esp_err_to_name(err));
+    }
+  }
+#endif
+}
+#endif
 
 // ── 组合根持有的长生命周期对象（store/registry/publisher 必须 outlive NetStack）──
 
@@ -248,6 +279,9 @@ extern "C" void app_main(void) {
     ESP_LOGE(TAG, "NVS init failed; credentials/config persistence unavailable");
   }
   admin::AuthManager::instance().init();
+#if defined(EEGO_LOCAL_WIFI_SSID) || defined(EEGO_LOCAL_ADMIN_PASSWORD)
+  seedLocalCredentials();
+#endif
   admin::ConfigStore& config = admin::ConfigStore::instance();
   config.init("/sdcard/alertpanel/config.json");
   if (!config.valid()) {
