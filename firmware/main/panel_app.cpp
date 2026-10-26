@@ -114,8 +114,16 @@ void PanelApp::begin(const Deps& deps) {
   lastFullRenderMs_ = lastBatMs_;
 
   usbHost_ = eego::PowerManager::instance().usbHostConnected();
+  // 电源键休眠：定时唤醒沿用（快速路径取数后继续睡）；按键唤醒/上电即结束。
+  battery::RtcState& rtc = battery::rtcState();
+  manualSleep_ = fastWake_ && rtc.manual_sleep != 0;
+  if (!fastWake_ && rtc.manual_sleep != 0) {
+    rtc.manual_sleep = 0;
+    battery::commitRtcState();
+  }
   // 开机不凭电压锁存外接电源：只认充电中 / USB 主机（见 battery::MainsDetector）。
-  mains_ = computeMains();
+  // 电源键休眠中的定时唤醒一律按电池快速路径处理（接着电源也不进完整应用）。
+  mains_ = computeMains() && !manualSleep_;
   ESP_LOGI(TAG, "power source: %s (reason: %s, %umV, charging=%d, usb=%d)",
            mains_ ? "mains" : "battery", battery::powerReasonName(mainsDetector_.reason()),
            batCache_.millivolts, (charging_ || batCache_.charging) ? 1 : 0, usbHost_ ? 1 : 0);
@@ -208,6 +216,11 @@ void PanelApp::applySettings(uint32_t changed) {
       markDirty(true);  // 前光行显隐变化 → 设置页整页重排
     }
     frontlightRowsVisible_ = visibleNow;
+  }
+  if ((changed & eego::settings::kChangedChargeSignal) != 0) {
+    // 充电脚极性已由 app_main 的订阅重配：立即重读，下一轮 service() 重新判定供电。
+    charging_ = eego::PowerManager::instance().isCharging();
+    batCache_.charging = charging_;
   }
   if ((changed & eego::settings::kChangedDataRefresh) != 0) {
     // 全局刷新周期覆盖 dashboard 面板（面板上单独设定的周期优先）。
@@ -404,7 +417,7 @@ void PanelApp::service() {
   }
 
   const bool wantMains = computeMains();
-  if (wantMains != mains_) {
+  if (wantMains != mains_ && !manualSleep_) {
     if (fastWake_) {
       // 快速路径只初始化了最小子系统：接上电源后以完整应用重启。
       ESP_LOGI(TAG, "external power during battery wake: restarting");
@@ -715,8 +728,7 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
       return;
     }
     if (ev.id == eego::ButtonId::Power) {
-      activeInputControl_ = focusedControl();
-      back();
+      armShutdown();
     } else {
       dispatchTrigger(ev.id == eego::ButtonId::Up ? eego::admin::InputTrigger::UpLong
                                                   : eego::admin::InputTrigger::DownLong,
@@ -739,8 +751,13 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
       clearConfirm();
     }
     if (ev.id == eego::ButtonId::Power) {
-      activeInputControl_ = focusedControl();
-      activateFocused();
+      if (page_ == Page::Settings) {
+        // 设置页始终有高亮行：Power 仍是「选择」（触控失准时也能进入触摸校准）。
+        activeInputControl_ = focusedControl();
+        activateFocused();
+      } else {
+        sleepByPowerKey(now_us / 1000);
+      }
     } else {
       dispatchTrigger(ev.id == eego::ButtonId::Up ? eego::admin::InputTrigger::UpShort
                                                   : eego::admin::InputTrigger::DownShort,
@@ -891,7 +908,7 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
         clearConfirm();
       }
       activeInputControl_ = "front.home";
-      goHome();
+      frontBack();
       break;
     case eego::TouchEventType::FrontLong:
       if (confirm_ != ConfirmKind::None) {
@@ -1005,6 +1022,17 @@ void PanelApp::goHome() {
     gotoPage(home());
   } else if (page_ == Page::Dashboard) {
     dashboard_.invalidateAll();
+  }
+}
+
+void PanelApp::frontBack() {
+  // 前置键短按 = 返回：子页面回到来源/主页；dashboard 先退跳转栈，再回第一屏。
+  // 未配置 dashboard 时主页就是「空仪表盘」页。
+  if (page_ == Page::Provision) return;
+  if (page_ == Page::Dashboard || page_ != home()) {
+    back();
+  } else {
+    goHome();
   }
 }
 
@@ -1356,6 +1384,7 @@ bool PanelApp::settingAdjustable(SettingId id) {
     case SettingId::IdleRefresh:
     case SettingId::ScreenRotate:
     case SettingId::PowerMode:
+    case SettingId::ChargeSignal:
     case SettingId::BatteryRefresh:
     case SettingId::BatteryMaxStale:
     case SettingId::BatteryInteractive:
@@ -1420,6 +1449,13 @@ bool PanelApp::adjustSettingRow(SettingId id, int dir, bool coarse, bool wrap) {
     case SettingId::PowerMode: {
       constexpr PowerMode kModes[] = {PowerMode::Auto, PowerMode::Mains, PowerMode::Battery};
       next.power_mode = stepChoice(kModes, settings_.power_mode, step, true);
+      break;
+    }
+    case SettingId::ChargeSignal: {
+      using eego::settings::ChargeSignal;
+      constexpr ChargeSignal kSignals[] = {ChargeSignal::Auto, ChargeSignal::ActiveHigh,
+                                           ChargeSignal::ActiveLow};
+      next.charge_signal = stepChoice(kSignals, settings_.charge_signal, step, true);
       break;
     }
     case SettingId::BatteryRefresh:
@@ -2083,6 +2119,7 @@ void PanelApp::executeArmedConfirm() {
     case ConfirmKind::FactoryReset: doFactoryReset(); break;
     case ConfirmKind::BleProvision: doStartBleProvision(); break;
     case ConfirmKind::BleUnbind: doClearBleBonds(); break;
+    case ConfirmKind::Shutdown: shutdownNow(); break;
     default: break;
   }
   clearConfirm();
@@ -2109,7 +2146,9 @@ void PanelApp::armConfirm(ConfirmKind kind) {
   }
   confirm_ = kind;
   confirmState_.arm(target, esp_timer_get_time());
-  showBanner(requiresPhysicalConfirm(kind) ? tr(Str::ConfirmPhysicalPress) : tr(Str::ConfirmPress),
+  showBanner(kind == ConfirmKind::Shutdown       ? tr(Str::ConfirmShutdown)
+             : requiresPhysicalConfirm(kind) ? tr(Str::ConfirmPhysicalPress)
+                                             : tr(Str::ConfirmPress),
              static_cast<uint32_t>(kConfirmWindowUs / 1000));
 }
 
@@ -2173,7 +2212,10 @@ void PanelApp::clearConfirm() {
   confirm_ = ConfirmKind::None;
   confirmState_.cancel();
   confirmDashboard_ = DashboardConfirmRequest{};
-  if (banner_ == tr(Str::ConfirmPress) || banner_ == tr(Str::ConfirmPhysicalPress)) banner_.clear();
+  if (banner_ == tr(Str::ConfirmPress) || banner_ == tr(Str::ConfirmPhysicalPress) ||
+      banner_ == tr(Str::ConfirmShutdown)) {
+    banner_.clear();
+  }
   if (page_ == Page::Dashboard) dashboard_.showStatusMessage("", 1);
   markDirty();
 }
@@ -2345,10 +2387,16 @@ void PanelApp::requestSleep(int64_t now, const char* why) {
 void PanelApp::serviceSleep(int64_t now) {
   if (!sleepPending_) return;
   // 交互期内有新输入/管理请求 → 取消本次休眠（常供电夜间暂停/定时唤醒不受影响）。
-  if (battPhase_ == BattPhase::Interactive &&
-      std::max(refreshPolicy_.lastInteractionMs(), admin::lastAuthenticatedRequestMs()) >
-          sleepRequestedMs_) {
+  // 电源键休眠（入睡前）只认本机输入：浏览 web 端不阻止用户主动休眠。
+  const int64_t last_input = refreshPolicy_.lastInteractionMs();
+  const bool manual = manualSleep_ && !fastWake_;
+  const bool cancelled =
+      manual ? last_input > sleepRequestedMs_
+             : battPhase_ == BattPhase::Interactive &&
+                   std::max(last_input, admin::lastAuthenticatedRequestMs()) > sleepRequestedMs_;
+  if (cancelled) {
     ESP_LOGI(TAG, "sleep cancelled by input");
+    if (!fastWake_) manualSleep_ = false;
     sleepPending_ = false;
     sleepIdleWait_.active = false;
     dashboard_.setMains(dashboardLive());  // 恢复取数
@@ -2356,6 +2404,7 @@ void PanelApp::serviceSleep(int64_t now) {
   }
   if (battPhase_ != BattPhase::Fetching && battery::keepAwakeBlocks(now, keepAwakeUntil(now))) {
     ESP_LOGI(TAG, "keep-awake active: sleep cancelled");
+    if (!fastWake_) manualSleep_ = false;
     sleepPending_ = false;
     sleepIdleWait_.active = false;
     dashboard_.setMains(dashboardLive());
@@ -2364,6 +2413,7 @@ void PanelApp::serviceSleep(int64_t now) {
   if (admin::ProvisionPortal::instance().apActive() ||
       eego::ble::BleManager::instance().provisioningActive()) {
     ESP_LOGW(TAG, "recovery/provisioning active, sleep postponed");
+    if (!fastWake_) manualSleep_ = false;
     sleepPending_ = false;
     sleepIdleWait_.active = false;
     lastScheduleCheckMs_ = now + 30000;
@@ -2425,6 +2475,7 @@ void PanelApp::sleepNow() {
 
   rtc.last_wake_unix = now_unix;
   ++rtc.wakes;
+  rtc.manual_sleep = manualSleep_ ? 1 : 0;
   battery::commitRtcState();
   if (deps_.boot.displayReady && deps_.display != nullptr) deps_.display->deepSleep();
 
@@ -2434,6 +2485,50 @@ void PanelApp::sleepNow() {
            static_cast<unsigned>(rtc.consecutive_failures));
   // 电量过低：只留电源键（↑/↓ 误触会反复耗电）；其余情况电源键 + ↑/↓。
   battery::deepSleep(plan.sleep_s, plan.kind != battery::WakeKind::CriticalBattery);
+}
+
+void PanelApp::sleepByPowerKey(int64_t now) {
+  if (admin::ProvisionPortal::instance().apActive() ||
+      eego::ble::BleManager::instance().provisioningActive()) {
+    showBanner(tr(Str::SleepBlocked), 3000);
+    return;
+  }
+  ESP_LOGI(TAG, "power key: sleep (%s)", mains_ ? "mains" : "battery");
+  clearConfirm();
+  if (keepAwakeUntil(now) != 0) admin::setKeepAwakeMinutes(0);  // 手动休眠优先于保持唤醒
+  manualSleep_ = true;
+  requestSleep(now, "power key");
+}
+
+void PanelApp::armShutdown() {
+  if (page_ == Page::Provision) return;
+  activeInputControl_ = "trigger:power";
+  armConfirm(ConfirmKind::Shutdown);
+}
+
+void PanelApp::shutdownNow() {
+  ESP_LOGI(TAG, "power key: shutting down");
+  if (eego::ble::BleManager::instance().beforeSleep() != ESP_OK) {
+    ESP_LOGW(TAG, "BLE stop failed; power-off cuts the radio anyway");
+  }
+  eego::FrontlightManager::instance().off();
+  NetStack::instance().wifi().powerOff();
+
+  battery::RtcState& rtc = battery::rtcState();
+  rtc.manual_sleep = 0;
+  rtc.frame.valid = 0;  // 面板不再是记录的帧：下次（若仍在深睡兜底中被唤醒）不预载
+  battery::commitRtcState();
+
+  if (deps_.boot.displayReady && deps_.canvas != nullptr && deps_.display != nullptr) {
+    eego::PortraitCanvas& c = *deps_.canvas;
+    drawPoweredOff(c);
+    c.resetClip();
+    c.requestFullRefresh();
+    c.display(eego::RefreshMode::Full);
+    c.waitRefreshComplete();
+    deps_.display->deepSleep();
+  }
+  battery::powerOff();
 }
 
 uint64_t PanelApp::frameHash() const {
@@ -2579,9 +2674,11 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
     skip = panel_known && rtc.low_battery_shown != 0 && hash == rec.hash;
   } else if (dashboard_.available()) {
     if (!fastWake_) {
-      // 交互期画面任意：回到 dashboard 主页并整帧重画。
+      // 交互期画面任意：回到 dashboard 主页并整帧重画。电源键休眠时正看着
+      // dashboard 则保留当前屏（「画面保留」）。
+      const bool keep_screen = manualSleep_ && page_ == Page::Dashboard;
       page_ = Page::Dashboard;
-      dashboard_.home();
+      if (!keep_screen) dashboard_.home();
       deps_.canvas->clear();
       dashboard_.invalidateAll();
     }
@@ -2597,7 +2694,7 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
       dashboard_.renderOffscreen();
       hash = frameHash();
       skip = panel_known && hash == rec.hash;
-    } else if (mains_) {
+    } else if (mains_ && !manualSleep_) {
       dashboard_.setSleepFrame(false);
       dashboard_.renderOffscreen();
       hash = frameHash();
@@ -2619,8 +2716,27 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
       }
     }
   } else {
-    // 未配置 dashboard：引导页上的地址深睡期间不可用，换成说明页。
-    drawNotice(tr(Str::Sleeping), tr(Str::WakeHint), "", tr(Str::DeepSleepOffline));
+    // 未配置 dashboard：画面保持「空仪表盘」页，状态栏显示休眠中；管理地址深睡期间
+    // 不可达，地址框换成唤醒提示。
+    if (night) {
+      deviceState_ = DeviceStateInfo{};
+      deviceState_.state = DeviceState::NightPause;
+      deviceState_.next_unix = plan.wake_unix;
+    } else {
+      deviceState_ = sleepingState(slot, interval);
+    }
+    banner_.clear();
+    eego::PortraitCanvas& c = *deps_.canvas;
+    c.clear();
+    c.useUiContentRect();
+    StatusBarModel sb;
+    buildStatusBar(sb);
+    drawStatusBar(c, sb);
+    OnboardingModel m;
+    buildOnboarding(m);
+    m.asleep = true;
+    drawOnboarding(c, m);
+    c.resetClip();
     hash = frameHash();
     skip = panel_known && hash == rec.hash;
   }
@@ -3672,6 +3788,19 @@ void PanelApp::buildS4(S4Model& m) {
                    : settings_.power_mode == PowerMode::Battery ? Str::PowerAlwaysBattery
                                                                 : Str::ModeAuto);
         break;
+      case SettingId::ChargeSignal: {
+        using eego::settings::ChargeSignal;
+        label = Str::SetChargeSignal;
+        const bool high = eego::PowerManager::instance().chargeActiveHigh();
+        if (settings_.charge_signal == ChargeSignal::Auto) {
+          snprintf(buf, sizeof(buf), "%s · %s", tr(Str::ModeAuto),
+                   tr(high ? Str::ChargeActiveHigh : Str::ChargeActiveLow));
+          value = buf;
+        } else {
+          value = tr(high ? Str::ChargeActiveHigh : Str::ChargeActiveLow);
+        }
+        break;
+      }
       case SettingId::BatteryRefresh:
         label = Str::SetBatteryRefresh;
         formatEvery(settings_.battery_refresh_min * 60, buf, sizeof(buf));

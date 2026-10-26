@@ -282,6 +282,12 @@ TEST(battery_policy, rtc_state_checksum) {
   CHECK(rtcValid(s));
   s.consecutive_failures = 3;
   CHECK(!rtcValid(s));
+  rtcSeal(s);
+  CHECK_EQ(s.manual_sleep, 0);  // 电源键休眠标志默认关
+  s.manual_sleep = 1;
+  CHECK(!rtcValid(s));
+  rtcSeal(s);
+  CHECK(rtcValid(s));
   CHECK_EQ(crc32(reinterpret_cast<const uint8_t*>("123456789"), 9), 0xCBF43926u);
 }
 

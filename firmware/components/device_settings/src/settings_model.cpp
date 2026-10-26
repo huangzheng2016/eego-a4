@@ -272,6 +272,22 @@ bool frontlightHardwareFromString(const std::string& name, FrontlightHardware& o
   return true;
 }
 
+const char* chargeSignalName(ChargeSignal mode) {
+  switch (mode) {
+    case ChargeSignal::ActiveHigh: return "high";
+    case ChargeSignal::ActiveLow: return "low";
+    default: return "auto";
+  }
+}
+
+bool chargeSignalFromString(const std::string& name, ChargeSignal& out) {
+  if (name == "auto") out = ChargeSignal::Auto;
+  else if (name == "high") out = ChargeSignal::ActiveHigh;
+  else if (name == "low") out = ChargeSignal::ActiveLow;
+  else return false;
+  return true;
+}
+
 bool operator==(const BleFieldMap& a, const BleFieldMap& b) {
   return a.name == b.name && a.offset == b.offset && a.type == b.type && a.scale == b.scale;
 }
@@ -365,6 +381,7 @@ JsonValue toJson(const Settings& s) {
       {"schema_version", JsonValue::makeInt(kSchemaVersion)},
       {"language", JsonValue::makeString(s.language)},
       {"power_mode", JsonValue::makeString(powerModeName(s.power_mode))},
+      {"charge_signal", JsonValue::makeString(chargeSignalName(s.charge_signal))},
       {"data_refresh_s", JsonValue::makeInt(s.data_refresh_s)},
       {"battery_refresh_min", JsonValue::makeInt(s.battery_refresh_min)},
       {"battery_max_stale_min", JsonValue::makeInt(s.battery_max_stale_min)},
@@ -397,6 +414,9 @@ void validate(const Settings& s, FieldErrors& errors) {
   }
   if (static_cast<uint8_t>(s.power_mode) > static_cast<uint8_t>(PowerMode::Battery)) {
     addError(errors, "power_mode", "must be one of auto|mains|battery");
+  }
+  if (static_cast<uint8_t>(s.charge_signal) > static_cast<uint8_t>(ChargeSignal::ActiveLow)) {
+    addError(errors, "charge_signal", "must be one of auto|high|low");
   }
   if (s.data_refresh_s != 0 && (s.data_refresh_s < 30 || s.data_refresh_s > 86400)) {
     addError(errors, "data_refresh_s", "must be 0 (source schedules) or in [30, 86400]");
@@ -560,6 +580,16 @@ bool mergePatch(const Settings& current, const JsonValue& patch, Settings& out,
           next.power_mode = mode;
         }
       }
+    } else if (key == "charge_signal") {
+      std::string text;
+      if (readString(value, key.c_str(), text, errors)) {
+        ChargeSignal mode;
+        if (!chargeSignalFromString(text, mode)) {
+          addError(errors, key, "must be one of auto|high|low");
+        } else {
+          next.charge_signal = mode;
+        }
+      }
     } else if (key == "frontlight_hardware") {
       std::string text;
       if (readString(value, key.c_str(), text, errors)) {
@@ -640,6 +670,7 @@ uint32_t changedFields(const Settings& a, const Settings& b) {
   uint32_t changed = 0;
   if (a.language != b.language) changed |= kChangedLanguage;
   if (a.power_mode != b.power_mode) changed |= kChangedPower;
+  if (a.charge_signal != b.charge_signal) changed |= kChangedChargeSignal;
   if (a.battery_refresh_min != b.battery_refresh_min ||
       a.battery_max_stale_min != b.battery_max_stale_min ||
       a.battery_interactive_timeout_s != b.battery_interactive_timeout_s) {
@@ -750,6 +781,7 @@ const char* schemaJson() {
   "fields": {
     "language": {"type":"string","enum":["zh","en"],"default":"zh","group":"time_language"},
     "power_mode": {"type":"string","enum":["auto","mains","battery"],"default":"auto","group":"power"},
+    "charge_signal": {"type":"string","enum":["auto","high","low"],"default":"auto","note":"GPIO11 charge-status polarity; auto infers it from LM3630A presence. Pick the other value if charging and battery read inverted","group":"power"},
     "data_refresh_s": {"type":"int","range":[0,86400],"minimum_nonzero":30,"default":0,"group":"refresh"},
     "battery_refresh_min": {"type":"int","enum":[5,10,15,30,60],"default":15,"note":"battery mode wakes on local wall-clock multiples of this interval (doubled below 20% battery)","group":"battery"},
     "battery_max_stale_min": {"type":"int","enum":[15,30,60,120,240,480],"default":60,"note":"unchanged frames are not redrawn until this age; must be >= battery_refresh_min","group":"battery"},

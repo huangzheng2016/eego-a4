@@ -89,10 +89,18 @@ void PowerManager::detectLm3630a() {
     // 读取 FrontlightManager 缓存的前光存在性（首次探测由 FrontlightManager
     // 完成并缓存，此处非破坏性读取，不再 toggle GPIO12，避免关闭前光）
     lm3630aPresent_ = FrontlightManager::instance().lm3630aChipPresent();
+    configureChargePin();
+}
 
-    // LM3630A 在位 → 充电状态 active-high（INPUT_PULLDOWN）
-    // LM3630A 不在位 → 充电状态 active-low（INPUT_PULLUP）
-    chargeActiveHigh_ = lm3630aPresent_;
+void PowerManager::configureChargePin() {
+    // Auto：LM3630A 在位 → 充电状态 active-high（INPUT_PULLDOWN），
+    //       不在位 → active-low（INPUT_PULLUP）。这只是经验规则，个别批次相反，
+    //       由 setChargePolarity（设置 charge_signal）覆盖。
+    switch (chargePolarity_) {
+        case ChargePolarity::ActiveHigh: chargeActiveHigh_ = true; break;
+        case ChargePolarity::ActiveLow: chargeActiveHigh_ = false; break;
+        case ChargePolarity::Auto: chargeActiveHigh_ = lm3630aPresent_; break;
+    }
 
     // 配置 GPIO11 充电状态引脚
     gpio_config_t io_conf;
@@ -109,9 +117,17 @@ void PowerManager::detectLm3630a() {
     }
     gpio_config(&io_conf);
 
-    ESP_LOGI(PM_TAG, "LM3630A %s, charge status active-%s",
+    ESP_LOGI(PM_TAG, "LM3630A %s, charge status active-%s (%s)",
              lm3630aPresent_ ? "present" : "absent",
-             chargeActiveHigh_ ? "high" : "low");
+             chargeActiveHigh_ ? "high" : "low",
+             chargePolarity_ == ChargePolarity::Auto ? "auto" : "forced");
+}
+
+void PowerManager::setChargePolarity(ChargePolarity mode) {
+    ensureInitialized();
+    if (mode == chargePolarity_) return;
+    chargePolarity_ = mode;
+    configureChargePin();
 }
 
 void PowerManager::ensureInitialized() {

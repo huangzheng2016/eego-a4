@@ -358,6 +358,7 @@ uint32_t rtcChecksum(const RtcState& s) {
   h = fnv1a64(s.ap_bssid, sizeof(s.ap_bssid), h);
   h = fnv1a64(reinterpret_cast<const uint8_t*>(s.ap_ssid), sizeof(s.ap_ssid), h);
   h = mix(h, s.low_battery_shown);
+  h = mix(h, s.manual_sleep);
   return static_cast<uint32_t>(h ^ (h >> 32));
 }
 

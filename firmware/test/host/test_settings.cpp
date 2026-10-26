@@ -131,6 +131,38 @@ TEST(settings, patch_frontlight_hardware) {
   CHECK(hasField(errors, "frontlight_hardware"));
 }
 
+TEST(settings, patch_charge_signal) {
+  const Settings base;
+  CHECK(base.charge_signal == ChargeSignal::Auto);
+  Settings out;
+  FieldErrors errors;
+  CHECK(patchOk(base, R"({"charge_signal":"high"})", out, errors));
+  CHECK(out.charge_signal == ChargeSignal::ActiveHigh);
+  CHECK(changedFields(base, out) == kChangedChargeSignal);
+  CHECK((kChangedAll & kChangedChargeSignal) != 0);
+  CHECK(patchOk(out, R"({"charge_signal":"low"})", out, errors));
+  CHECK(out.charge_signal == ChargeSignal::ActiveLow);
+  CHECK_EQ(std::string(chargeSignalName(out.charge_signal)), std::string("low"));
+
+  // Round trip through JSON keeps the override.
+  Settings decoded;
+  CHECK(patchOk(base, toJson(out).toString(), decoded, errors));
+  CHECK(decoded.charge_signal == ChargeSignal::ActiveLow);
+
+  for (const char* bad : {R"({"charge_signal":"inverted"})", R"({"charge_signal":1})",
+                          R"({"charge_signal":"HIGH"})"}) {
+    Settings target = base;
+    CHECK_MSG(!patchOk(base, bad, target, errors), bad);
+    CHECK_MSG(hasField(errors, "charge_signal"), bad << " -> " << describe(errors));
+  }
+  Settings forged;
+  forged.charge_signal = static_cast<ChargeSignal>(9);
+  errors.clear();
+  validate(forged, errors);
+  CHECK(hasField(errors, "charge_signal"));
+  CHECK(std::string(schemaJson()).find("charge_signal") != std::string::npos);
+}
+
 TEST(settings, patch_rejects_bad_values) {
   const Settings base;
   Settings out;

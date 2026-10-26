@@ -183,11 +183,14 @@ struct RtcState {
   uint8_t ap_bssid[6] = {0, 0, 0, 0, 0, 0};
   char ap_ssid[33] = {0};
   uint8_t low_battery_shown = 0;
+  // 电源键短按进入的「休眠」：定时唤醒即使接着外接电源也走快速路径并继续深睡，
+  // 直到按键唤醒（或上电）。
+  uint8_t manual_sleep = 0;
   uint32_t checksum = 0;
 };
 
 inline constexpr uint32_t kRtcMagic = 0x45424154u;  // "TABE"
-inline constexpr uint32_t kRtcVersion = 1;
+inline constexpr uint32_t kRtcVersion = 2;
 
 void rtcReset(RtcState& state);
 void rtcSeal(RtcState& state);

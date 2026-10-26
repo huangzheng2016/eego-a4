@@ -21,7 +21,7 @@ enum class Lang : uint8_t {
   X(PageDetail, "告警详情", "ALERT") \
   X(PageStatus, "设备状态", "STATUS") \
   X(PageSettings, "设置", "SETTINGS") \
-  X(PageOnboarding, "开始使用", "GET STARTED") \
+  X(PageOnboarding, "仪表盘 · 未配置", "DASHBOARD · NOT SET UP") \
   X(Back, "返回", "BACK") \
   X(Refresh, "刷新", "REFRESH") \
   X(Ack, "确认", "ACK") \
@@ -113,6 +113,9 @@ enum class Lang : uint8_t {
   X(ApFallback, "兜底AP", "AP FALLBACK") \
   X(SetLanguage, "语言", "LANGUAGE") \
   X(SetPowerMode, "供电模式", "POWER MODE") \
+  X(SetChargeSignal, "充电信号", "CHARGE SIGNAL") \
+  X(ChargeActiveHigh, "高有效", "ACTIVE HIGH") \
+  X(ChargeActiveLow, "低有效", "ACTIVE LOW") \
   X(SetBatteryRefresh, "电池唤醒间隔", "BATTERY WAKE EVERY") \
   X(SetBatteryMaxStale, "最长不刷屏", "MAX UNCHANGED") \
   X(SetBatteryInteractive, "按键唤醒后保持", "AWAKE AFTER KEY") \
@@ -172,8 +175,8 @@ enum class Lang : uint8_t {
   X(SetDataRefresh, "数据刷新周期", "DATA REFRESH") \
   X(SetEpdFull, "墨水屏全刷周期", "EPD FULL INTERVAL") \
   X(SetEpdNow, "立即全屏刷新", "EPD FULL NOW") \
-  X(SetIdleAfter, "空闲判定", "IDLE AFTER") \
-  X(SetIdleRefresh, "空闲刷新间隔", "IDLE REFRESH") \
+  X(SetIdleAfter, "节电判定", "ECO AFTER") \
+  X(SetIdleRefresh, "节电刷新间隔", "ECO REFRESH") \
   X(SetScreenRotate, "自动轮播", "AUTO ROTATE") \
   X(IdleAfterFmt, "%u 分钟无操作", "%uMIN NO INPUT") \
   X(SetSleepPlan, "夜间暂停", "NIGHT PAUSE") \
@@ -190,6 +193,12 @@ enum class Lang : uint8_t {
   X(NotScheduled, "未排程", "NOT SCHEDULED") \
   X(DeepSleepOffline, "暂停期间不联网、不更新", "NO NETWORK OR UPDATES WHILE PAUSED") \
   X(ConfirmPhysicalPress, "再按一次电源键确认", "PRESS POWER AGAIN TO CONFIRM") \
+  X(ConfirmShutdown, "再按一次电源键关机", "PRESS POWER AGAIN TO SHUT DOWN") \
+  X(PoweredOff, "已关机", "POWERED OFF") \
+  X(PowerOnHint, "按电源键开机", "PRESS POWER TO TURN ON") \
+  X(SleepBlocked, "配网进行中，暂不能休眠", "SETUP IN PROGRESS: CAN'T SLEEP") \
+  X(OnbAsleep, "休眠中 · 按任意键唤醒", "ASLEEP · PRESS ANY KEY") \
+  X(OnbAsleepNote, "唤醒后才能打开管理地址", "WAKE THE DEVICE TO OPEN THE ADMIN PAGE") \
   X(RecoveryApStarted, "恢复热点：EEGO-A4-Setup / 192.168.4.1", "AP: EEGO-A4-Setup / 192.168.4.1") \
   X(WifiResetDone, "WiFi 已重置，恢复热点已开启", "WIFI RESET; RECOVERY AP OPEN") \
   X(FactoryResetDone, "恢复完成，即将重启", "RESET COMPLETE; REBOOTING") \
@@ -228,15 +237,15 @@ enum class Lang : uint8_t {
   X(HelpUpDownLong, "↑/↓ 长按", "UP/DOWN LONG") \
   X(HelpFocus, "选择面板（焦点框）", "SELECT PANEL (FOCUS)") \
   X(HelpPower, "Power 短按 / 长按", "POWER SHORT / LONG") \
-  X(HelpActivateBack, "确认 / 返回", "SELECT / BACK") \
+  X(HelpActivateBack, "休眠 / 关机（再按确认）", "SLEEP / SHUT DOWN (PRESS AGAIN)") \
   X(HelpFrontHome, "前置键 短按", "FRONT SHORT") \
-  X(HelpHome, "回到主页（固定）", "HOME (FIXED)") \
+  X(HelpHome, "返回 / 回到仪表盘（固定）", "BACK / DASHBOARD (FIXED)") \
   X(HelpFrontGestures, "前置键 长按 / 双击", "FRONT LONG / DOUBLE") \
   X(HelpSettingsStatus, "设置 / 状态", "SETTINGS / STATUS") \
   X(HelpSwipe, "滑动 左/上 · 右/下", "SWIPE LEFT/UP · RIGHT/DOWN") \
   X(HelpPage, "下一屏 / 上一屏；首屏右滑返回", "NEXT / PREV; RIGHT ON FIRST = BACK") \
-  X(HelpTapAlert, "点按告警", "TAP AN ALERT") \
-  X(HelpOpenDetail, "告警详情：确认 / 静音", "ALERT DETAIL: ACK / MUTE") \
+  X(HelpTapAlert, "点按", "TAP") \
+  X(HelpOpenDetail, "选择；告警 → 详情", "SELECT; ALERT → DETAIL") \
   X(HelpDanger, "危险操作", "DANGEROUS ACTION") \
   X(HelpFreshPress, "再按一次确认", "PRESS AGAIN TO CONFIRM") \
   X(HelpCustomBindings, "自定义按键", "CUSTOM BINDINGS") \
@@ -250,13 +259,13 @@ enum class Lang : uint8_t {
   X(PollEveryDayFmt, "每 %u 天", "EVERY %uD") \
   X(StateRunning, "运行中", "RUNNING") \
   X(StateKeepAwakeFmt, "保持唤醒 · 剩余 %u 分", "KEEP AWAKE · %uMIN LEFT") \
-  X(StateIdleFmt, "空闲 · 下次 %02d:%02d", "IDLE · NEXT %02d:%02d") \
-  X(StateIdleNoClockFmt, "空闲 · 每 %u 分钟刷新", "IDLE · EVERY %uMIN") \
+  X(StateIdleFmt, "节电 · 下次 %02d:%02d", "ECO · NEXT %02d:%02d") \
+  X(StateIdleNoClockFmt, "节电 · 每 %u 分钟刷新", "ECO · EVERY %uMIN") \
   X(StateAwakeFmt, "已唤醒 · 无操作 %u 秒后休眠", "AWAKE · SLEEPS AFTER %uS IDLE") \
   X(StateSleepingFmt, "休眠中 · 下次 %02d:%02d · 按键唤醒", "ASLEEP · NEXT %02d:%02d · PRESS A KEY") \
   X(StateSleeping, "休眠中 · 按键唤醒", "ASLEEP · PRESS A KEY") \
   X(StateKeepAwakeShortFmt, "保持唤醒 %u 分", "AWAKE %uMIN") \
-  X(StateIdleShortFmt, "空闲 %02d:%02d", "IDLE %02d:%02d") \
+  X(StateIdleShortFmt, "节电 %02d:%02d", "ECO %02d:%02d") \
   X(StateAwake, "已唤醒", "AWAKE") \
   X(StateSleepingNextFmt, "休眠中 · 下次 %02d:%02d", "ASLEEP · NEXT %02d:%02d") \
   X(StateSleepingShort, "休眠中", "ASLEEP") \

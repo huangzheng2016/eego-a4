@@ -102,12 +102,27 @@ eego::FrontlightOverride toFrontlightOverride(eego::settings::FrontlightHardware
   return eego::FrontlightOverride::Auto;
 }
 
+eego::ChargePolarity toChargePolarity(eego::settings::ChargeSignal mode) {
+  switch (mode) {
+    case eego::settings::ChargeSignal::ActiveHigh:
+      return eego::ChargePolarity::ActiveHigh;
+    case eego::settings::ChargeSignal::ActiveLow:
+      return eego::ChargePolarity::ActiveLow;
+    case eego::settings::ChargeSignal::Auto:
+      break;
+  }
+  return eego::ChargePolarity::Auto;
+}
+
 // frontlight_hardware 覆盖热生效：更新 FrontlightManager 与 capabilities.frontlight
 // （web admin 依 capability 门控前光字段）。回调在 DeviceSettings::update 调用者
 // 上下文（app_task）执行，update 已释放设置互斥后才通知。
 void onDeviceSettingsChanged(const eego::settings::Settings& values, uint32_t changed,
                              void* ctx) {
   (void)ctx;
+  if ((changed & eego::settings::kChangedChargeSignal) != 0) {
+    eego::PowerManager::instance().setChargePolarity(toChargePolarity(values.charge_signal));
+  }
   if ((changed & eego::settings::kChangedFrontlightHardware) == 0) return;
   eego::FrontlightManager& frontlight = eego::FrontlightManager::instance();
   frontlight.setOverride(toFrontlightOverride(values.frontlight_hardware));
@@ -493,6 +508,9 @@ extern "C" void app_main(void) {
   if (settingsErr != ESP_OK) {
     ESP_LOGE(TAG, "device settings init failed: %s", esp_err_to_name(settingsErr));
   }
+  // 充电脚极性覆盖须先于任何供电判定（下面的快速路径检查、PanelApp::begin）。
+  eego::PowerManager::instance().setChargePolarity(
+      toChargePolarity(deviceSettings.snapshot().values.charge_signal));
 #ifdef EEGO_LOCAL_POWER_MODE_MAINS
   {
     eego::settings::Settings next = deviceSettings.snapshot().values;
@@ -517,8 +535,9 @@ extern "C" void app_main(void) {
     }
   }
 #endif
-  if (fastWake) {
-    // 定时唤醒时已接上电源（或被强制为常供电）：以完整应用重启。
+  if (fastWake && panel::battery::rtcState().manual_sleep == 0) {
+    // 定时唤醒时已接上电源（或被强制为常供电）：以完整应用重启。电源键休眠
+    // （manual_sleep）例外：接着电源也只取数刷屏后继续睡，按键才唤醒。
     const eego::BatteryInfo bat = eego::PowerManager::instance().readBattery();
     const bool charging = eego::PowerManager::instance().isCharging() || bat.charging;
     if (panel::battery::mainsPowered(

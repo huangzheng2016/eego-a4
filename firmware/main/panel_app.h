@@ -11,8 +11,9 @@
 //   Settings / Help / Provision
 //
 // 导航（详见 README「设备操作」）：↑/↓ 短按 = 上/下一屏（列表内上/下一项）；
-// ↑/↓ 长按 = 面板焦点；Power 短按 = 选择/确认，长按 = 返回；前置键短按 = 主页，
-// 长按 = 设置，双击 = 状态（后两者及 ↑/↓ 可经 input-bindings 自定义）。
+// ↑/↓ 长按 = 面板焦点；点按 = 选择；Power 短按 = 休眠（设置页内 = 选择），长按 = 关机
+// （再按一次 Power 确认）；前置键短按 = 返回/回到仪表盘，长按 = 设置，双击 = 状态
+// （后两者及 ↑/↓ 可经 input-bindings 自定义）。
 //
 // 并发模型（M12 定稿，本类强制执行）：
 //   * 全部渲染/导航/本地动作只在 app_task 上下文（begin/service/handle* 由
@@ -150,7 +151,14 @@ class PanelApp {
   void serviceScreens(int64_t nowMs);
   // 深睡帧前：自动轮播开启时按墙钟周期前进至多一屏（RTC 内存记住当前屏）。
   void rotateForSleepFrame(uint64_t slotUnix);
-  void back();                    // 电源键长按/返回软键
+  void back();                    // 返回软键 / 前置键短按
+  void frontBack();               // 前置键短按：子页面返回，dashboard 退跳转栈/回第一屏
+  // Power 短按：立即休眠（墨水屏保留当前画面，状态行「休眠中」）。外接电源时同样深睡，
+  // 定时唤醒取数刷屏后继续睡，按任意键唤醒（RtcState::manual_sleep）。
+  void sleepByPowerKey(int64_t nowMs);
+  // Power 长按：布防关机确认；确认后画「已关机」页并松开 GPIO4 断电（不返回）。
+  void armShutdown();
+  [[noreturn]] void shutdownNow();
   // Focus = 面板焦点（dashboard）/ 设置子页 / 软键焦点；
   // Page  = 上/下一屏（dashboard）/ 列表上/下一项（设置行、告警）/ 状态子页。
   void moveFocus(int delta);
@@ -447,6 +455,7 @@ class PanelApp {
   BattPhase battPhase_ = BattPhase::Mains;
   battery::WakeSource wakeSource_ = battery::WakeSource::PowerOn;
   bool fastWake_ = false;
+  bool manualSleep_ = false;         // 电源键休眠（待入睡，或休眠中的定时唤醒）
   bool restartRequested_ = false;    // 快速路径中按键：重启进完整应用
   int64_t phaseStartMs_ = 0;
   bool batchStarted_ = false;        // 本次唤醒的取数批次已发起

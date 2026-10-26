@@ -785,8 +785,10 @@ void drawOnboarding(PortraitCanvas& c, const OnboardingModel& m) {
   c.drawRoundRect(geom::kContentX, y, geom::kContentW, boxH, 10, 0);
   c.drawRoundRect(static_cast<int16_t>(geom::kContentX + 1), static_cast<int16_t>(y + 1),
                   static_cast<int16_t>(geom::kContentW - 2), static_cast<int16_t>(boxH - 2), 9, 0);
-  const char* address = m.url.empty() ? tr(Str::OnbNoAddress) : m.url.c_str();
-  TextStyle addr = m.url.empty() ? style::kBodyMuted : style::kHeadline;
+  const char* address = m.asleep        ? tr(Str::OnbAsleep)
+                        : m.url.empty() ? tr(Str::OnbNoAddress)
+                                        : m.url.c_str();
+  TextStyle addr = m.asleep || m.url.empty() ? style::kBodyMuted : style::kHeadline;
   const int16_t boxInner = static_cast<int16_t>(geom::kContentW - 2 * geom::kRowPadX);
   while (addr.scale > 1 && (styleW(address, addr) > boxInner || fontH(addr.scale) > boxH - 12)) {
     addr.scale = static_cast<int16_t>(addr.scale - 1);
@@ -794,8 +796,9 @@ void drawOnboarding(PortraitCanvas& c, const OnboardingModel& m) {
   textCentered(c, geom::kContentX, geom::kContentW, centerY(y, boxH, addr.scale), address, addr);
   y = static_cast<int16_t>(y + boxH + 12);
 
-  if (!m.network.empty()) {
-    textFit(c, geom::kInnerX, y, geom::kInnerW, m.network.c_str(), style::kBodyMuted);
+  const std::string network = m.asleep ? std::string(tr(Str::OnbAsleepNote)) : m.network;
+  if (!network.empty()) {
+    textFit(c, geom::kInnerX, y, geom::kInnerW, network.c_str(), style::kBodyMuted);
     y = static_cast<int16_t>(y + lineHeight(style::kBodyMuted.scale) + 12);
   }
 
@@ -828,6 +831,19 @@ void drawOnboarding(PortraitCanvas& c, const OnboardingModel& m) {
   }
 
   textFit(c, geom::kInnerX, footerY, geom::kInnerW, tr(Str::OnbKeys), style::kCaption);
+}
+
+// ── 关机页 ──────────────────────────────────────────────────────────────────
+
+void drawPoweredOff(PortraitCanvas& c) {
+  c.clear();
+  c.useUiContentRect();
+  const int16_t titleLh = lineHeight(style::kTitle.scale);
+  const int16_t y =
+      static_cast<int16_t>((geom::kContentTop + geom::kContentBottom - titleLh) / 2);
+  textCentered(c, geom::kInnerX, geom::kInnerW, y, tr(Str::PoweredOff), style::kTitle);
+  textCentered(c, geom::kInnerX, geom::kInnerW, static_cast<int16_t>(y + titleLh + 8),
+               tr(Str::PowerOnHint), style::kCaption);
 }
 
 // ── 配网页 ──────────────────────────────────────────────────────────────────

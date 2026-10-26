@@ -48,4 +48,9 @@ bool storeFrame(const uint8_t* frame, size_t size, uint64_t hash);
 // 调用前须已关闭 WiFi/BLE/前光、墨水屏控制器已深睡。
 [[noreturn]] void deepSleep(uint64_t sleep_s, bool buttons);
 
+// 关机：等电源键松开后拉低 GPIO4 主电源保持 → 电池供电时整机断电，按电源键开机。
+// 外接 USB 时板子仍有电：退化为只认电源键的深睡（拔掉 USB 即真正断电）。
+// 调用前须已关闭 WiFi/BLE/前光、画好关机页并让墨水屏控制器深睡。
+[[noreturn]] void powerOff();
+
 }  // namespace panel::battery

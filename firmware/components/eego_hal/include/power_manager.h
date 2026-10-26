@@ -17,6 +17,9 @@ struct BatteryInfo {
     bool charging;           // 是否充电中
 };
 
+// GPIO11 充电状态极性。Auto = 按 LM3630A 在位推断（在位 → 高有效，否则低有效）。
+enum class ChargePolarity : uint8_t { Auto = 0, ActiveHigh, ActiveLow };
+
 class PowerManager {
 public:
     static PowerManager& instance();
@@ -24,6 +27,9 @@ public:
     void holdPower();        // GPIO4 锁存（系统启动后首项操作！）
     BatteryInfo readBattery();
     bool isCharging();
+    // 覆盖充电脚极性（device_settings charge_signal）：立即重配 GPIO11 上/下拉。
+    void setChargePolarity(ChargePolarity mode);
+    bool chargeActiveHigh() { ensureInitialized(); return chargeActiveHigh_; }
     // USB 主机已连接（USB-Serial-JTAG 收到 SOF：插着电脑/带数据的 USB 口）。
     // 注意：纯充电头不发 SOF —— 外部供电判定见 main/battery_policy MainsDetector。
     bool usbHostConnected();
@@ -36,9 +42,11 @@ private:
     adc_cali_handle_t adcCali_ = nullptr;
     bool lm3630aPresent_ = false;
     bool chargeActiveHigh_ = false;
+    ChargePolarity chargePolarity_ = ChargePolarity::Auto;
 
     void initAdc();
     void detectLm3630a();
+    void configureChargePin();
     void ensureInitialized();
     static uint8_t percentFromMillivolts(uint16_t mv);
 };

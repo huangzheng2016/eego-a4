@@ -14,6 +14,8 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sd_card.h"
 
 namespace panel::battery {
@@ -144,6 +146,23 @@ void deepSleep(uint64_t sleep_s, bool buttons) {
            buttons ? " up/down" : "");
   esp_deep_sleep_start();
   __builtin_unreachable();
+}
+
+void powerOff() {
+  // 电源键（GPIO8，高有效）仍按着时松开锁存，硬件可能靠按键维持供电、松手才断；
+  // 而深睡兜底的 EXT0 高电平唤醒会被按着的键立刻触发。先等松开（最多 5 s）。
+  const gpio_num_t power = static_cast<gpio_num_t>(eego::BUTTON_POWER);
+  for (int i = 0; i < 50 && gpio_get_level(power) != 0; ++i) vTaskDelay(pdMS_TO_TICKS(100));
+
+  const gpio_num_t latch = static_cast<gpio_num_t>(eego::POWER_LATCH);
+  ESP_LOGI(TAG, "power off: releasing power latch");
+  gpio_hold_dis(latch);
+  gpio_set_level(latch, 0);
+  vTaskDelay(pdMS_TO_TICKS(1500));
+
+  // 仍在运行 = 外接电源供电：只认电源键的深睡（无定时器），锁存保持低电平。
+  ESP_LOGW(TAG, "still powered (external supply): deep sleep until the power key");
+  deepSleep(0, false);
 }
 
 }  // namespace panel::battery

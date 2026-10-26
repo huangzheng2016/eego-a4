@@ -120,7 +120,7 @@ static_assert(kSettingsPagerY + kSettingsPagerH <= kContentBottom,
 
 struct StatusBarModel {
   char timeText[24] = "--:--";  // "HH:MM"（统一时间源可信）
-  // 设备状态（运行中 / 保持唤醒 · 剩余 N 分 / 空闲 · 下次 HH:MM / 已唤醒…）：
+  // 设备状态（运行中 / 保持唤醒 · 剩余 N 分 / 节电 · 下次 HH:MM / 已唤醒…）：
   // 状态栏中部「图标 + 正文字号标签」。
   DeviceState state = DeviceState::Running;
   char stateText[96] = "";
@@ -171,6 +171,7 @@ struct OnboardingModel {
   std::string network;   // WiFi 状态行（SSID · RSSI 或 未连接）
   bool apMode = false;   // 配网/恢复热点开启：引导连接热点
   std::string reason;    // dashboard 配置存在但无效时的原因（已钳制）
+  bool asleep = false;   // 深睡帧：地址不可达，地址框换成唤醒提示，不画网络行
 };
 
 struct S4RowModel {
@@ -204,6 +205,8 @@ void drawStatus(eego::PortraitCanvas& c, const KvModel& m);
 void drawS4(eego::PortraitCanvas& c, const S4Model& m);
 void drawHelp(eego::PortraitCanvas& c, const KvModel& m);
 void drawProvision(eego::PortraitCanvas& c, const ProvisionModel& m);
+// 关机页：整屏白底，中部「已关机」+「按电源键开机」（墨水屏断电后保持这一帧）。
+void drawPoweredOff(eego::PortraitCanvas& c);
 
 // ── 钳制工具（构建模型与绘制共用；渲染层对不可信字段的最后一道闸）────────────
 

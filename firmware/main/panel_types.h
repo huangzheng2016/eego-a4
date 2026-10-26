@@ -51,6 +51,7 @@ enum class SettingId : uint8_t {
   ScreenRotate, // 多屏自动轮播间隔（关/1/2/5/10/30 分钟）
   // 电池组：供电模式 → 电池唤醒间隔 → 最长不刷屏 → 交互超时 → 夜间暂停 → 下次唤醒/唤醒方式
   PowerMode,
+  ChargeSignal,  // 充电信号极性（自动 / 高有效 / 低有效）：充电与电池显示相反时切换
   BatteryRefresh,
   BatteryMaxStale,
   BatteryInteractive,
@@ -85,12 +86,13 @@ enum class ConfirmKind : uint8_t {
   BleProvision,
   BleUnbind,
   DashboardAction,
+  Shutdown,  // Power 长按布防，再按一次 Power 关机
 };
 
 constexpr bool requiresPhysicalConfirm(ConfirmKind kind) {
   return kind == ConfirmKind::NetworkRecovery || kind == ConfirmKind::WifiReset ||
          kind == ConfirmKind::FactoryReset || kind == ConfirmKind::BleProvision ||
-         kind == ConfirmKind::BleUnbind;
+         kind == ConfirmKind::BleUnbind || kind == ConfirmKind::Shutdown;
 }
 
 // 电池模式阶段机（README「电池模式」）。

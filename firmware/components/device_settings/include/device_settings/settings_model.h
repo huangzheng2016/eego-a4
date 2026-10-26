@@ -25,6 +25,14 @@ enum class FrontlightHardware : uint8_t {
   Absent = 2,
 };
 
+// GPIO11 充电状态极性：auto=按 LM3630A 是否在位推断（在位 → 高有效）；high/low=强制。
+// 推断只是经验规则，个别批次相反（表现为充电时显示电池、用电池时显示充电中）。
+enum class ChargeSignal : uint8_t {
+  Auto = 0,
+  ActiveHigh = 1,
+  ActiveLow = 2,
+};
+
 enum Change : uint32_t {
   kChangedLanguage = 1u << 0,
   kChangedPower = 1u << 1,
@@ -39,8 +47,9 @@ enum Change : uint32_t {
   kChangedIdleRefresh = 1u << 10,  // idle_after_min / idle_refresh_min / idle_critical_immediate / keep_awake_min
   kChangedBattery = 1u << 11,      // battery_refresh_min / battery_max_stale_min / battery_interactive_timeout_s
   kChangedScreenRotate = 1u << 12, // screen_rotate_min
+  kChangedChargeSignal = 1u << 13,
   kChangedRefresh = kChangedDataRefresh | kChangedEpdRefresh,
-  kChangedAll = (1u << 13) - 1,
+  kChangedAll = (1u << 14) - 1,
 };
 
 // 空闲显示刷新间隔（分钟）允许值：均整除 60，使边界落在整点对齐的墙钟时刻。
@@ -93,6 +102,7 @@ struct BleObserverRule {
 struct Settings {
   std::string language = "zh";
   PowerMode power_mode = PowerMode::Auto;
+  ChargeSignal charge_signal = ChargeSignal::Auto;
   uint32_t data_refresh_s = 0;
   // 电池模式：每 battery_refresh_min 分钟（本地墙钟对齐）定时唤醒取数一次；帧内容
   // 不变时最长 battery_max_stale_min 分钟不刷屏（须 ≥ battery_refresh_min）；按键
@@ -145,6 +155,8 @@ const char* powerModeName(PowerMode mode);
 bool powerModeFromString(const std::string& name, PowerMode& out);
 const char* frontlightHardwareName(FrontlightHardware mode);
 bool frontlightHardwareFromString(const std::string& name, FrontlightHardware& out);
+const char* chargeSignalName(ChargeSignal mode);
+bool chargeSignalFromString(const std::string& name, ChargeSignal& out);
 
 alert_core::JsonValue toJson(const Settings& settings);
 void validate(const Settings& settings, FieldErrors& errors);

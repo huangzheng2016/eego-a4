@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// device_status —— 设备状态「一眼可见」：状态标签（运行中 / 保持唤醒 / 空闲 / 已唤醒 /
+// device_status —— 设备状态「一眼可见」：状态标签（运行中 / 保持唤醒 / 节电 / 已唤醒 /
 // 休眠中 / 夜间暂停）、配套矢量图标与 dashboard 底部状态行的统一绘制。
 //
 //   * 顶部状态栏（panel_render drawStatusBar）与 dashboard 底部状态行
 //     （dashboard_runtime drawStatus、深睡帧）共用同一套标签与图标；
 //   * 文字为正文字号（UI 字体 2x）；状态行另在右侧常驻「更新于 HH:MM」
 //     （本帧实际刷屏的时刻），屏幕是否陈旧一目了然；
-//   * 标签只依赖低频变化的输入（剩余分钟按 keep_awake::displayMinutes 粗化、空闲
+//   * 标签只依赖低频变化的输入（剩余分钟按 keep_awake::displayMinutes 粗化、节电
 //     的「下次」= 上次刷新后的下一个边界、休眠的「下次」= 保证刷新的最迟时刻），
 //     状态行不会因为倒计时逼出高频刷屏。
 //
@@ -29,7 +29,7 @@ namespace panel {
 enum class DeviceState : uint8_t {
   Running = 0,  // 常供电、交互活跃：屏幕即时更新
   KeepAwake,    // 保持唤醒（配置模式）
-  Idle,         // 空闲刷新节奏：屏幕更新合并到墙钟边界
+  Idle,         // 节电刷新节奏：屏幕更新合并到墙钟边界
   Awake,        // 电池供电、按键唤醒后的交互期：无操作超时后深睡
   Sleeping,     // 电池深睡帧（最后一次刷屏）
   NightPause,   // 夜间暂停深睡帧
@@ -49,7 +49,7 @@ struct DeviceStateInfo {
   bool operator!=(const DeviceStateInfo& o) const { return !(*this == o); }
 };
 
-// 当前语言的状态标签，例如「保持唤醒 · 剩余 25 分」「空闲 · 下次 14:35」。
+// 当前语言的状态标签，例如「保持唤醒 · 剩余 25 分」「节电 · 下次 14:35」。
 std::string deviceStateLabel(const DeviceStateInfo& info, int tz_offset_min);
 // 由长到短的候选标签（首项 = deviceStateLabel）：空间不足时依次退到更短的写法，
 // 例如「休眠中 · 下次 10:55 · 按键唤醒」→「休眠中 · 下次 10:55」→「休眠中」。
@@ -59,7 +59,7 @@ std::string updatedLabel(uint64_t unix_s, int tz_offset_min);
 // 状态页「电源 / 休眠」分节的前四行（每个事实只出现一次）：
 //   供电      外接电源（USB 已连接 / 充电中 / 满电 / 手动设定）或 电池（手动设定）
 //   电量      85% · 3.98 V（· 充电中，若供电行未写）；无电池读数时省略
-//   运行状态  运行中 / 保持唤醒 · 剩余 N 分 / 空闲 · 下次 HH:MM / 已唤醒
+//   运行状态  运行中 / 保持唤醒 · 剩余 N 分 / 节电 · 下次 HH:MM / 已唤醒
 //   自动休眠  不会自动休眠 / 无操作 60 秒后休眠
 enum class PowerDetail : uint8_t { None = 0, Forced, UsbHost, Charging, Full };
 struct PowerStatusInput {
@@ -77,7 +77,7 @@ std::vector<std::pair<std::string, std::string>> powerStatusRows(const PowerStat
 // API 名：active | keep_awake | idle | awake | sleeping | night_pause。
 const char* deviceStateApiName(DeviceState state);
 
-// 状态图标（size×size 方框内，黑色）：运行中=实心圆点、保持唤醒=太阳、空闲=时钟、
+// 状态图标（size×size 方框内，黑色）：运行中=实心圆点、保持唤醒=太阳、节电=时钟、
 // 已唤醒=圆环、休眠/夜间暂停=月牙。
 void drawStateIcon(eego::PortraitCanvas& c, int16_t x, int16_t y, int16_t size, DeviceState state);
 // 与字号匹配的图标边长（≈ 大写字高 × 1.25，最小 12）。
