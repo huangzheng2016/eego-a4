@@ -20,6 +20,7 @@ const SETTINGS_SCHEMA = {
   fields: {
     language: { type: 'string', enum: ['zh', 'en'], default: 'zh', group: 'time_language' },
     power_mode: { type: 'string', enum: ['auto', 'mains', 'battery'], default: 'auto', group: 'power' },
+    charge_signal: { type: 'string', enum: ['auto', 'high', 'low'], default: 'auto', group: 'power' },
     data_refresh_s: { type: 'int', range: [0, 86400], minimum_nonzero: 30, default: 0, group: 'refresh' },
     battery_refresh_min: { type: 'int', enum: [5, 10, 15, 30, 60], default: 15, group: 'battery' },
     battery_max_stale_min: { type: 'int', enum: [15, 30, 60, 120, 240, 480], default: 60, group: 'battery' },

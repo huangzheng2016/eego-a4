@@ -133,7 +133,7 @@ const BOTTOM: Route[] = ['editor', 'sources', 'preview', 'alerts'];
 
 function Shell() {
   const { t, lang, setLang } = useI18n();
-  const { connection, status, logout } = useSession();
+  const { connection, status, logout, refreshStatus } = useSession();
   const { route, arg, explicit } = useRoute();
   const draft = useDraft();
   const [sheet, setSheet] = useState(false);
@@ -224,11 +224,16 @@ function Shell() {
         ))}
         <div className="sidebar-foot">
           <KeepAwakeToggle />
-          <div className="conn" title={status ? `${status.network.ssid} · ${status.network.ip}` : ''}>
+          <button
+            type="button"
+            className="conn"
+            title={`${status ? `${status.network.ssid} · ${status.network.ip} · ` : ''}${t('conn.recheck')}`}
+            onClick={() => void refreshStatus()}
+          >
             <span className={`dot ${connection === 'online' ? 'ok' : connection === 'offline' ? 'bad' : ''}`} />
             <span className="grow">{connLabel}</span>
             {status && <span className="mono dim">{status.network.ip}</span>}
-          </div>
+          </button>
           <div className="row between">{prefs}</div>
           <Button size="sm" variant="ghost" onClick={() => void logout()} className="justify-start">
             <Icon name="logout" size={16} /> {t('login.logout')}

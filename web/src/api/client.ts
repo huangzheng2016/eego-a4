@@ -65,7 +65,23 @@ export interface RequestOptions {
   timeoutMs?: number;
 }
 
+// Reads are retried once after a network error/timeout: on a weak WiFi link a single
+// dropped packet should not surface as "device unreachable". Writes are never
+// retried here — a PUT whose response was lost may already have been applied.
+const RETRY_DELAY_MS = 800;
+
 export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const read = (opts.method ?? 'GET') === 'GET';
+  try {
+    return await requestOnce<T>(path, opts);
+  } catch (e) {
+    if (!read || !(e instanceof ApiError) || e.status !== 0 || opts.signal?.aborted) throw e;
+    await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+    return requestOnce<T>(path, opts);
+  }
+}
+
+async function requestOnce<T>(path: string, opts: RequestOptions): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   const token = getToken() || memoryToken;
   if (token) headers.Authorization = `Bearer ${token}`;

@@ -1,6 +1,7 @@
 // "设备实时画面": GET /display/snapshot.bmp (1-bit 552×768) shown in a device
-// frame. Re-fetched automatically a few seconds after every successful apply
-// (the e-ink refresh takes a moment) and optionally every 30 s. With several
+// frame. Fetched only on demand (Refresh), a few seconds after every successful
+// apply (the e-ink refresh takes a moment) and, opt-in, every 30 s — opening the
+// tab does not download a frame. With several
 // screens, ‹ › switch the device's current screen (POST /device/screen).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
@@ -42,12 +43,12 @@ export function LivePreview({ compact }: { compact?: boolean }) {
     }
   }, [t]);
 
-  useEffect(() => {
-    void load();
-    return () => {
+  useEffect(
+    () => () => {
       if (urlRef.current) URL.revokeObjectURL(urlRef.current);
-    };
-  }, [load]);
+    },
+    [],
+  );
 
   // Refresh after each apply (also when mounted shortly after one): a
   // countdown to the first fetch, then a second fetch for slow refreshes.
@@ -109,7 +110,21 @@ export function LivePreview({ compact }: { compact?: boolean }) {
         </div>
       )}
       <div className="live-frame">
-        {url ? <img src={url} width={552} height={768} alt={t('preview.title')} /> : <div className="live-ph">{err ? <span>{err}</span> : <span className="spin" />}</div>}
+        {url ? (
+          <img src={url} width={552} height={768} alt={t('preview.title')} />
+        ) : (
+          <div className="live-ph">
+            {err ? (
+              <span>{err}</span>
+            ) : busy ? (
+              <span className="spin" />
+            ) : (
+              <Button onClick={() => void load()}>
+                <Icon name="refresh" size={15} /> {t('preview.load')}
+              </Button>
+            )}
+          </div>
+        )}
         {url && err && (
           <span className="live-badge">
             <Badge tone="warn">{t('preview.stale')}</Badge>

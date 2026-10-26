@@ -49,13 +49,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // One fetch at sign-in; afterwards only on demand (refresh buttons, after actions).
+  // No background polling: on a weak WiFi link every idle request competes with
+  // the saves that matter, and a failed poll flips the badge to "offline".
   useEffect(() => {
-    if (!authed) return;
-    void refreshStatus();
-    const id = setInterval(() => {
-      if (document.visibilityState === 'visible') void refreshStatus();
-    }, 30000);
-    return () => clearInterval(id);
+    if (authed) void refreshStatus();
   }, [authed, refreshStatus]);
 
   const login = useCallback(async (password: string) => {

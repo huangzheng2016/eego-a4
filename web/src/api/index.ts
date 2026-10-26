@@ -9,6 +9,18 @@ import type { WifiNetworkEdit } from '../model/wifi';
 
 export { ApiError, getToken, setToken, onUnauthorized, onConnectivity } from './client';
 
+/** Memoise a static read for the lifetime of the page; a failure is not cached. */
+function once<T>(fn: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | null = null;
+  return () => {
+    pending ??= fn().catch((e: unknown) => {
+      pending = null;
+      throw e;
+    });
+    return pending;
+  };
+}
+
 // ---------------------------------------------------------------- auth
 export interface LoginResponse {
   token: string;
@@ -131,7 +143,8 @@ export interface SettingsResponse {
   ble: Record<string, unknown>;
 }
 export const getSettings = () => request<SettingsResponse>('/settings');
-export const getSettingsSchema = () => request<SettingsSchema>('/settings/schema');
+/** Built into the firmware: fetched once per page load. */
+export const getSettingsSchema = once(() => request<SettingsSchema>('/settings/schema'));
 export const putSettings = (patch: Record<string, unknown>) =>
   request<SettingsResponse>('/settings', { method: 'PUT', body: patch });
 export const bleUnbind = () => request<unknown>('/settings/ble/unbind', { method: 'POST', body: {} });
@@ -263,7 +276,8 @@ export interface TemplateLibrary {
   presets: PresetDoc[];
   examples: { id: string; title: string; bundle: Bundle }[];
 }
-export const getTemplates = () => request<TemplateLibrary>('/dashboard/templates', { timeoutMs: 30000 });
+/** Built into the firmware: fetched once per page load. */
+export const getTemplates = once(() => request<TemplateLibrary>('/dashboard/templates', { timeoutMs: 30000 }));
 
 export type PreviewRefresh = 'full' | 'fast';
 export type PreviewData = 'bundle' | 'live' | 'mixed' | 'placeholder' | 'none';

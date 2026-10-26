@@ -26,11 +26,7 @@ export function AlertsPage() {
       (e) => setErr(e instanceof api.ApiError && e.status === 503 ? t('alerts.unavailable') : errorText(e, t)),
     );
   }, [t]);
-  useEffect(() => {
-    load();
-    const id = setInterval(() => document.visibilityState === 'visible' && load(), 30000);
-    return () => clearInterval(id);
-  }, [load]);
+  useEffect(load, [load]);  // once per visit; the Refresh button re-fetches
 
   const act = async (fn: () => Promise<unknown>) => {
     try {
