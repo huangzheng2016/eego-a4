@@ -18,6 +18,8 @@ import {
   TYPE_ACK,
   TYPE_DATA,
   TYPE_EVENT,
+  MAX_CENTRAL_ID,
+  TYPE_PROXY,
   type ResponseHead,
 } from './protocol';
 
@@ -132,7 +134,7 @@ export class BleLink implements Transport {
     if (r.signal.aborted) throw abortError();
     const ch = this.channel;
     if (!ch || this.state !== 'ready') throw networkError('ble not connected');
-    this.nextId = (this.nextId % 255) + 1;
+    this.nextId = (this.nextId % MAX_CENTRAL_ID) + 1;
     const id = this.nextId;
     const h: Record<string, string> = {};
     for (const [k, v] of Object.entries(r.headers)) if (FORWARD_HEADERS.includes(k.toLowerCase())) h[k.toLowerCase()] = v;
@@ -191,6 +193,8 @@ export class BleLink implements Transport {
       }
       return;
     }
+    // Uplink traffic for a computer agent (device-initiated, ids 128..255) is not ours.
+    if (h.type === TYPE_PROXY || h.id > MAX_CENTRAL_ID) return;
     const p = this.pending;
     if (!p || h.id !== p.id) return;
     if (h.type === TYPE_ACK) {

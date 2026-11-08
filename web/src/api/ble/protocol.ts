@@ -22,6 +22,10 @@ export const TYPE_DATA = 0x0;
 export const TYPE_ACK = 0x1;
 export const TYPE_ABORT = 0x2;
 export const TYPE_EVENT = 0x3;
+/** Device-initiated uplink messages for a computer agent; browsers ignore them. */
+export const TYPE_PROXY = 0x4;
+/** Browser-initiated messages use ids 1..MAX_CENTRAL_ID; 128..255 belong to device PROXY messages. */
+export const MAX_CENTRAL_ID = 127;
 
 export const HEADER_LEN = 4;
 export const PRELUDE_LEN = 10;

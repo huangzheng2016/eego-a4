@@ -98,6 +98,7 @@ struct StatusBarModel {
   bool portalOpen = false;
   bool apFallback = false;
   bool bleLinked = false;
+  bool agentUplink = false;  // data goes through the computer agent over BLE
   size_t mutedCount = 0;
   char banner[96] = "";
 };

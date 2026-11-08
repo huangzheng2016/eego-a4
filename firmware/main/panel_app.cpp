@@ -27,6 +27,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "net_stack/uplink.h"
 #include "net_stack/net_stack.h"
 #include "net_stack/wifi_list.h"
 #include "pcf8563_rtc.h"
@@ -217,6 +218,9 @@ void PanelApp::applySettings(uint32_t changed) {
   }
   if ((changed & eego::settings::kChangedBle) != 0) {
     eego::ble::BleManager::instance().configure(settings_);
+  }
+  if ((changed & eego::settings::kChangedUplink) != 0) {
+    eego::net::uplink::setMode(static_cast<eego::net::uplink::Mode>(settings_.uplink));
   }
   if ((changed & (eego::settings::kChangedIdleRefresh | eego::settings::kChangedTimezone)) != 0) {
     configureRefreshPolicy();
@@ -1162,6 +1166,10 @@ void PanelApp::serviceBlePairing(int64_t now) {
       if (linked) noteInteraction(now);
       markDirty();
     }
+  }
+  if (ble.agent_connected != agentSeen_) {
+    agentSeen_ = ble.agent_connected;
+    markDirty();
   }
 }
 
@@ -3156,6 +3164,7 @@ void PanelApp::buildStatusBar(StatusBarModel& m) {
   m.portalOpen = admin::ProvisionPortal::instance().isOpen();
   m.apFallback = admin::ProvisionPortal::instance().isApFallbackActive();
   m.bleLinked = bleLinkSeen_ == eego::ble::LinkState::Authenticated;
+  m.agentUplink = agentSeen_ && settings_.uplink != eego::settings::UplinkMode::Wifi;
   m.mutedCount = 0;
   if (snapshot_ != nullptr) {
     for (const auto& r : snapshot_->records) {

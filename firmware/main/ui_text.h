@@ -174,6 +174,7 @@ enum class Lang : uint8_t {
   X(BleStatePairing, "配对中", "PAIRING") \
   X(BleStateLinked, "已连接", "CONNECTED") \
   X(BleLinkedPill, "蓝牙", "BLE") \
+  X(AgentUplinkPill, "电脑", "PC LINK") \
   X(BlePairTitle, "蓝牙配对", "BLUETOOTH PAIRING") \
   X(BlePairHint, "在电脑或手机的配对弹窗中输入下面的 6 位配对码", "ENTER THIS 6-DIGIT CODE IN THE PAIRING PROMPT ON YOUR COMPUTER OR PHONE") \
   X(BlePairExpiresFmt, "%u 秒内有效", "VALID FOR %u S") \

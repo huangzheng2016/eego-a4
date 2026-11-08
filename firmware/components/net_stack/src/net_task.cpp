@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "net_stack/uplink.h"
 #include "net_stack/net_task.h"
 
 #include <cstdint>
@@ -619,6 +620,8 @@ const char* toString(AlertActionResult::Code code) {
 
 bool NetStack::httpSubmit(const NetRequest& req, NetResponse* resp, uint32_t wait_ms) {
   if (!resp) return false;
+  // A linked BLE agent carries the request on the caller's task (no WiFi, no device TLS).
+  if (uplink::route(req, *resp)) return true;
   auto p = std::make_shared<Impl::HttpPayload>();
   p->req = req;
   if (!sendCmdAndWait(CmdType::HttpSubmit, p, wait_ms) ||

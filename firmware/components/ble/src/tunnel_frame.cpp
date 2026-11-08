@@ -43,7 +43,7 @@ bool parseHeader(const uint8_t* frame, size_t len, FrameHeader& out) {
   out.flags = frame[0];
   out.id = frame[1];
   out.seq = getU16(frame + 2);
-  return (out.flags & 0x0c) == 0 && out.type() <= kTypeEvent;
+  return (out.flags & 0x0c) == 0 && out.type() <= kTypeProxy;
 }
 
 void writeHeader(uint8_t* out, uint8_t flags, uint8_t id, uint16_t seq) {
@@ -70,7 +70,7 @@ size_t frameCount(size_t total_len, size_t chunk) {
 }
 
 size_t encodeFrames(uint8_t id, const uint8_t* head, uint16_t head_len, const uint8_t* body,
-                    size_t body_len, size_t chunk, const FrameSink& sink) {
+                    size_t body_len, size_t chunk, const FrameSink& sink, uint8_t type) {
   if (chunk < kMinChunk || (head_len > 0 && head == nullptr) || (body_len > 0 && body == nullptr)) {
     return 0;
   }
@@ -86,7 +86,7 @@ size_t encodeFrames(uint8_t id, const uint8_t* head, uint16_t head_len, const ui
   size_t offset = 0;
   for (size_t seq = 0; seq < frames; seq++) {
     size_t pos = kHeaderBytes;
-    uint8_t flags = static_cast<uint8_t>(kTypeData << 4);
+    uint8_t flags = static_cast<uint8_t>(type << 4);
     if (seq == 0) {
       flags |= kFlagStart;
       putU32(frame + pos, static_cast<uint32_t>(total));
@@ -129,8 +129,8 @@ AbortReason abortReasonFor(Result r) {
   }
 }
 
-Reassembler::Reassembler(size_t max_total, BufferAllocator allocator)
-    : max_total_(max_total), allocator_(allocator) {
+Reassembler::Reassembler(size_t max_total, BufferAllocator allocator, uint8_t data_type)
+    : max_total_(max_total), allocator_(allocator), data_type_(data_type) {
   if (allocator_.alloc == nullptr || allocator_.release == nullptr) {
     allocator_.alloc = &defaultAlloc;
     allocator_.release = &defaultRelease;
@@ -153,6 +153,14 @@ void Reassembler::reset() {
 }
 
 void Reassembler::release() { reset(); }
+
+uint8_t* Reassembler::takeBuffer() {
+  if (state_ != State::Complete) return nullptr;
+  uint8_t* out = buffer_;
+  buffer_ = nullptr;
+  reset();
+  return out;
+}
 
 Result Reassembler::fail(Result r) {
   reset();
@@ -180,7 +188,7 @@ Result Reassembler::feed(const uint8_t* frame, size_t len, int64_t now_ms) {
     if (state_ == State::Receiving && h.id == id_) reset();
     return Result::Cancelled;
   }
-  if (h.type() != kTypeData) return Result::BadFrame;
+  if (h.type() != data_type_) return Result::BadFrame;
   if (state_ == State::Complete) return Result::Busy;
   if (state_ == State::Receiving && now_ms - last_frame_ms_ >= kIdleTimeoutMs) reset();
 

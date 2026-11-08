@@ -53,6 +53,7 @@ set(FW_SOURCES
   ${C}/data_pipeline/src/cache.cpp
   ${C}/net_stack/src/credentials.cpp
   ${C}/net_stack/src/wifi_list.cpp
+  ${C}/net_stack/src/uplink_codec.cpp
   ${C}/device_settings/src/settings_model.cpp
   ${C}/eego_hal/input_gesture.cpp
   ${C}/eego_hal/atomic_file.cpp
@@ -88,7 +89,7 @@ set(TEST_SUITES dashboard layout expression pipeline gesture settings probe_mask
     refresh_policy battery_policy confirm wifi_list)
 list(APPEND TEST_SUITES touch_cal)
 list(APPEND TEST_SUITES keep_awake power_source device_screen screen_rotate)
-list(APPEND TEST_SUITES ble_tunnel time_policy json_parser)
+list(APPEND TEST_SUITES ble_tunnel time_policy json_parser uplink)
 add_executable(firmware_host_tests
   test_main.cpp
   test_dashboard.cpp
@@ -108,6 +109,7 @@ add_executable(firmware_host_tests
   test_wifi_list.cpp
   test_keep_awake.cpp
   test_ble_tunnel.cpp
+  test_uplink.cpp
   test_time_policy.cpp
 )
 target_include_directories(firmware_host_tests PRIVATE

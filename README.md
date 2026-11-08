@@ -22,6 +22,33 @@ EEGO A4（ESP32-S3 + 7.8 英寸墨水屏）的可配置数据/告警面板。固
 在「仪表盘」中选择模板或导入 JSON，校验后应用到设备。数据源密钥在「凭据」中写入，
 配置里只保存引用，不会被读出。
 
+## 电脑蓝牙上网（eego-link）
+
+设备在电脑旁边时，可经蓝牙借用电脑的网络拉取数据源：请求由电脑代发（含 HTTPS），
+设备不需要 WiFi 和 TLS。电脑上运行 `eego-link`，支持 Linux、macOS、Windows
+的 amd64/arm64。设备同一时间只接受一个蓝牙连接，代理连着时浏览器无法再用蓝牙连接
+（可改用 WiFi 打开管理页，或先停掉代理）。
+
+```sh
+# Linux / macOS（加 `-s -- --service` 可开机自启）
+curl -fsSL https://raw.githubusercontent.com/huangzheng2016/eego-a4/main/scripts/install-link.sh | sh
+```
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/huangzheng2016/eego-a4/main/scripts/install-link.ps1 | iex
+```
+
+1. `eego-link pair`：输入设备屏幕上的 6 位配对码（macOS 弹系统对话框；Windows 先在
+   「设置 → 蓝牙和其他设备 → 添加设备」中配对一次）。
+2. `eego-link run`：保持连接、断开自动重连，连接后顺带校准设备时间。
+
+默认允许访问任何地址；`--allow api.example.com,*.example.org` 只放行指定主机，
+`--deny-private` 拒绝本机和局域网地址，`-v` 打印每个请求（不含请求头和内容）。
+`eego-link status` 经蓝牙查看设备状态。Linux 需要 BlueZ，用户需能访问蓝牙
+（通常加入 `bluetooth` 组）。设备「设置 → 数据上网方式」可选自动（代理在线时走蓝牙，
+否则 WiFi）、仅 WiFi、仅蓝牙。
+
 ## 设备操作
 
 | 输入 | 动作 |

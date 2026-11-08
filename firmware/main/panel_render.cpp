@@ -466,6 +466,7 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
   const int16_t mx0 = static_cast<int16_t>(leftEnd + 16);
   const int16_t mx1 = static_cast<int16_t>(rx - 12);
   const char* portal = m.portalOpen || m.apFallback ? tr(Str::SetupHotspotOn)
+                       : m.agentUplink              ? tr(Str::AgentUplinkPill)
                        : m.bleLinked                ? tr(Str::BleLinkedPill)
                                                     : nullptr;
   char mute[24] = "";

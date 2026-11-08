@@ -38,6 +38,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "net_stack/uplink.h"
 #include "net_stack/net_stack.h"
 #include "net_stack/sd_alert_file_io.h"
 #include "net_stack/wifi_list.h"
@@ -532,6 +533,17 @@ extern "C" void app_main(void) {
         eego::ble::BleManager::instance().init();
     if (bleErr != ESP_OK) {
       ESP_LOGE(TAG, "BLE manager init failed: %s", esp_err_to_name(bleErr));
+    } else {
+      // Data sources can go through a computer agent linked over BLE (bleproxyagent).
+      eego::net::uplink::Agent agent;
+      agent.linked = [] { return eego::ble::BleManager::instance().agentLinked(); };
+      agent.fetch = [](const std::string& head, const uint8_t* body, size_t body_len,
+                       uint32_t wait_ms, std::string& resp_head, uint8_t** resp_body,
+                       size_t* resp_body_len) {
+        return eego::ble::BleManager::instance().proxyFetch(head, body, body_len, wait_ms, resp_head,
+                                                            resp_body, resp_body_len);
+      };
+      eego::net::uplink::setAgent(agent);
     }
   }
   {

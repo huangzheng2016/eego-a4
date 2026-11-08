@@ -103,8 +103,8 @@ TEST(settings, json_round_trip) {
   CHECK(decoded.ble_observer_rules.size() == 1 && decoded.ble_observer_rules[0] == rule);
   CHECK_EQ(changedFields(s, decoded), 0u);
   // Byte-identical to the output before toJson was rewritten for a small stack frame.
-  CHECK_EQ(encoded.toString(), std::string(R"JSON({"schema_version":1,"language":"en","power_mode":"battery","charge_signal":"auto","data_refresh_s":120,"battery_refresh_min":30,"battery_max_stale_min":120,"battery_interactive_timeout_s":90,"sleep_start_min":1380,"sleep_end_min":420,"timezone_offset_min":-330,"frontlight_enabled":true,"frontlight_brightness":33,"frontlight_warmth":80,"frontlight_hardware":"absent","epd_full_refresh_s":7200,"idle_after_min":30,"idle_refresh_min":15,"idle_critical_immediate":false,"keep_awake_min":30,"screen_rotate_min":0,"diagnostics_enabled":false,"ble_admin_enabled":false,"ble_observer_enabled":true,"ble_observer_window_s":10,"ble_observer_interval_s":300,"ble_observer_dedup_ms":5000,"ble_observer_rules":[{"id":"temp1","event_type":"ble.sensor","title":"BLE sensor","payload_offset":0,"payload_match":"9904","fields":[{"name":"temperature","offset":2,"type":"i16le","scale":0.01}],"ttl_s":86400,"manufacturer_id":1177}]})JSON"));
-  CHECK_EQ(toJson(Settings{}).toString(), std::string(R"JSON({"schema_version":1,"language":"zh","power_mode":"auto","charge_signal":"auto","data_refresh_s":0,"battery_refresh_min":15,"battery_max_stale_min":60,"battery_interactive_timeout_s":60,"sleep_start_min":-1,"sleep_end_min":-1,"timezone_offset_min":480,"frontlight_enabled":false,"frontlight_brightness":60,"frontlight_warmth":50,"frontlight_hardware":"auto","epd_full_refresh_s":86400,"idle_after_min":10,"idle_refresh_min":5,"idle_critical_immediate":true,"keep_awake_min":30,"screen_rotate_min":0,"diagnostics_enabled":true,"ble_admin_enabled":true,"ble_observer_enabled":false,"ble_observer_window_s":10,"ble_observer_interval_s":300,"ble_observer_dedup_ms":5000,"ble_observer_rules":[]})JSON"));
+  CHECK_EQ(encoded.toString(), std::string(R"JSON({"schema_version":1,"language":"en","power_mode":"battery","charge_signal":"auto","data_refresh_s":120,"battery_refresh_min":30,"battery_max_stale_min":120,"battery_interactive_timeout_s":90,"sleep_start_min":1380,"sleep_end_min":420,"timezone_offset_min":-330,"frontlight_enabled":true,"frontlight_brightness":33,"frontlight_warmth":80,"frontlight_hardware":"absent","epd_full_refresh_s":7200,"idle_after_min":30,"idle_refresh_min":15,"idle_critical_immediate":false,"keep_awake_min":30,"screen_rotate_min":0,"diagnostics_enabled":false,"ble_admin_enabled":false,"uplink":"auto","ble_observer_enabled":true,"ble_observer_window_s":10,"ble_observer_interval_s":300,"ble_observer_dedup_ms":5000,"ble_observer_rules":[{"id":"temp1","event_type":"ble.sensor","title":"BLE sensor","payload_offset":0,"payload_match":"9904","fields":[{"name":"temperature","offset":2,"type":"i16le","scale":0.01}],"ttl_s":86400,"manufacturer_id":1177}]})JSON"));
+  CHECK_EQ(toJson(Settings{}).toString(), std::string(R"JSON({"schema_version":1,"language":"zh","power_mode":"auto","charge_signal":"auto","data_refresh_s":0,"battery_refresh_min":15,"battery_max_stale_min":60,"battery_interactive_timeout_s":60,"sleep_start_min":-1,"sleep_end_min":-1,"timezone_offset_min":480,"frontlight_enabled":false,"frontlight_brightness":60,"frontlight_warmth":50,"frontlight_hardware":"auto","epd_full_refresh_s":86400,"idle_after_min":10,"idle_refresh_min":5,"idle_critical_immediate":true,"keep_awake_min":30,"screen_rotate_min":0,"diagnostics_enabled":true,"ble_admin_enabled":true,"uplink":"auto","ble_observer_enabled":false,"ble_observer_window_s":10,"ble_observer_interval_s":300,"ble_observer_dedup_ms":5000,"ble_observer_rules":[]})JSON"));
 }
 
 TEST(settings, patch_frontlight_hardware) {
@@ -362,4 +362,20 @@ TEST(settings, ble_admin_default_patch_and_change_mask) {
   errors.clear();
   CHECK(!patchOk(defaults, R"({"ble_admin_enabled":"yes"})", out, errors));
   CHECK(!errors.empty());
+}
+
+TEST(settings, uplink_mode_round_trip_and_validation) {
+  const Settings defaults;
+  CHECK(defaults.uplink == UplinkMode::Auto);
+  const JsonValue encoded = toJson(defaults);
+  CHECK_EQ(encoded.find("uplink")->stringValue(), std::string("auto"));
+  Settings out;
+  FieldErrors errors;
+  CHECK(patchOk(defaults, R"({"uplink":"ble"})", out, errors));
+  CHECK(out.uplink == UplinkMode::Ble);
+  CHECK((changedFields(defaults, out) & kChangedUplink) != 0);
+  CHECK(patchOk(defaults, R"({"uplink":"wifi"})", out, errors));
+  CHECK(out.uplink == UplinkMode::Wifi);
+  CHECK(!patchOk(defaults, R"({"uplink":"lte"})", out, errors));
+  CHECK(!patchOk(defaults, R"({"uplink":1})", out, errors));
 }

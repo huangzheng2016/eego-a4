@@ -117,6 +117,16 @@ describe('BleLink', () => {
     await expect(p).rejects.toMatchObject({ name: 'AbortError' });
   });
 
+  it('uses message ids 1..127 only (128..255 belong to device uplink messages)', async () => {
+    const { l, dev } = await link(async () => json(200, {}));
+    for (let i = 0; i < 130; i++) {
+      await l.send({ method: 'GET', path: '/status', headers: {}, signal: new AbortController().signal, timeoutMs: 5000 });
+    }
+    const ids = new Set(dev.written.map((f) => parseFrameHeader(f)?.id ?? 0));
+    expect(Math.max(...ids)).toBe(127);
+    expect(ids.has(0)).toBe(false);
+  });
+
   it('sleep and reboot events update the state', async () => {
     const { l, dev } = await link(async () => json(200, {}));
     dev.sendEvent('{"ev":"sleep","in_s":3}');

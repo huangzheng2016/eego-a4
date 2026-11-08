@@ -12,6 +12,8 @@ idf_component_register(
         "src/store_digest.cpp"
         "src/sd_alert_file_io.cpp"
         "src/time_sync.cpp"
+        "src/uplink.cpp"
+        "src/uplink_codec.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
         alert_core

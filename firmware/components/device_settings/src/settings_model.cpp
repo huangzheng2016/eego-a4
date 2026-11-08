@@ -289,6 +289,22 @@ bool chargeSignalFromString(const std::string& name, ChargeSignal& out) {
   return true;
 }
 
+const char* uplinkModeName(UplinkMode mode) {
+  switch (mode) {
+    case UplinkMode::Wifi: return "wifi";
+    case UplinkMode::Ble: return "ble";
+    default: return "auto";
+  }
+}
+
+bool uplinkModeFromString(const std::string& name, UplinkMode& out) {
+  if (name == "auto") out = UplinkMode::Auto;
+  else if (name == "wifi") out = UplinkMode::Wifi;
+  else if (name == "ble") out = UplinkMode::Ble;
+  else return false;
+  return true;
+}
+
 bool operator==(const BleFieldMap& a, const BleFieldMap& b) {
   return a.name == b.name && a.offset == b.offset && a.type == b.type && a.scale == b.scale;
 }
@@ -378,7 +394,7 @@ bool bleBytesFromHex(const std::string& text, std::vector<uint8_t>& out) {
 JsonValue toJson(const Settings& s) {
   JsonValue::Array rules;
   for (const auto& rule : s.ble_observer_rules) rules.push_back(ruleToJson(rule));
-  eego::json::ObjectWriter w(28);
+  eego::json::ObjectWriter w(29);
   w.integer("schema_version", kSchemaVersion);
   w.string("language", s.language);
   w.string("power_mode", powerModeName(s.power_mode));
@@ -402,6 +418,7 @@ JsonValue toJson(const Settings& s) {
   w.integer("screen_rotate_min", s.screen_rotate_min);
   w.boolean("diagnostics_enabled", s.diagnostics_enabled);
   w.boolean("ble_admin_enabled", s.ble_admin_enabled);
+  w.string("uplink", uplinkModeName(s.uplink));
   w.boolean("ble_observer_enabled", s.ble_observer_enabled);
   w.integer("ble_observer_window_s", s.ble_observer_window_s);
   w.integer("ble_observer_interval_s", s.ble_observer_interval_s);
@@ -416,6 +433,9 @@ void validate(const Settings& s, FieldErrors& errors) {
   }
   if (static_cast<uint8_t>(s.power_mode) > static_cast<uint8_t>(PowerMode::Battery)) {
     addError(errors, "power_mode", "must be one of auto|mains|battery");
+  }
+  if (static_cast<uint8_t>(s.uplink) > static_cast<uint8_t>(UplinkMode::Ble)) {
+    addError(errors, "uplink", "must be one of auto|wifi|ble");
   }
   if (static_cast<uint8_t>(s.charge_signal) > static_cast<uint8_t>(ChargeSignal::ActiveLow)) {
     addError(errors, "charge_signal", "must be one of auto|high|low");
@@ -656,6 +676,16 @@ bool mergePatch(const Settings& current, const JsonValue& patch, Settings& out,
       readBool(value, key.c_str(), next.diagnostics_enabled, errors);
     } else if (key == "ble_admin_enabled") {
       readBool(value, key.c_str(), next.ble_admin_enabled, errors);
+    } else if (key == "uplink") {
+      std::string text;
+      if (readString(value, key.c_str(), text, errors)) {
+        UplinkMode mode;
+        if (!uplinkModeFromString(text, mode)) {
+          addError(errors, key, "must be one of auto|wifi|ble");
+        } else {
+          next.uplink = mode;
+        }
+      }
     } else if (key == "ble_observer_enabled") {
       readBool(value, key.c_str(), next.ble_observer_enabled, errors);
     } else if (key == "ble_observer_rules") {
@@ -697,6 +727,7 @@ uint32_t changedFields(const Settings& a, const Settings& b) {
     changed |= kChangedSleep;
   }
   if (a.screen_rotate_min != b.screen_rotate_min) changed |= kChangedScreenRotate;
+  if (a.uplink != b.uplink) changed |= kChangedUplink;
   if (a.timezone_offset_min != b.timezone_offset_min) changed |= kChangedTimezone;
   if (a.diagnostics_enabled != b.diagnostics_enabled) changed |= kChangedDiagnostics;
   if (a.ble_admin_enabled != b.ble_admin_enabled ||
@@ -806,6 +837,7 @@ const char* schemaJson() {
     "screen_rotate_min": {"type":"int","enum":[0,1,2,5,10,30],"default":0,"note":"dashboard carousel: after this many minutes without interaction, advance to the next screen at local wall-clock multiples (idle redraw cadence applies; battery mode advances at most once per wake); 0 = off","group":"display_refresh"},
     "diagnostics_enabled": {"type":"bool","default":true,"group":"diagnostics"},
     "ble_admin_enabled": {"type":"bool","default":true,"capability":"ble_admin","note":"browser admin over Web Bluetooth; pairing shows a 6-digit code on screen; on battery only while awake","group":"ble"},
+    "uplink": {"type":"string","enum":["auto","wifi","ble"],"default":"auto","note":"auto: data sources go through the computer agent (eego-link) while it is linked over BLE, otherwise WiFi; ble: agent only","group":"ble"},
     "ble_observer_enabled": {"type":"bool","default":false,"capability":"ble_observer","group":"ble"},
     "ble_observer_window_s": {"type":"int","range":[2,60],"default":10,"group":"ble"},
     "ble_observer_interval_s": {"type":"int","range":[30,86400],"default":300,"note":"delay after the previous scan window; battery scans only once per wake window","group":"ble"},

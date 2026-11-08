@@ -50,6 +50,12 @@ struct Status {
   uint32_t ingest_errors = 0;
   uint32_t tunnel_messages = 0;
   uint32_t tunnel_errors = 0;
+  bool agent_connected = false;  // the link is a computer uplink agent (eego-link)
+  std::string agent_name;
+  std::string agent_os;
+  std::string agent_ver;
+  uint32_t proxy_requests = 0;
+  uint32_t proxy_errors = 0;
   uint32_t diram_free_bytes = 0;
   uint32_t diram_min_free_bytes = 0;
   uint32_t psram_free_bytes = 0;
@@ -79,10 +85,20 @@ class BleManager {
   void setTunnelHandler(const TunnelHandler& handler);
   void setTunnelInfo(const std::string& fw, bool provisioned, bool httpd);
   esp_err_t sendMessage(uint8_t id, const uint8_t* head, uint16_t head_len, const uint8_t* body,
-                        size_t body_len, uint32_t timeout_ms);
+                        size_t body_len, uint32_t timeout_ms, uint8_t type = tunnel::kTypeData);
   esp_err_t sendEvent(const char* json);
   void releaseMessage();
   bool linkAuthenticated() const { return link_.load() == LinkState::Authenticated; }
+
+  // Uplink through a linked computer agent. Sends one proxy request (JSON head + body) and
+  // blocks until the response arrives, the link drops or wait_ms passes. On success
+  // resp_body is a PSRAM buffer the caller frees with freeProxyBody(). One request is in
+  // flight at a time; concurrent callers queue.
+  bool agentLinked() const { return agent_linked_.load() && linkAuthenticated(); }
+  esp_err_t proxyFetch(const std::string& head, const uint8_t* body, size_t body_len,
+                       uint32_t wait_ms, std::string& resp_head, uint8_t** resp_body,
+                       size_t* resp_body_len);
+  static void freeProxyBody(uint8_t* body);
 
   bool sleepBlocked() const;
   esp_err_t beforeSleep();
@@ -112,6 +128,9 @@ class BleManager {
   void startAdvertising();
   void setConnSpeed(uint16_t conn, bool fast);
   void handleRx(uint16_t conn, const uint8_t* data, size_t len);
+  void handleEvent(const uint8_t* payload, size_t len);
+  void handleProxyRx(uint16_t conn, const uint8_t* data, size_t len, const tunnel::FrameHeader& h);
+  void finishProxy(uint8_t id, esp_err_t err, uint8_t* buf, size_t len, uint16_t head_len);
   bool notifyFrame(uint16_t conn, const uint8_t* frame, size_t len, int64_t deadline_ms);
   void sendControl(uint16_t conn, const uint8_t frame[4]);
   void onLinkLost();
@@ -167,6 +186,22 @@ class BleManager {
   // until releaseMessage()). Guarded by rx_mutex_.
   bool rx_lent_ = false;
   void resetRxLocked();
+  // Uplink agent state (guarded by rx_mutex_ unless atomic).
+  std::atomic<bool> agent_linked_{false};
+  std::string agent_name_;
+  std::string agent_os_;
+  std::string agent_ver_;
+  tunnel::Reassembler* proxy_rx_ = nullptr;
+  void* proxy_mutex_ = nullptr;
+  void* proxy_sem_ = nullptr;
+  std::atomic<uint8_t> proxy_pending_id_{0};
+  uint8_t next_proxy_id_ = tunnel::kProxyIdFirst;
+  esp_err_t proxy_err_ = ESP_OK;
+  uint8_t* proxy_buf_ = nullptr;
+  size_t proxy_len_ = 0;
+  uint16_t proxy_head_len_ = 0;
+  std::atomic<uint32_t> proxy_requests_{0};
+  std::atomic<uint32_t> proxy_errors_{0};
   std::string info_fw_;
   std::atomic<bool> info_provisioned_{false};
   std::atomic<bool> info_httpd_{false};

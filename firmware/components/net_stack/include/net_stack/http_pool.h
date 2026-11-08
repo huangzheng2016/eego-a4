@@ -47,6 +47,10 @@ struct NetResponse {
   size_t length() const { return psbuf_ ? pslen_ : body_.size(); }
   const std::string* header(const std::string& lower_name) const;
 
+  // Body set by a non-HttpPool uplink. adoptBody takes ownership of a heap_caps buffer.
+  void adoptBody(char* heap_caps_buffer, size_t len);
+  void setBody(std::string body);
+
  private:
   friend class HttpPool;
   std::string body_;

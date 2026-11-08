@@ -15,6 +15,14 @@ constexpr uint8_t kTypeData = 0x0;
 constexpr uint8_t kTypeAck = 0x1;
 constexpr uint8_t kTypeAbort = 0x2;
 constexpr uint8_t kTypeEvent = 0x3;
+// Device-initiated uplink messages (proxy requests sent as notifications, proxy responses
+// written back by a computer agent). Same layout as DATA.
+constexpr uint8_t kTypeProxy = 0x4;
+
+// Central-initiated DATA messages use ids 1..127; device-initiated PROXY messages use
+// 128..255. ACK/ABORT frames carry the id, so the range tells which message they belong to.
+constexpr uint8_t kProxyIdFirst = 128;
+inline bool isProxyId(uint8_t id) { return id >= kProxyIdFirst; }
 
 constexpr size_t kHeaderBytes = 4;
 constexpr size_t kPreludeBytes = 10;
@@ -54,7 +62,8 @@ void makeAbort(uint8_t out[4], uint8_t id, AbortReason reason);
 using FrameSink = std::function<bool(const uint8_t* frame, size_t len)>;
 
 size_t encodeFrames(uint8_t id, const uint8_t* head, uint16_t head_len, const uint8_t* body,
-                    size_t body_len, size_t chunk, const FrameSink& sink);
+                    size_t body_len, size_t chunk, const FrameSink& sink,
+                    uint8_t type = kTypeData);
 
 size_t frameCount(size_t total_len, size_t chunk);
 
@@ -79,7 +88,9 @@ struct BufferAllocator {
 
 class Reassembler {
  public:
-  explicit Reassembler(size_t max_total = kMaxRequestBytes, BufferAllocator allocator = {});
+  // data_type: the frame type this reassembler collects (kTypeData or kTypeProxy).
+  explicit Reassembler(size_t max_total = kMaxRequestBytes, BufferAllocator allocator = {},
+                       uint8_t data_type = kTypeData);
   ~Reassembler();
   Reassembler(const Reassembler&) = delete;
   Reassembler& operator=(const Reassembler&) = delete;
@@ -99,6 +110,9 @@ class Reassembler {
 
   void release();
   void reset();
+  // Hands the completed buffer to the caller (who frees it with the allocator's release)
+  // and returns to Idle. Returns nullptr unless complete.
+  uint8_t* takeBuffer();
 
  private:
   enum class State : uint8_t { Idle, Receiving, Complete };
@@ -106,6 +120,7 @@ class Reassembler {
 
   size_t max_total_;
   BufferAllocator allocator_;
+  uint8_t data_type_ = kTypeData;
   State state_ = State::Idle;
   uint8_t* buffer_ = nullptr;
   size_t total_ = 0;

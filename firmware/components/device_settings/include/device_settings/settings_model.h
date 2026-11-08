@@ -30,6 +30,13 @@ enum class ChargeSignal : uint8_t {
   ActiveLow = 2,
 };
 
+// Which link carries outbound HTTP for data sources.
+enum class UplinkMode : uint8_t {
+  Auto = 0,  // the computer agent over BLE when linked, otherwise WiFi
+  Wifi = 1,
+  Ble = 2,
+};
+
 enum Change : uint32_t {
   kChangedLanguage = 1u << 0,
   kChangedPower = 1u << 1,
@@ -45,8 +52,9 @@ enum Change : uint32_t {
   kChangedBattery = 1u << 11,      // battery_refresh_min / battery_max_stale_min / battery_interactive_timeout_s
   kChangedScreenRotate = 1u << 12, // screen_rotate_min
   kChangedChargeSignal = 1u << 13,
+  kChangedUplink = 1u << 14,
   kChangedRefresh = kChangedDataRefresh | kChangedEpdRefresh,
-  kChangedAll = (1u << 14) - 1,
+  kChangedAll = (1u << 15) - 1,
 };
 
 inline constexpr uint32_t kIdleRefreshChoices[] = {2, 5, 10, 15, 30, 60};
@@ -115,6 +123,7 @@ struct Settings {
   uint32_t screen_rotate_min = 0;
   bool diagnostics_enabled = true;
   bool ble_admin_enabled = true;
+  UplinkMode uplink = UplinkMode::Auto;
   bool ble_observer_enabled = false;
   uint32_t ble_observer_window_s = 10;
   uint32_t ble_observer_interval_s = 300;
@@ -142,6 +151,8 @@ const char* frontlightHardwareName(FrontlightHardware mode);
 bool frontlightHardwareFromString(const std::string& name, FrontlightHardware& out);
 const char* chargeSignalName(ChargeSignal mode);
 bool chargeSignalFromString(const std::string& name, ChargeSignal& out);
+const char* uplinkModeName(UplinkMode mode);
+bool uplinkModeFromString(const std::string& name, UplinkMode& out);
 
 alert_core::JsonValue toJson(const Settings& settings);
 void validate(const Settings& settings, FieldErrors& errors);

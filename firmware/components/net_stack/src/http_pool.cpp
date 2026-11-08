@@ -101,6 +101,20 @@ NetResponse& NetResponse::operator=(NetResponse&& o) noexcept {
   return *this;
 }
 
+void NetResponse::adoptBody(char* heap_caps_buffer, size_t len) {
+  if (psbuf_) heap_caps_free(psbuf_);
+  psbuf_ = heap_caps_buffer;
+  pslen_ = heap_caps_buffer ? len : 0;
+  body_.clear();
+}
+
+void NetResponse::setBody(std::string body) {
+  if (psbuf_) heap_caps_free(psbuf_);
+  psbuf_ = nullptr;
+  pslen_ = 0;
+  body_ = std::move(body);
+}
+
 const std::string* NetResponse::header(const std::string& lower_name) const {
   auto it = headers.find(lower_name);
   return it == headers.end() ? nullptr : &it->second;

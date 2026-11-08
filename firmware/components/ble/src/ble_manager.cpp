@@ -222,10 +222,13 @@ esp_err_t BleManager::init() {
   if (rx_mutex_ == nullptr) rx_mutex_ = xSemaphoreCreateMutex();
   if (tx_sem_ == nullptr) tx_sem_ = xSemaphoreCreateBinary();
   if (g_send_mutex == nullptr) g_send_mutex = xSemaphoreCreateMutex();
+  if (proxy_mutex_ == nullptr) proxy_mutex_ = xSemaphoreCreateMutex();
+  if (proxy_sem_ == nullptr) proxy_sem_ = xSemaphoreCreateBinary();
   lock();
   UnlockGuard guard{mutex_};
   if (adv_queue_ == nullptr) adv_queue_ = xQueueCreate(kAdvQueueLength, sizeof(RawAdvertisement));
-  if (adv_queue_ == nullptr || rx_mutex_ == nullptr || tx_sem_ == nullptr || g_send_mutex == nullptr) {
+  if (adv_queue_ == nullptr || rx_mutex_ == nullptr || tx_sem_ == nullptr || g_send_mutex == nullptr ||
+      proxy_mutex_ == nullptr || proxy_sem_ == nullptr) {
     return ESP_ERR_NO_MEM;
   }
   if (device_name_.empty()) {
@@ -311,6 +314,7 @@ std::string BleManager::infoJson() const {
   out += info_provisioned_.load() ? "true" : "false";
   out += ",\"httpd\":";
   out += info_httpd_.load() ? "true" : "false";
+  out += ",\"proxy\":true";
   std::snprintf(buf, sizeof(buf), ",\"max_req\":%u,\"max_resp\":%u}",
                 static_cast<unsigned>(tunnel::kMaxRequestBytes),
                 static_cast<unsigned>(tunnel::kMaxResponseBytes));
@@ -560,7 +564,14 @@ void BleManager::onLinkLost() {
     RxLock rx(rx_mutex_);
     resetRxLocked();
     handler = handler_;
+    if (agent_linked_.exchange(false)) ESP_LOGI(kTag, "uplink agent disconnected");
+    agent_name_.clear();
+    agent_os_.clear();
+    agent_ver_.clear();
+    if (proxy_rx_ != nullptr) proxy_rx_->reset();
   }
+  const uint8_t pending = proxy_pending_id_.load();
+  if (pending != 0) finishProxy(pending, ESP_ERR_INVALID_STATE, nullptr, 0, 0);
   if (tx_sem_ != nullptr) xSemaphoreGive(static_cast<SemaphoreHandle_t>(tx_sem_));
   if (was_up && handler.onLinkDown != nullptr) handler.onLinkDown(handler.ctx);
 }
@@ -760,6 +771,16 @@ void BleManager::handleRx(uint16_t conn, const uint8_t* data, size_t len) {
   setConnSpeed(conn, true);
   tunnel::FrameHeader header;
   if (!tunnel::parseHeader(data, len, header)) return;
+  if (header.type() == tunnel::kTypeEvent) {
+    handleEvent(data + tunnel::kHeaderBytes, len - tunnel::kHeaderBytes);
+    return;
+  }
+  if (header.type() == tunnel::kTypeProxy ||
+      ((header.type() == tunnel::kTypeAck || header.type() == tunnel::kTypeAbort) &&
+       tunnel::isProxyId(header.id))) {
+    handleProxyRx(conn, data, len, header);
+    return;
+  }
   tunnel::Result result;
   uint16_t ack_seq = 0;
   bool ack = false;
@@ -817,6 +838,180 @@ void BleManager::releaseMessage() {
   if (rx_ != nullptr && rx_->complete()) rx_->release();
 }
 
+namespace {
+
+// Extracts a short string member from the agent hello (flat JSON written by the agent).
+// Values are clipped and limited to printable ASCII so they are safe to show and log.
+std::string helloField(const std::string& text, const char* key) {
+  const std::string needle = std::string("\"") + key + "\":\"";
+  const size_t at = text.find(needle);
+  if (at == std::string::npos) return {};
+  std::string out;
+  for (size_t i = at + needle.size(); i < text.size() && text[i] != '"' && out.size() < 40; i++) {
+    const char c = text[i];
+    if (c == '\\') break;
+    if (c >= 0x20 && c < 0x7f) out.push_back(c);
+  }
+  return out;
+}
+
+}  // namespace
+
+void BleManager::handleEvent(const uint8_t* payload, size_t len) {
+  if (payload == nullptr || len == 0 || len > 480 || !linkAuthenticated()) return;
+  const std::string text(reinterpret_cast<const char*>(payload), len);
+  if (helloField(text, "ev") != "agent") return;
+  {
+    RxLock rx(rx_mutex_);
+    agent_name_ = helloField(text, "name");
+    agent_os_ = helloField(text, "os");
+    agent_ver_ = helloField(text, "ver");
+    agent_linked_ = true;
+  }
+  ESP_LOGI(kTag, "uplink agent linked: %s (%s, %s)", helloField(text, "name").c_str(),
+           helloField(text, "os").c_str(), helloField(text, "ver").c_str());
+}
+
+void BleManager::finishProxy(uint8_t id, esp_err_t err, uint8_t* buf, size_t len, uint16_t head_len) {
+  {
+    RxLock rx(rx_mutex_);
+    if (proxy_pending_id_.load() != id) {
+      if (buf != nullptr) psramFree(buf);
+      return;
+    }
+    proxy_pending_id_ = 0;
+    proxy_err_ = err;
+    proxy_buf_ = buf;
+    proxy_len_ = len;
+    proxy_head_len_ = head_len;
+  }
+  xSemaphoreGive(static_cast<SemaphoreHandle_t>(proxy_sem_));
+}
+
+void BleManager::handleProxyRx(uint16_t conn, const uint8_t* data, size_t len,
+                               const tunnel::FrameHeader& h) {
+  const uint8_t pending = proxy_pending_id_.load();
+  if (h.type() == tunnel::kTypeAck) return;  // the agent does not ACK notifications
+  if (h.type() == tunnel::kTypeAbort) {
+    if (h.id == pending) {
+      ESP_LOGW(kTag, "agent aborted proxy request #%u (reason %u)", static_cast<unsigned>(h.id),
+               static_cast<unsigned>(h.seq));
+      {
+        RxLock rx(rx_mutex_);
+        if (proxy_rx_ != nullptr) proxy_rx_->reset();
+      }
+      finishProxy(pending, ESP_FAIL, nullptr, 0, 0);
+    }
+    return;
+  }
+  if (pending == 0 || h.id != pending) return;  // stale response to a cancelled request
+  tunnel::Result result;
+  uint16_t ack_seq = 0;
+  bool ack = false;
+  uint8_t* buf = nullptr;
+  size_t buf_len = 0;
+  uint16_t head_len = 0;
+  {
+    RxLock rx(rx_mutex_);
+    if (proxy_rx_ == nullptr) {
+      proxy_rx_ = new tunnel::Reassembler(tunnel::kMaxResponseBytes, {&psramAlloc, &psramFree},
+                                          tunnel::kTypeProxy);
+    }
+    result = proxy_rx_->feed(data, len, nowMs());
+    ack = proxy_rx_->ackDue(ack_seq);
+    if (result == tunnel::Result::Complete) {
+      buf_len = proxy_rx_->size();
+      head_len = proxy_rx_->headLen();
+      buf = proxy_rx_->takeBuffer();
+    }
+  }
+  if (ack) {
+    uint8_t frame[4];
+    tunnel::makeAck(frame, h.id, ack_seq);
+    sendControl(conn, frame);
+  }
+  if (result == tunnel::Result::Complete) {
+    finishProxy(h.id, ESP_OK, buf, buf_len, head_len);
+  } else if (result != tunnel::Result::Ok && result != tunnel::Result::Cancelled) {
+    uint8_t frame[4];
+    tunnel::makeAbort(frame, h.id, tunnel::abortReasonFor(result));
+    sendControl(conn, frame);
+    finishProxy(h.id, result == tunnel::Result::TooLarge ? ESP_ERR_INVALID_SIZE : ESP_FAIL, nullptr, 0, 0);
+  }
+}
+
+void BleManager::freeProxyBody(uint8_t* body) {
+  if (body != nullptr) psramFree(body);
+}
+
+esp_err_t BleManager::proxyFetch(const std::string& head, const uint8_t* body, size_t body_len,
+                                 uint32_t wait_ms, std::string& resp_head, uint8_t** resp_body,
+                                 size_t* resp_body_len) {
+  if (resp_body == nullptr || resp_body_len == nullptr || head.size() > 0xffff) return ESP_ERR_INVALID_ARG;
+  *resp_body = nullptr;
+  *resp_body_len = 0;
+  resp_head.clear();
+  if (!agentLinked()) return ESP_ERR_INVALID_STATE;
+  if (xSemaphoreTake(static_cast<SemaphoreHandle_t>(proxy_mutex_), pdMS_TO_TICKS(wait_ms)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  xSemaphoreTake(static_cast<SemaphoreHandle_t>(proxy_sem_), 0);  // drop a stale signal
+  uint8_t id;
+  {
+    RxLock rx(rx_mutex_);
+    id = next_proxy_id_;
+    next_proxy_id_ = next_proxy_id_ == 255 ? tunnel::kProxyIdFirst : static_cast<uint8_t>(next_proxy_id_ + 1);
+    if (proxy_rx_ != nullptr) proxy_rx_->reset();
+    proxy_pending_id_ = id;
+  }
+  proxy_requests_++;
+  esp_err_t err = sendMessage(id, reinterpret_cast<const uint8_t*>(head.data()),
+                              static_cast<uint16_t>(head.size()), body, body_len, wait_ms,
+                              tunnel::kTypeProxy);
+  if (err == ESP_OK &&
+      xSemaphoreTake(static_cast<SemaphoreHandle_t>(proxy_sem_), pdMS_TO_TICKS(wait_ms)) != pdTRUE) {
+    err = ESP_ERR_TIMEOUT;
+    uint8_t frame[4];
+    tunnel::makeAbort(frame, id, tunnel::AbortReason::Cancelled);
+    const uint16_t conn = conn_handle_.load();
+    if (conn != 0xffff) sendControl(conn, frame);
+  }
+  uint8_t* buf = nullptr;
+  size_t len = 0;
+  uint16_t hl = 0;
+  {
+    RxLock rx(rx_mutex_);
+    if (err == ESP_OK) {
+      err = proxy_err_;
+      buf = proxy_buf_;
+      len = proxy_len_;
+      hl = proxy_head_len_;
+    } else if (proxy_buf_ != nullptr) {
+      psramFree(proxy_buf_);  // response raced the timeout
+    }
+    proxy_buf_ = nullptr;
+    proxy_len_ = 0;
+    if (proxy_pending_id_.load() == id) proxy_pending_id_ = 0;
+    if (err != ESP_OK && proxy_rx_ != nullptr) proxy_rx_->reset();
+  }
+  xSemaphoreGive(static_cast<SemaphoreHandle_t>(proxy_mutex_));
+  if (err != ESP_OK || buf == nullptr) {
+    if (buf != nullptr) psramFree(buf);
+    proxy_errors_++;
+    return err == ESP_OK ? ESP_FAIL : err;
+  }
+  resp_head.assign(reinterpret_cast<const char*>(buf), hl);
+  if (len > hl) {
+    // Move the body to the front so the caller owns a plain body buffer.
+    std::memmove(buf, buf + hl, len - hl);
+    *resp_body = buf;
+    *resp_body_len = len - hl;
+  } else {
+    psramFree(buf);
+  }
+  return ESP_OK;
+}
+
 void BleManager::resetRxLocked() {
   // A message lent to the bridge stays allocated (state Complete, new frames get "busy")
   // until the bridge calls releaseMessage().
@@ -843,7 +1038,8 @@ bool BleManager::notifyFrame(uint16_t conn, const uint8_t* frame, size_t len, in
 }
 
 esp_err_t BleManager::sendMessage(uint8_t id, const uint8_t* head, uint16_t head_len,
-                                  const uint8_t* body, size_t body_len, uint32_t timeout_ms) {
+                                  const uint8_t* body, size_t body_len, uint32_t timeout_ms,
+                                  uint8_t type) {
   if (link_.load() != LinkState::Authenticated || !tx_subscribed_.load()) return ESP_ERR_INVALID_STATE;
   const size_t total = static_cast<size_t>(head_len) + body_len;
   if (total > tunnel::kMaxResponseBytes) return ESP_ERR_INVALID_SIZE;
@@ -855,7 +1051,8 @@ esp_err_t BleManager::sendMessage(uint8_t id, const uint8_t* head, uint16_t head
   xSemaphoreTake(g_send_mutex, portMAX_DELAY);
   const size_t frames = tunnel::encodeFrames(
       id, head, head_len, body, body_len, chunk,
-      [&](const uint8_t* frame, size_t len) { return notifyFrame(conn, frame, len, deadline); });
+      [&](const uint8_t* frame, size_t len) { return notifyFrame(conn, frame, len, deadline); },
+      type);
   xSemaphoreGive(g_send_mutex);
   last_tunnel_ms_ = nowMs();
   if (frames == 0) {
@@ -1111,6 +1308,15 @@ Status BleManager::status() const {
   out.ingest_errors = ingest_errors_;
   out.tunnel_messages = tunnel_messages_.load();
   out.tunnel_errors = tunnel_errors_.load();
+  out.proxy_requests = proxy_requests_.load();
+  out.proxy_errors = proxy_errors_.load();
+  {
+    RxLock rx(rx_mutex_);
+    out.agent_connected = agent_linked_.load() && link_.load() == LinkState::Authenticated;
+    out.agent_name = agent_name_;
+    out.agent_os = agent_os_;
+    out.agent_ver = agent_ver_;
+  }
   out.diram_free_bytes = diram_free_bytes_;
   out.diram_min_free_bytes = diram_min_free_bytes_;
   out.psram_free_bytes = psram_free_bytes_;

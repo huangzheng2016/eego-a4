@@ -1,0 +1,117 @@
+name: eego-link
+
+# Builds the BLE proxy agent for Linux/Windows (amd64, arm64; pure Go cross-compile) and
+# macOS (amd64, arm64; CoreBluetooth needs cgo, so it builds on a macOS runner), then
+# publishes the binaries and SHA256SUMS to the rolling release tagged `link`, which
+# scripts/install-link.sh and scripts/install-link.ps1 download from.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'link/**'
+      - 'firmware/test/host/fixtures/**'
+      - '.github/workflows/link.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: link
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: link
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: link/go.mod
+          cache-dependency-path: link/go.sum
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  build-cross:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [linux/amd64, linux/arm64, windows/amd64, windows/arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: link/go.mod
+          cache-dependency-path: link/go.sum
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          GOOS="${TARGET%/*}"; GOARCH="${TARGET#*/}"
+          ext=""; [ "$GOOS" = windows ] && ext=".exe"
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath \
+            -ldflags "-s -w -X main.version=${GITHUB_SHA::7}" \
+            -o "dist/eego-link-$GOOS-$GOARCH$ext" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ strategy.job-index }}
+          path: link/dist/*
+
+  build-darwin:
+    needs: test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: link/go.mod
+          cache-dependency-path: link/go.sum
+      - name: Build
+        run: |
+          mkdir -p dist
+          for arch in arm64 amd64; do
+            cc_arch=$arch; [ "$arch" = amd64 ] && cc_arch=x86_64
+            CGO_ENABLED=1 GOOS=darwin GOARCH=$arch CC="clang -arch $cc_arch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${GITHUB_SHA::7}" \
+              -o "dist/eego-link-darwin-$arch" .
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-darwin
+          path: link/dist/*
+
+  release:
+    needs: [build-cross, build-darwin]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+      - name: Publish to the `link` release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum eego-link-* > SHA256SUMS
+          cat SHA256SUMS
+          notes="eego-link built from ${GITHUB_SHA::7}. Install: see README (电脑蓝牙上网)."
+          if ! gh release view link >/dev/null 2>&1; then
+            gh release create link --title "eego-link" --notes "$notes" --target "$GITHUB_SHA"
+          else
+            gh release edit link --notes "$notes"
+          fi
+          gh release upload link eego-link-* SHA256SUMS --clobber

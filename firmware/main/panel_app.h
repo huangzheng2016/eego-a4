@@ -302,6 +302,7 @@ class PanelApp {
   int64_t bannerDeadlineMs_ = 0;
   Page blePairReturn_ = Page::Dashboard;
   eego::ble::LinkState bleLinkSeen_ = eego::ble::LinkState::None;
+  bool agentSeen_ = false;  // a computer uplink agent is linked (status bar pill)
   uint32_t blePairShownKey_ = 0;
 
   std::shared_ptr<const alert_core::AlertSnapshot> snapshot_;

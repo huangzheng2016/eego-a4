@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -243,4 +244,49 @@ TEST(ble_tunnel, shared_fixture) {
     }
   }
   CHECK(checked > 0);
+}
+
+TEST(ble_tunnel, proxy_frames_use_their_own_type_and_id_range) {
+  CHECK(!isProxyId(1));
+  CHECK(!isProxyId(127));
+  CHECK(isProxyId(128));
+  CHECK(isProxyId(255));
+
+  const std::string head = R"({"s":200,"h":{"content-type":"application/json"}})";
+  Bytes body(700, 0x5a);
+  std::vector<Bytes> frames;
+  CHECK(encodeFrames(200, reinterpret_cast<const uint8_t*>(head.data()),
+                     static_cast<uint16_t>(head.size()), body.data(), body.size(), 244,
+                     [&](const uint8_t* f, size_t n) {
+                       frames.emplace_back(f, f + n);
+                       return true;
+                     },
+                     kTypeProxy) > 1);
+  FrameHeader h;
+  REQUIRE(parseHeader(frames[0].data(), frames[0].size(), h));
+  CHECK_EQ(h.type(), kTypeProxy);
+  CHECK_EQ(h.id, 200);
+
+  // A DATA reassembler rejects proxy frames and vice versa.
+  Reassembler data_rx;
+  CHECK(data_rx.feed(frames[0].data(), frames[0].size(), 0) == Result::BadFrame);
+
+  Reassembler proxy_rx(kMaxResponseBytes, {}, kTypeProxy);
+  Result r = Result::Ok;
+  for (const auto& f : frames) r = proxy_rx.feed(f.data(), f.size(), 0);
+  REQUIRE(r == Result::Complete);
+  CHECK_EQ(proxy_rx.headLen(), head.size());
+  const size_t total = proxy_rx.size();
+  uint8_t* buf = proxy_rx.takeBuffer();
+  REQUIRE(buf != nullptr);
+  CHECK(!proxy_rx.complete());
+  CHECK_EQ(std::string(reinterpret_cast<char*>(buf), head.size()), head);
+  CHECK_EQ(total, head.size() + body.size());
+  CHECK(std::memcmp(buf + head.size(), body.data(), body.size()) == 0);
+  std::free(buf);
+
+  // Frame types above PROXY are rejected.
+  uint8_t bad[4];
+  writeHeader(bad, static_cast<uint8_t>((0x5 << 4) | kFlagStart | kFlagEnd), 1, 0);
+  CHECK(!parseHeader(bad, sizeof(bad), h));
 }

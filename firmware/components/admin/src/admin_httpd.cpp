@@ -42,6 +42,7 @@
 #include "lwip/inet.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
+#include "net_stack/uplink.h"
 #include "net_stack/http_push_bridge.h"
 #include "net_stack/net_task.h"
 #include "net_stack/wifi_list.h"
@@ -745,6 +746,20 @@ alert_core::JsonValue keepAwakeJson() {
 
 alert_core::JsonValue screenJson();
 
+__attribute__((noinline)) alert_core::JsonValue uplinkJson() {
+  const ble::Status b = ble::BleManager::instance().status();
+  return ::eego::json::ObjectWriter(3)
+      .string("mode", net::uplink::modeName(net::uplink::mode()))
+      .string("active", net::uplink::active(net::WifiManager::instance().isConnected()))
+      .value("agent", ::eego::json::ObjectWriter(4)
+                          .boolean("connected", b.agent_connected)
+                          .string("name", b.agent_name)
+                          .string("os", b.agent_os)
+                          .string("ver", b.agent_ver)
+                          .take())
+      .take();
+}
+
 esp_err_t h_status(httpd_req_t* req) {
   using alert_core::JsonValue;
   JsonValue::Object root;
@@ -860,6 +875,7 @@ esp_err_t h_status(httpd_req_t* req) {
 
   root.emplace_back("screen", screenJson());
   root.emplace_back("keep_awake", keepAwakeJson());
+  root.emplace_back("uplink", uplinkJson());
   const PowerSnapshot power = powerSnapshot();
   if (power.valid) {
     root.emplace_back(
