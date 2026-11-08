@@ -24,13 +24,11 @@
 #include "net_stack/wifi_list.h"
 
 namespace eego::admin {
-
 namespace {
-
 using alert_core::JsonValue;
 
-constexpr uint32_t kTaskStack = 8192;  // esp_http_client + lwIP + JSON 解析
-constexpr UBaseType_t kTaskPriority = 4;  // 低于 httpd（5）
+constexpr uint32_t kTaskStack = 8192;
+constexpr UBaseType_t kTaskPriority = 4;
 constexpr int kMinTimeoutMs = 5000;
 constexpr int kMaxTimeoutMs = 60000;
 constexpr int kDefaultTimeoutMs = 20000;
@@ -52,7 +50,6 @@ TaskHandle_t g_task = nullptr;
 std::string g_token;
 esp_timer_handle_t g_reboot_timer = nullptr;
 
-// ---- BLE 主机任务回调：只入队 ----
 void cbLinkUp(void*) {
   Msg m;
   m.type = MsgType::LinkUp;
@@ -97,7 +94,6 @@ void refreshInfo() {
                                             adminApiRunning());
 }
 
-// ---- 响应 ----
 void reply(uint8_t id, int status, const JsonValue::Object& headers, const uint8_t* body,
            size_t body_len) {
   const std::string head =
@@ -124,7 +120,6 @@ void replyError(uint8_t id, int status, const char* code, const std::string& mes
   replyJson(id, status, json);
 }
 
-// ---- 请求头解析 ----
 struct Request {
   std::string method;
   std::string path;
@@ -171,7 +166,6 @@ bool parseRequest(const Msg& m, Request& out, std::string& error) {
       if (key == "content-type") out.content_type = v;
       else if (key == "if-match") out.if_match = v;
       else if (key == "accept") out.accept = v;
-      // 其余（authorization、x-ingest-key、origin、host…）一律丢弃
     }
   }
   if (const JsonValue* t = root.find("t"); t != nullptr && t->type() == JsonValue::Type::Int) {
@@ -185,7 +179,6 @@ bool parseRequest(const Msg& m, Request& out, std::string& error) {
   return true;
 }
 
-// ---- 回环转发 ----
 struct Collected {
   JsonValue::Object headers;
   uint8_t* buf = nullptr;
@@ -227,7 +220,6 @@ bool grow(Collected& c, size_t need) {
   return true;
 }
 
-// 返回 HTTP 状态码；<0 = 回环失败（未必已派发）。
 int forwardOnce(const Request& r, Collected& out) {
   const std::string url = "http://127.0.0.1:80/api/v1" + r.path;
   esp_http_client_config_t cfg = {};
@@ -304,7 +296,6 @@ void handleForward(uint8_t id, const Request& r) {
   Collected c;
   int status = forwardOnce(r, c);
   if (status == 401 && ble::BleManager::instance().linkAuthenticated()) {
-    // 401 是派发前的认证失败（如改密码吊销了全部会话）：重签 token 重试一次是安全的。
     freeCollected(c);
     mintToken();
     status = forwardOnce(r, c);
@@ -323,7 +314,6 @@ void handleForward(uint8_t id, const Request& r) {
   freeCollected(c);
 }
 
-// ---- 首次设置（无管理密码，配网门户期间）----
 void rebootCallback(void*) { esp_restart(); }
 
 void scheduleBridgeReboot() {
@@ -381,7 +371,6 @@ void handleSetup(uint8_t id, const Request& r) {
     }
   }
   if (!fresh.empty()) {
-    // 新网络按给定顺序排在最前，其余已保存网络保持原顺序，超出上限的丢弃。
     std::vector<net::WifiAccount> saved;
     net::CredentialStore::loadWifiAccounts(saved);
     std::vector<net::WifiAccount> ordered = fresh;

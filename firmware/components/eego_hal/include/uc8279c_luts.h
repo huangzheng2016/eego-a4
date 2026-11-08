@@ -1,17 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
 #pragma once
-
-// UC8279C 波形表 (LUT) — 从 CrossLink v1.0.10 / 官方 1.2.7 提取
-// Full refresh 写入每条记录的完整 49 字节到寄存器 0x20..0x24
-// Fast refresh 仅写每条 49 字节记录的前 42 字节 (CrossLink fast bank)
-// 四级灰阶: 00=黑, 01=深灰, 10=浅灰, 11=白 (MSB→DTM1, LSB→DTM2)
-// 0=黑, 1=白
 
 #include <stdint.h>
 
 namespace eego {
-
 constexpr uint8_t A4_UC8279C_LUT_LENGTH = 49;
 
 constexpr uint8_t A4_UC8279C_LUT_20[A4_UC8279C_LUT_LENGTH] = {
@@ -50,7 +42,6 @@ constexpr uint8_t A4_UC8279C_FAST_LUT[5 * A4_UC8279C_FAST_RECORD_LENGTH] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00};
 
-// 四级灰阶 LUT (CrossLink grayscale bank, 5×42 字节)
 constexpr uint8_t A4_UC8279C_GRAY_RECORD_LENGTH = 42;
 constexpr uint8_t A4_UC8279C_GRAY_LUT[5 * A4_UC8279C_GRAY_RECORD_LENGTH] = {
     0x01, 0x08, 0x0b, 0x02, 0x03, 0x01, 0x01, 0x01, 0x0c, 0x02, 0x07, 0x02,

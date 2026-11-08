@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 离线 WiFi 诊断：JSON 构造 + 内嵌页面（见 wifi_diag.h）。绝不输出任何密码。
 #include "wifi_diag.h"
 
 #include <vector>
@@ -27,7 +26,6 @@ std::string diagJson() {
   using alert_core::JsonValue;
   net::WifiManager& wifi = net::WifiManager::instance();
   {
-    // 以 NVS 为准刷新已存列表（管理端/门户改过列表后也一致）；只取 SSID。
     std::vector<net::WifiAccount> saved;
     net::CredentialStore::loadWifiAccounts(saved);
     wifi.syncSavedNetworks(saved);
@@ -140,7 +138,6 @@ bool retryNow() { return net::NetStack::instance().reconnectNow(1000, false); }
 bool scanNow() { return net::WifiManager::instance().scanNow(); }
 
 // ---------------------------------------------------------------------------
-// 内嵌页面（零外部资源；一切动态文本 textContent 渲染）
 // ---------------------------------------------------------------------------
 
 const char kHtml[] = R"HTML(<!DOCTYPE html>

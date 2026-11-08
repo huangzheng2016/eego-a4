@@ -1,7 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
-// EEGO A4 前光驱动实现 — LM3630A (I2C 0x36)，GPIO12 使能
-// 纯 ESP-IDF，使用 legacy driver/i2c.h API
 #include "frontlight.h"
 
 #include <esp_log.h>
@@ -11,15 +8,12 @@
 
 static const char* FL_TAG = "eego_fl";
 
-// 最少 1 个 tick 的毫秒延时（兼容 100Hz tick 配置下 pdMS_TO_TICKS(2) 为 0 的问题，
-// 否则 LM3630A 使能后的 2ms 上电延时会被跳过，导致探测过早失败）
 static void flDelayMs(uint32_t ms) {
     TickType_t ticks = pdMS_TO_TICKS(ms);
     if (ticks == 0) ticks = 1;
     vTaskDelay(ticks);
 }
 
-// 向指定地址发起始+写地址字节，仅检查是否 ACK（不读任何寄存器，与厂商一致）
 static esp_err_t flProbeAck(uint8_t addr) {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
@@ -30,21 +24,15 @@ static esp_err_t flProbeAck(uint8_t addr) {
     return err;
 }
 
-// 共享 I²C 总线是否已安装可用：探测板上恒在的设备（GSLX680 0x40 / PCF8563 0x51）。
-// 任一 ACK 即说明驱动已装，应复用而非重复安装 —— v5.5.1 对已装总线再次
-// i2c_driver_install 会打印 "i2c driver install error" 并返回 ESP_FAIL（而非
-// ESP_ERR_INVALID_STATE），导致前光被误判为不存在。
 static bool flBusInstalled() {
     return flProbeAck(eego::GSLX680_ADDRESS) == ESP_OK ||
            flProbeAck(eego::PCF8563_ADDRESS) == ESP_OK;
 }
 
-// 确保共享 I2C 总线可用（与 GSLX680 / PCF8563 / LM3630A 共用 I2C_NUM_0）。
-// 成功后缓存：避免之后探测偶发失败时对正在使用的总线重新 i2c_param_config。
 static bool s_flBusReady = false;
 static esp_err_t flEnsureI2cBus() {
     if (s_flBusReady) return ESP_OK;
-    if (flBusInstalled()) {  // 复用已装好的共享总线
+    if (flBusInstalled()) {
         s_flBusReady = true;
         return ESP_OK;
     }
@@ -64,22 +52,18 @@ static esp_err_t flEnsureI2cBus() {
     return ESP_OK;
 }
 
-// 探测重试参数
 static constexpr int kProbeAttempts = 3;
 static constexpr uint32_t kProbeRetryDelayMs = 8;
-// 写/回读校验用寄存器：Brightness A (0x03)。LED bank 使能位复位为 0，写入不点亮。
 static constexpr uint8_t kProbeReg = 0x03;
 static constexpr uint8_t kProbePattern = 0x5a;
 
 namespace eego {
-
 FrontlightManager& FrontlightManager::instance() {
     static FrontlightManager inst;
     return inst;
 }
 
 bool FrontlightManager::probeOnce() {
-    // 拉低→拉高→delay 2ms→ACK→写/回读校验→恢复原值；调用者负责最终拉低 enable
     gpio_set_level(static_cast<gpio_num_t>(FRONTLIGHT_ENABLE), 0);
     flDelayMs(1);
     gpio_set_level(static_cast<gpio_num_t>(FRONTLIGHT_ENABLE), 1);
@@ -95,15 +79,13 @@ bool FrontlightManager::probeOnce() {
     const bool ok = lm3630aWrite(kProbeReg, pattern) == ESP_OK &&
                     lm3630aRead(kProbeReg, &readback) == ESP_OK &&
                     readback == pattern;
-    lm3630aWrite(kProbeReg, original);  // 恢复（失败亦尽力恢复）
+    lm3630aWrite(kProbeReg, original);
     return ok;
 }
 
 bool FrontlightManager::lm3630aChipPresent() {
-    // 已探测过则直接返回缓存，不再 toggle GPIO12（非破坏性）
     if (_presentCached_) return _present_;
 
-    // 配置 GPIO12 为输出
     gpio_config_t io_conf;
     memset(&io_conf, 0, sizeof(io_conf));
     io_conf.pin_bit_mask = (1ULL << FRONTLIGHT_ENABLE);
@@ -124,7 +106,7 @@ bool FrontlightManager::lm3630aChipPresent() {
         }
     }
     gpio_set_level(static_cast<gpio_num_t>(FRONTLIGHT_ENABLE), 0);
-    _i2cConfigured = false;  // enable 拉低后芯片寄存器复位
+    _i2cConfigured = false;
 
     _presentCached_ = true;
     _present_ = present;
@@ -170,7 +152,6 @@ bool FrontlightManager::configureLm3630a() {
     gpio_set_level(static_cast<gpio_num_t>(FRONTLIGHT_ENABLE), 1);
     flDelayMs(2);
 
-    // 探测 ACK（写地址字节），失败则 enable LOW 返回 false
     esp_err_t err = flProbeAck(eego::LM3630A_ADDRESS);
     if (err != ESP_OK) {
         gpio_set_level(static_cast<gpio_num_t>(FRONTLIGHT_ENABLE), 0);
@@ -206,7 +187,7 @@ void FrontlightManager::applyLm3630a() {
     if (warm != 0 && warm < 4) warm = 4;
     if (cool != 0 && cool < 4) cool = 4;
 
-    lm3630aUpdate(0x00, 0x80, 0x00);  // 退出软件睡眠
+    lm3630aUpdate(0x00, 0x80, 0x00);
     flDelayMs(2);
     lm3630aWrite(0x03, warm);
     lm3630aWrite(0x04, cool);
@@ -245,7 +226,7 @@ void FrontlightManager::off() {
 }
 
 void FrontlightManager::on() {
-    if (_brightness == 0) _brightness = 50;  // 恢复上一次亮度，若无则默认 50
+    if (_brightness == 0) _brightness = 50;
     if (!frontlightAvailable()) return;
     if (flEnsureI2cBus() != ESP_OK) return;
     applyLm3630a();

@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// PanelApp 触摸校准 / 触点诊断（app_task 上下文）：
-//   * 设置「触摸校准」与串口 `touch cal` → 全屏五点校准（touch_cal_screen）；
-//   * 串口 `touch [trace]` → 20 s 内逐事件打印原始坐标与映射坐标；
-//   * 设置「显示触点」与串口 `touch marks on|off` → 下一次刷新在点按处画标记；
-//   * 串口 `touch show|reset` → 打印当前标定 / 清除标定恢复出厂映射。
 #include <cstdio>
 #include <cstring>
 #include <strings.h>  // strcasecmp
@@ -13,9 +8,7 @@
 #include "panel_app.h"
 
 namespace panel {
-
 namespace {
-
 constexpr const char* TAG = "panel_touch";
 constexpr int64_t kTouchTraceMs = 20000;
 
@@ -62,13 +55,12 @@ bool PanelApp::serviceTouchCalibration(int64_t now) {
   if (touchCal_.active()) {
     touchCal_.service(now);
     if (touchCal_.active()) {
-      noteInputResume();  // 校准屏刷新会阻塞 app_task
+      noteInputResume();
       return true;
     }
   }
   const TouchCalScreen::Outcome outcome = touchCal_.takeOutcome();
   if (outcome == TouchCalScreen::Outcome::None) return false;
-  // 恢复原页面：整页重绘（校准屏覆盖了整块面板）。
   if (page_ == Page::Dashboard) dashboard_.invalidateAll();
   markDirty(true);
   noteInteraction(now);
@@ -100,7 +92,7 @@ void PanelApp::noteTouchMark(int16_t x, int16_t y) {
   touchMarkX_ = x;
   touchMarkY_ = y;
   touchMarkPending_ = true;
-  if (page_ != Page::Dashboard) markDirty();  // 页面整页重画时叠加；dashboard 见 service
+  if (page_ != Page::Dashboard) markDirty();
 }
 
 void PanelApp::drawTouchMark(eego::PortraitCanvas& c) const {
@@ -108,7 +100,6 @@ void PanelApp::drawTouchMark(eego::PortraitCanvas& c) const {
   c.resetClip();
   const int16_t x = touchMarkX_;
   const int16_t y = touchMarkY_;
-  // 白边黑心圆点 + 十字：在任何背景上都可见。
   c.fillCircle(x, y, 9, 1);
   c.fillCircle(x, y, 6, 0);
   c.drawCircle(x, y, 10, 0);

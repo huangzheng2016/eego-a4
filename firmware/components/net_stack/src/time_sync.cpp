@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// TimeSync 实现 —— 见 include/net_stack/time_sync.h。
 #include "net_stack/time_sync.h"
 
 #include <algorithm>
@@ -10,14 +9,9 @@
 #include "sdkconfig.h"
 
 namespace eego::net {
-
 namespace {
-
 const char* TAG = "net.time";
 
-// SNTP 同步通知回调（lwIP TCPIP 上下文）：只做原子置位，绝不碰 I2C/RTC。
-// IDF 协议栈在进入本回调前已 settimeofday 设置系统时间。
-// NetStack 单例 ⇒ TimeSync 实例唯一，静态指针安全。
 TimeSync* g_instance = nullptr;
 
 void onSntpSync(struct timeval* tv) {
@@ -29,8 +23,6 @@ void onSntpSync(struct timeval* tv) {
 
 void TimeSync::configure(std::vector<std::string> servers, RtcWriteFn rtc_write) {
   if (sntp_initialized_) {
-    // 运行期重配守卫：lwIP 持有 servers_ 字符串的 c_str 指针（不拷贝），
-    // 重配会使已注册指针悬垂——忽略并告警（见头文件合同）
     ESP_LOGW(TAG, "time sync reconfigure ignored (sntp already initialized)");
     return;
   }
@@ -43,8 +35,6 @@ void TimeSync::onWifiConnected() {
   if (servers_.empty()) {
     servers_ = {"cn.pool.ntp.org", "pool.ntp.org"};
   }
-  // esp_sntp 服务器槽上限 = CONFIG_LWIP_SNTP_MAX_SERVERS（本工程 sdkconfig 为 1），
-  // 多配截断防越界断言
   const size_t n = std::min(servers_.size(),
                             static_cast<size_t>(CONFIG_LWIP_SNTP_MAX_SERVERS));
   if (!sntp_initialized_) {
@@ -58,7 +48,6 @@ void TimeSync::onWifiConnected() {
     ESP_LOGI(TAG, "sntp started (server %s)", servers_[0].c_str());
     return;
   }
-  // 重连：stop + init 立即重新同步（不等每小时自同步下一拍）
   esp_sntp_stop();
   esp_sntp_init();
   ESP_LOGI(TAG, "sntp re-sync requested");
@@ -66,7 +55,7 @@ void TimeSync::onWifiConnected() {
 
 void TimeSync::service() {
   if (!rtc_write_pending_.exchange(false, std::memory_order_relaxed)) return;
-  if (!rtc_write_) return;  // 无 RTC：纯 SNTP，系统时间即可
+  if (!rtc_write_) return;
   const uint64_t now = static_cast<uint64_t>(time(nullptr));
   if (rtc_write_(now)) {
     ESP_LOGI(TAG, "rtc write-back ok (unix %llu)", static_cast<unsigned long long>(now));
@@ -75,7 +64,6 @@ void TimeSync::service() {
   }
 }
 
-// SNTP 同步通知落地（TCPIP 上下文 → 原子；net_task service 消费）。
 void TimeSync::noteSync(uint64_t unix_sec) {
   synced_.store(true, std::memory_order_relaxed);
   last_sync_at_.store(unix_sec, std::memory_order_relaxed);

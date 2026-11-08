@@ -28,10 +28,9 @@ The manual and changelog are in the header file "lodepng.h"
 Rename this file to lodepng.cpp to use it for C++, or to lodepng.c to use it for C.
 */
 
-/* ===== 嵌入式（ESP32-S3）裁剪：减小体积 =====
-   - LODEPNG_NO_COMPILE_DISK：禁用文件 IO（嵌入式无 stdio 文件系统，用内存解码）
-   - LODEPNG_NO_COMPILE_ANCILLARY_CHUNKS：禁用辅助块解析（tEXt/bKGD/gAMA 等，阅读器只需像素）
-   必须在 #include "lodepng.h" 之前定义，头文件中的条件编译才会生效。 */
+/* EEGO A4 alteration (embedded trim): LODEPNG_NO_COMPILE_DISK disables file IO and
+   LODEPNG_NO_COMPILE_ANCILLARY_CHUNKS skips ancillary chunks; both must be defined
+   before #include "lodepng.h". */
 #define LODEPNG_NO_COMPILE_DISK
 #define LODEPNG_NO_COMPILE_ANCILLARY_CHUNKS
 
@@ -77,17 +76,16 @@ define them in your own project's source files without needing to change
 lodepng source code. Don't forget to remove "static" if you copypaste them
 from here.*/
 
-/* EEGO A4 改动（相对上游 20260119 的改动标注，见文件顶部 zlib 许可第 2 条）：
-   分配器改走 ESP-IDF heap_caps —— 优先 PSRAM，失败回退内部 RAM。
-   原因：本工程 sdkconfig 关闭 SPIRAM_USE_MALLOC，默认 malloc 只能用内部 RAM，
-   大图 decode32 的 RGBA 缓冲会 OOM。heap_caps 内存可用 free()/heap_caps_free 释放。 */
+/* EEGO A4 alteration (relative to upstream 20260119; zlib license clause 2):
+   allocations go through ESP-IDF heap_caps, PSRAM first with internal RAM fallback, so
+   large decode buffers do not exhaust internal RAM. Memory is freed with heap_caps_free. */
 #ifdef LODEPNG_COMPILE_ALLOCATORS
-#include "esp_heap_caps.h" /* EEGO A4 改动: heap_caps 分配 */
+#include "esp_heap_caps.h" /* EEGO A4 alteration: heap_caps allocator */
 static void* lodepng_malloc(size_t size) {
 #ifdef LODEPNG_MAX_ALLOC
   if(size > LODEPNG_MAX_ALLOC) return 0;
 #endif
-  /* EEGO A4 改动: PSRAM 优先，回退内部 RAM */
+  /* EEGO A4 alteration: PSRAM first, internal RAM fallback */
   void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
   if(!p) p = heap_caps_malloc(size, MALLOC_CAP_INTERNAL);
   return p;
@@ -98,14 +96,14 @@ static void* lodepng_realloc(void* ptr, size_t new_size) {
 #ifdef LODEPNG_MAX_ALLOC
   if(new_size > LODEPNG_MAX_ALLOC) return 0;
 #endif
-  /* EEGO A4 改动: 与 lodepng_malloc 同一堆族（允许跨堆搬迁） */
+  /* EEGO A4 alteration: same heap family as lodepng_malloc */
   void* p = heap_caps_realloc(ptr, new_size, MALLOC_CAP_SPIRAM);
   if(!p) p = heap_caps_realloc(ptr, new_size, MALLOC_CAP_INTERNAL);
   return p;
 }
 
 static void lodepng_free(void* ptr) {
-  /* EEGO A4 改动: heap_caps_free 兼容 free()/heap_caps_malloc 内存 */
+  /* EEGO A4 alteration: heap_caps_free handles both heaps */
   heap_caps_free(ptr);
 }
 #else /*LODEPNG_COMPILE_ALLOCATORS*/

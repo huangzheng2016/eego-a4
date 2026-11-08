@@ -6,14 +6,11 @@
 #include <limits>
 
 namespace eego::admin {
-
 namespace {
-
 using alert_core::JsonValue;
 using eego::dashboard::ActionKind;
 using eego::dashboard::Dashboard;
 
-// Builtins (device-side semantics, see README.md「设备操作」):
 //   page_previous/page_next   dashboard: previous/next screen; lists
 //                             (settings, alert detail): previous/next item
 //   focus_previous/focus_next dashboard: previous/next panel focus;

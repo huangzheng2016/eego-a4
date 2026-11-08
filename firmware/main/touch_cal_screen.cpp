@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 五点触摸校准屏（见 touch_cal_screen.h）。
 #include "touch_cal_screen.h"
 
 #include <cmath>
@@ -10,13 +9,10 @@
 #include "ui_text.h"
 
 namespace panel {
-
 namespace {
-
 constexpr const char* TAG = "touch_cal";
 constexpr int64_t kIdleCancelMs = 90000;
 
-// 验证页按钮行（全宽三等分，位于中心靶与底部靶之间）。
 constexpr int16_t kBtnY = 588;
 constexpr int16_t kBtnH = 64;
 constexpr int16_t kBtnGap = 12;
@@ -109,7 +105,7 @@ void TouchCalScreen::handleTouch(const eego::TouchEvent& ev, int64_t nowMs) {
     case eego::TouchEventType::Release:
       break;
     default:
-      return;  // Tap/Hold/Swipe 与 Release 同属一次接触，只按 Release 处理
+      return;
   }
   if (ev.raw_samples == 0) return;
   switch (phase_) {
@@ -120,7 +116,7 @@ void TouchCalScreen::handleTouch(const eego::TouchEvent& ev, int64_t nowMs) {
       verifyTap(ev);
       break;
     case Phase::Failed:
-      restart(nowMs);  // 任意位置点按重做（不依赖任何标定）
+      restart(nowMs);
       break;
   }
 }
@@ -189,7 +185,7 @@ void TouchCalScreen::service(int64_t nowMs) {
 
 void TouchCalScreen::drawCross(int16_t x, int16_t y, int16_t arm, bool heavy) {
   eego::PortraitCanvas& c = *canvas_;
-  const int16_t w = heavy ? 1 : 0;  // 粗线：±1 像素三线
+  const int16_t w = heavy ? 1 : 0;
   for (int16_t o = -w; o <= w; ++o) {
     c.drawLine(static_cast<int16_t>(x - arm), static_cast<int16_t>(y + o),
                static_cast<int16_t>(x + arm), static_cast<int16_t>(y + o), 0);
@@ -218,7 +214,6 @@ void TouchCalScreen::drawButtons() {
     }
     const int16_t ty = static_cast<int16_t>(kBtnY + (kBtnH - th) / 2);
     if (i == 0) {
-      // 黑底白字：逐像素反色不可用，改为白色文字（FontManager 灰度 15）
       const int16_t tw = static_cast<int16_t>(eego::FontManager::instance().uiTextWidth(labels[i]) * 2);
       eego::FontManager::instance().drawTextGray(c, static_cast<int16_t>(x + (kBtnW - tw) / 2), ty,
                                                  labels[i], 2, 15);

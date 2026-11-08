@@ -1,4 +1,3 @@
-// "设备渲染预览": POST /dashboard/render-preview renders the *draft* on the
 // device with its real fonts (nothing is applied). Full (4 grey levels) or
 // fast (B/W) refresh look, screen pager (one visible page = one screen) from
 // X-Preview-Screen / X-Preview-Screens and the data

@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 远程切屏请求与当前屏状态（契约见 admin/device_screen.h）。
 #include "admin/device_screen.h"
 
 #include <atomic>
 #include <mutex>
 
 namespace eego::admin {
-
 namespace {
-
 std::mutex g_mutex;
 ScreenState g_state;
 std::atomic<int32_t> g_request{-1};

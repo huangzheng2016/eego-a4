@@ -1,31 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""validate_firmware.py — firmware/ 树静态审计（FW6/M19）。
-
-纯标准库，主机侧运行，不需要 ESP-IDF 环境：
-
-    python3 firmware/tools/validate_firmware.py [--root firmware/] [--json]
-
-检查项（任一 FAIL 退出码为 1）：
-  1. required_files  必需文件齐全（构建入口、组件清单、工具、许可文档）
-  2. component_deps  组件依赖方向（CMake REQUIRES 分层 + 头文件 include 扫描），
-                     落实 M12 定稿：main→{admin,alert_core,diag}→net_stack→
-                     {eego_ui,eego_hal}→board；net_stack/admin 不得 include UI 头；
-                     alert_core 保持纯 C++（无任何 ESP-IDF/项目头）
-  3. forbidden       禁止残留：weread 协议/登录/加密代码、boot_logo 商标素材、
-                     miniz、secrets（私钥块/密钥文件名/硬编码凭据赋值）
-  4. license_headers 第一方源码必须有 SPDX-License-Identifier；third_party 必须
-                     保留上游许可文本或 SPDX
-  5. partitions      partitions.csv 布局一致性（A/B 等尺寸、不重叠、16MB 内）
-  6. sdkconfig       sdkconfig.defaults 关键键齐全且与 partitions.csv 一致
-  7. admin_schema    GET /config/schema 的 JSON 与 C++ 常量静态一致
-                     （schema_version/默认值/上限 ↔ kSchemaVersion/AdminDomainConfig/
-                     kMaxOverrides/kMaxTtlSeconds）
-  8. dashboard_presets 30 个预设与 4 个完整示例：v2 schema、目录/来源/变量/
-                     面板/动作/资源引用、source plan、布局及 128/192/32KiB 预算
-
-本工具只做静态文本/结构检查，不编译、不刷写；不替代设备端导入校验。
-"""
 
 from __future__ import annotations
 
@@ -38,10 +12,8 @@ from pathlib import Path
 from dashboard_validation import check_library
 
 # ---------------------------------------------------------------------------
-# 审计策略（修改树结构时同步更新本表）
 # ---------------------------------------------------------------------------
 
-# M12 定稿依赖方向：component -> 允许依赖的项目组件（不含 ESP-IDF 系统组件）
 ALLOWED_DEPS: dict[str, set[str]] = {
     "main": {"board", "eego_hal", "eego_ui", "admin", "alert_core", "net_stack", "diag"},
     "admin": {"alert_core", "net_stack", "eego_hal"},
@@ -55,7 +27,6 @@ ALLOWED_DEPS: dict[str, set[str]] = {
     "lodepng": set(),
 }
 
-# 头文件级禁令：component -> 禁止出现的 include 前缀（CMake 之外的第二道防线）
 FORBIDDEN_INCLUDES: dict[str, set[str]] = {
     "alert_core": {"esp_", "freertos", "eego_hal", "eego_ui", "net_stack", "admin/", "board/", "diag/"},
     "json_dom": {"esp_", "freertos", "eego_hal", "eego_ui", "net_stack", "admin/", "board/", "diag/",
@@ -68,8 +39,6 @@ FORBIDDEN_INCLUDES: dict[str, set[str]] = {
     "diag": {"eego_ui", "net_stack", "admin/", "alert_core", "eego_hal", "board/"},
 }
 
-# weread 协议/登录/加密残留（ M12 P4 清理定稿；来源声明中的 "eego-a4-weread"
-# 字样是许可 provenance，不在禁止之列，故只禁具体 artifact 名）
 FORBIDDEN_TOKENS: dict[str, str] = {
     "weread_api": "weread 协议 API 残留",
     "weread_client": "weread 会话客户端残留",
@@ -96,9 +65,6 @@ FORBIDDEN_FILE_PATTERNS = [
     (re.compile(r"id_rsa", re.I), "私钥文件"),
 ]
 
-# 内容扫描豁免：本策略文件自身含检测 token 定义；NOTICE/README 等审计声明文件
-# 必须点名 weread_crypto/boot_logo/miniz 以记录「未复用/未采用」，属声明而非残留。
-# main/local_secrets.h 是 .gitignore 排除的本机凭据，只供私有构建，不得提交。
 CONTENT_SCAN_EXCLUDE = {
     "tools/validate_firmware.py",
     "main/local_secrets.h",
@@ -108,7 +74,6 @@ CONTENT_SCAN_EXCLUDE = {
     "THIRD_PARTY_NOTICES.md",
 }
 
-# 硬编码凭据赋值：name = "literal" / name: "literal"（值 ≥8 字符且非掩码/占位）
 SECRET_ASSIGN_RE = re.compile(
     r"""(?ix)
     \b(password|passwd|secret|token|api[_-]?key|api[_-]?token|auth[_-]?token|ingest[_-]?key)\b
@@ -130,8 +95,6 @@ REQUIRED_FILES = [
 
 CODE_SUFFIXES = {".cpp", ".h", ".py", ".csv", ".txt", ".cmake"}
 FIRST_PARTY_NO_SPDX_ALLOW = {
-    # Kconfig 导入格式，继承自已验证的阅读器固件经验；行内注释已说明来源。
-    # 保持与上游 weread sdkconfig.defaults 的可 diff 性，不加 SPDX 行。
     "sdkconfig.defaults",
 }
 
@@ -139,7 +102,6 @@ FLASH_SIZE_16MB = 0x1000000
 
 
 # ---------------------------------------------------------------------------
-# 报告
 # ---------------------------------------------------------------------------
 
 class Report:
@@ -184,7 +146,6 @@ class Report:
 
 
 # ---------------------------------------------------------------------------
-# 工具函数
 # ---------------------------------------------------------------------------
 
 def read_text(path: Path) -> str:
@@ -218,7 +179,6 @@ def component_sources(root: Path, comp: str) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# 检查 1：必需文件
 # ---------------------------------------------------------------------------
 
 def check_required_files(root: Path, rep: Report) -> None:
@@ -238,7 +198,6 @@ def check_required_files(root: Path, rep: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 检查 2：组件依赖方向
 # ---------------------------------------------------------------------------
 
 CMAKE_KEYWORDS = {"SRCS", "INCLUDE_DIRS", "REQUIRES", "PRIV_REQUIRES", "EMBED_FILES",
@@ -246,7 +205,6 @@ CMAKE_KEYWORDS = {"SRCS", "INCLUDE_DIRS", "REQUIRES", "PRIV_REQUIRES", "EMBED_FI
 
 
 def parse_cmake_requires(path: Path) -> set[str]:
-    """从 idf_component_register 块提取 REQUIRES/PRIV_REQUIRES 的项目组件名。"""
     text = read_text(path)
     m = re.search(r"idf_component_register\s*\((.*?)\)", text, re.S)
     if not m:
@@ -284,7 +242,6 @@ def check_component_deps(root: Path, rep: Report) -> None:
         else:
             rep.ok("component_deps", f"{comp}: REQUIRES {sorted(project_deps) or '∅'} 符合分层")
 
-    # 头文件 include 扫描（CMake 之外的实际包含关系）
     include_re = re.compile(r'^\s*#\s*include\s+["<]([^">]+)[">]', re.M)
     for comp, forbidden in FORBIDDEN_INCLUDES.items():
         bad: list[str] = []
@@ -300,7 +257,6 @@ def check_component_deps(root: Path, rep: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 检查 3：禁止残留（weread/商标/miniz/secrets）
 # ---------------------------------------------------------------------------
 
 def check_forbidden(root: Path, rep: Report) -> None:
@@ -348,7 +304,6 @@ def check_forbidden(root: Path, rep: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 检查 4：许可头
 # ---------------------------------------------------------------------------
 
 def check_license_headers(root: Path, rep: Report) -> None:
@@ -377,7 +332,6 @@ def check_license_headers(root: Path, rep: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 检查 5：partitions.csv
 # ---------------------------------------------------------------------------
 
 def check_partitions(root: Path, rep: Report) -> None:
@@ -423,7 +377,6 @@ def check_partitions(root: Path, rep: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 检查 6：sdkconfig.defaults
 # ---------------------------------------------------------------------------
 
 SDKCONFIG_REQUIRED = {
@@ -445,7 +398,6 @@ SDKCONFIG_REQUIRED = {
     "CONFIG_FATFS_LFN_HEAP": "y",
     "CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS": "y",
     "CONFIG_MBEDTLS_CERTIFICATE_BUNDLE": "y",
-    # BLE 管理隧道：仅 LE Secure Connections + 回环转发
     "CONFIG_BT_NIMBLE_SM_SC": "y",
     "CONFIG_BT_NIMBLE_SM_SC_ONLY": "1",
     "CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU": "512",
@@ -476,7 +428,6 @@ def check_sdkconfig(root: Path, rep: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 检查 7：admin 配置 schema 静态一致性
 # ---------------------------------------------------------------------------
 
 def extract_schema_json(admin_config_cpp: str) -> dict | None:
@@ -494,7 +445,7 @@ def extract_const_int(text: str, name: str) -> int | None:
     if not m:
         return None
     try:
-        return eval(m.group(1), {"__builtins__": {}}, {})  # 仅数字与运算符
+        return eval(m.group(1), {"__builtins__": {}}, {})
     except Exception:
         return None
 
@@ -540,7 +491,6 @@ def check_admin_schema(root: Path, rep: Report) -> None:
               f"ttl_s 上限={s_ttl} == kMaxTtlSeconds",
               f"ttl_s 上限={s_ttl} vs kMaxTtlSeconds={k_ttl}")
 
-    # AdminDomainConfig 默认值 ↔ schema defaults
     fields = schema["top_level"]["admin"]["fields"]
     expect = [
         ("network", "auto_ap_fallback", r"auto_ap_fallback\s*=\s*(\w+)", "false"),
@@ -573,7 +523,6 @@ def check_admin_schema(root: Path, rep: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 检查 8：dashboard 预设库、完整示例、source plan 与资源预算
 # ---------------------------------------------------------------------------
 
 def check_dashboard_library(root: Path, rep: Report) -> None:
@@ -585,7 +534,6 @@ def check_dashboard_library(root: Path, rep: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 主流程
 # ---------------------------------------------------------------------------
 
 def main() -> int:

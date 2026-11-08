@@ -1,8 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
-// UC8279C 墨水屏显示驱动 — 纯 ESP-IDF 实现
-// 移植自 eego-a4-template-ref/lib/FreeInkDisplay 的 Arduino 驱动
-// 使用 driver/spi_master + driver/gpio，无 Arduino 依赖
 
 #include "uc8279c_display.h"
 #include "uc8279c_luts.h"
@@ -23,15 +19,12 @@ static const char* TAG_UC = "eego.display";
 
 namespace eego {
 namespace {
-
-// 进行中的实屏刷新数（display()/displayGray() 期间 > 0）。
 std::atomic<int> g_refreshDepth{0};
 struct RefreshScope {
     RefreshScope() { g_refreshDepth.fetch_add(1, std::memory_order_relaxed); }
     ~RefreshScope() { g_refreshDepth.fetch_sub(1, std::memory_order_relaxed); }
 };
 
-// UC8279C 命令寄存器
 constexpr uint8_t CMD_PANEL_SETTING = 0x00;
 constexpr uint8_t CMD_POWER_SETTING = 0x01;
 constexpr uint8_t CMD_POWER_OFF = 0x02;
@@ -50,24 +43,16 @@ constexpr uint8_t CMD_GATE_SOURCE_SETTING = 0x65;
 constexpr uint8_t CMD_VCOM_DC = 0x82;
 constexpr uint8_t CMD_TCON = 0xe1;
 
-// BUSY 等待超时: 30 秒
 constexpr int64_t BUSY_TIMEOUT_US = 30 * 1000 * 1000LL;
-// 等待 BUSY 进入忙态窗口: 100ms (控制器可能需要短暂时间才拉低 BUSY)
 constexpr int64_t BUSY_SETTLE_US = 100 * 1000LL;
-// 刷新启动确认窗口: 200ms (发 REFRESH 后 BUSY 应在此窗口内拉低)
 constexpr int64_t BUSY_START_CONFIRM_US = 200 * 1000LL;
-// 空闲确认时长: 30ms (BUSY 回 HIGH 后需保持空闲该时长才算真正刷新结束，
-// 覆盖灰阶等多段刷新 BUSY 短暂释放又拉低的情况，防止提前返回导致上层打断刷新)
 constexpr int64_t BUSY_IDLE_CONFIRM_MS = 30;
 
-// gpio_num_t 辅助转换
 inline gpio_num_t gn(int8_t pin) {
     return static_cast<gpio_num_t>(pin);
 }
 
 }  // namespace
-
-// ── 构造 / 析构 ────────────────────────────────────────────────────────────
 
 Uc8279cDisplay::Uc8279cDisplay() = default;
 
@@ -75,11 +60,8 @@ Uc8279cDisplay::~Uc8279cDisplay() {
     end();
 }
 
-// ── 生命周期 ────────────────────────────────────────────────────────────────
-
 esp_err_t Uc8279cDisplay::beginOffscreen() {
-    // 离屏实例：只分配 PSRAM framebuffer，不碰 SPI/GPIO/控制器（与实屏实例共存）。
-    if (spi_ != nullptr) return ESP_ERR_INVALID_STATE;  // 已是实屏实例
+    if (spi_ != nullptr) return ESP_ERR_INVALID_STATE;
     offscreen_ = true;
     if (!fb_) {
         fb_ = static_cast<uint8_t*>(heap_caps_malloc(FRAMEBUFFER_SIZE, MALLOC_CAP_SPIRAM));
@@ -91,14 +73,11 @@ esp_err_t Uc8279cDisplay::beginOffscreen() {
 
 esp_err_t Uc8279cDisplay::begin(bool deferController) {
     if (offscreen_) return ESP_ERR_INVALID_STATE;
-    // 诊断 PSRAM
     size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     size_t psram_total = esp_psram_get_size();
     ESP_LOGI(TAG_UC, "PSRAM total=%u free=%u, FB_SIZE=%u",
              (unsigned)psram_total, (unsigned)psram_free, (unsigned)FRAMEBUFFER_SIZE);
 
-    // 分配 PSRAM framebuffer (native 方向: 768×552/8 = 52992 字节)
-    // 幂等：唤醒时 fb_ 已存在，跳过重新分配以保留显示内容
     if (!fb_) {
         fb_ = static_cast<uint8_t*>(heap_caps_malloc(FRAMEBUFFER_SIZE, MALLOC_CAP_SPIRAM));
         if (!fb_) {
@@ -122,8 +101,6 @@ esp_err_t Uc8279cDisplay::begin(bool deferController) {
     ESP_LOGI(TAG_UC, "spi_ handle = %p", spi_);
 
     if (deferController) {
-        // 电池定时唤醒：面板仍显示上一帧（墨水屏双稳态），控制器保持断电/深睡，
-        // 直到真正需要刷新时（display/displayGray）才上电初始化——帧不变则从不上电。
         controllerPending_ = true;
         fastRefreshesSinceFull_ = 0;
         return ESP_OK;
@@ -133,7 +110,6 @@ esp_err_t Uc8279cDisplay::begin(bool deferController) {
 }
 
 void Uc8279cDisplay::powerUpController() {
-    // 电源时序: POWER_ENABLE 拉高 → 等 100ms → RST 时序
     gpio_set_level(gn(EPD_POWER_ENABLE), 1);
     vTaskDelay(pdMS_TO_TICKS(100));
     hardwareReset();
@@ -161,7 +137,7 @@ void Uc8279cDisplay::end() {
         fbGrayLsb_ = nullptr;
     }
     planesActive_ = false;
-    if (offscreen_) return;  // 离屏实例从未占用 SPI 总线：绝不能释放实屏的总线
+    if (offscreen_) return;
     if (spi_) {
         spi_bus_remove_device(spi_);
         spi_ = nullptr;
@@ -172,41 +148,31 @@ void Uc8279cDisplay::end() {
     fastRefreshesSinceFull_ = 0;
 }
 
-// ── GPIO 初始化 ─────────────────────────────────────────────────────────────
-
 void Uc8279cDisplay::gpioInit() {
-    // 释放 hold (deep sleep 时 power enable 可能被 hold 在 LOW)
     gpio_hold_dis(gn(EPD_POWER_ENABLE));
 
-    // 输出引脚
     gpio_set_direction(gn(EPD_POWER_ENABLE), GPIO_MODE_OUTPUT);
     gpio_set_direction(gn(EPD_CS), GPIO_MODE_OUTPUT);
     gpio_set_direction(gn(EPD_DC), GPIO_MODE_OUTPUT);
     gpio_set_direction(gn(EPD_RESET), GPIO_MODE_OUTPUT);
 
-    // BUSY 输入 + 上拉 (active-low)
     gpio_set_direction(gn(EPD_BUSY), GPIO_MODE_INPUT);
     gpio_pullup_en(gn(EPD_BUSY));
 
-    // 初始电平
-    gpio_set_level(gn(EPD_POWER_ENABLE), 0);  // 先关电
-    gpio_set_level(gn(EPD_CS), 1);            // 片选无效
-    gpio_set_level(gn(EPD_DC), 1);            // 数据模式
-    gpio_set_level(gn(EPD_RESET), 1);         // 非复位
+    gpio_set_level(gn(EPD_POWER_ENABLE), 0);
+    gpio_set_level(gn(EPD_CS), 1);
+    gpio_set_level(gn(EPD_DC), 1);
+    gpio_set_level(gn(EPD_RESET), 1);
 }
 
-// ── SPI 初始化 ───────────────────────────────────────────────────────────────
-
 esp_err_t Uc8279cDisplay::spiInit() {
-    // 幂等：浅睡唤醒时 SPI bus 未释放，重复 spi_bus_initialize 会返回
-    // ESP_ERR_INVALID_STATE，进而导致后续 waitBusy() 死锁。
     if (spi_) {
         ESP_LOGI(TAG_UC, "SPI 已初始化，跳过（handle=%p）", spi_);
         return ESP_OK;
     }
     spi_bus_config_t buscfg = {};
     buscfg.mosi_io_num = EPD_MOSI;
-    buscfg.miso_io_num = -1;       // 无 MISO
+    buscfg.miso_io_num = -1;
     buscfg.sclk_io_num = EPD_SCLK;
     buscfg.quadwp_io_num = -1;
     buscfg.quadhd_io_num = -1;
@@ -215,7 +181,7 @@ esp_err_t Uc8279cDisplay::spiInit() {
     spi_device_interface_config_t devcfg = {};
     devcfg.clock_speed_hz = static_cast<int>(EPD_SPI_HZ);  // 20MHz
     devcfg.mode = 0;                                         // SPI MODE 0
-    devcfg.spics_io_num = -1;                                // 手动控制 CS
+    devcfg.spics_io_num = -1;
     devcfg.queue_size = 1;
 
     ESP_LOGI(TAG_UC, "SPI init: host=SPI3 SCLK=%d MOSI=%d CS=%d DC=%d RST=%d BUSY=%d",
@@ -236,8 +202,6 @@ esp_err_t Uc8279cDisplay::spiInit() {
     return ESP_OK;
 }
 
-// ── 硬件复位 ─────────────────────────────────────────────────────────────────
-
 void Uc8279cDisplay::hardwareReset() {
     // RST: HIGH 20ms → LOW 10ms → HIGH 100ms
     gpio_set_level(gn(EPD_RESET), 1);
@@ -247,8 +211,6 @@ void Uc8279cDisplay::hardwareReset() {
     gpio_set_level(gn(EPD_RESET), 1);
     vTaskDelay(pdMS_TO_TICKS(100));
 }
-
-// ── 控制器初始化命令序列 ───────────────────────────────────────────────────
 
 void Uc8279cDisplay::initController(bool grayMode) {
     const uint8_t panel[] = {0x3f, 0x4a};
@@ -272,12 +234,10 @@ void Uc8279cDisplay::initController(bool grayMode) {
     cmdData(CMD_TCON, &tcon, 1);
 
     if (grayMode) {
-        // 灰阶模式：CrossLink 用较低驱动设置，先上电再填 DTM1
         sendCmd(CMD_POWER_ON);
         waitBusy("gray power-on");
         fillControllerRam(CMD_DTM1, 0xff);
     } else {
-        // BW 模式：官方 1.2.7 先填 DTM1 再上电
         fillControllerRam(CMD_DTM1, 0xff);
         sendCmd(CMD_POWER_ON);
         waitBusy("power-on");
@@ -297,9 +257,8 @@ void Uc8279cDisplay::fillControllerRam(uint8_t cmd, uint8_t fill) {
     uint8_t row[PANEL_ROW_BYTES];
     memset(row, fill, sizeof(row));
 
-    sendCmd(cmd);  // 命令用独立 CS 脉冲
+    sendCmd(cmd);
 
-    // 数据连续写: CS 保持 LOW
     gpio_set_level(gn(EPD_CS), 0);
     gpio_set_level(gn(EPD_DC), 1);
     for (uint16_t y = 0; y < CONTROLLER_HEIGHT; ++y) {
@@ -307,8 +266,6 @@ void Uc8279cDisplay::fillControllerRam(uint8_t cmd, uint8_t fill) {
     }
     gpio_set_level(gn(EPD_CS), 1);
 }
-
-// ── LUT 加载 ─────────────────────────────────────────────────────────────────
 
 void Uc8279cDisplay::loadFullLut() {
     const uint8_t* const lut[] = {
@@ -320,7 +277,6 @@ void Uc8279cDisplay::loadFullLut() {
 }
 
 void Uc8279cDisplay::loadFastLut() {
-    // CrossLink fast: 每条 49 字节记录仅写前 42 字节
     for (uint8_t i = 0; i < 5; ++i) {
         cmdData(static_cast<uint8_t>(CMD_LUT_VCOM + i),
                 A4_UC8279C_FAST_LUT + i * A4_UC8279C_FAST_RECORD_LENGTH,
@@ -329,7 +285,6 @@ void Uc8279cDisplay::loadFastLut() {
 }
 
 void Uc8279cDisplay::loadGrayLut() {
-    // 四级灰阶: 每条 42 字节记录
     for (uint8_t i = 0; i < 5; ++i) {
         cmdData(static_cast<uint8_t>(CMD_LUT_VCOM + i),
                 A4_UC8279C_GRAY_LUT + i * A4_UC8279C_GRAY_RECORD_LENGTH,
@@ -337,33 +292,25 @@ void Uc8279cDisplay::loadGrayLut() {
     }
 }
 
-// ── 帧写入 ───────────────────────────────────────────────────────────────────
-
 void Uc8279cDisplay::writeFrame(uint8_t cmd, const uint8_t* fb) {
     uint8_t white[PANEL_ROW_BYTES];
     memset(white, 0xff, sizeof(white));
 
-    sendCmd(cmd);  // 命令用独立 CS 脉冲
+    sendCmd(cmd);
 
-    // 数据连续写: CS 保持 LOW，从 height-1 行逆序到 0 行
     gpio_set_level(gn(EPD_CS), 0);
     gpio_set_level(gn(EPD_DC), 1);
     for (int y = static_cast<int>(PANEL_HEIGHT) - 1; y >= 0; --y) {
         spiTransmit(fb + static_cast<uint32_t>(y) * PANEL_ROW_BYTES, PANEL_ROW_BYTES);
     }
-    // 底部 48 行白填充 (控制器需要 600 行)
     for (uint16_t y = 0; y < CONTROLLER_PADDING_ROWS; ++y) {
         spiTransmit(white, PANEL_ROW_BYTES);
     }
     gpio_set_level(gn(EPD_CS), 1);
 }
 
-// ── 刷新 ─────────────────────────────────────────────────────────────────────
-
 bool Uc8279cDisplay::refresh(bool turnOff) {
     sendCmd(CMD_DISPLAY_REFRESH);
-    // 确认刷新已启动：BUSY 应在短窗口内拉低，否则刷新命令可能被控制器吞掉
-    // （控制器状态异常时 REFRESH 不生效、BUSY 保持 HIGH，直接等待会误判为已完成）
     const int64_t t0 = esp_timer_get_time();
     bool started = false;
     while (esp_timer_get_time() - t0 < BUSY_START_CONFIRM_US) {
@@ -388,21 +335,18 @@ bool Uc8279cDisplay::refreshActive() {
 }
 
 void Uc8279cDisplay::display(RefreshMode mode, bool turnOff) {
-    if (offscreen_) return;  // 离屏实例没有面板
+    if (offscreen_) return;
     RefreshScope scope;
     ensureController();
-    // 仅在控制器仍忙时等待（阻塞刷新返回时已空闲，避免每帧白等 settle 窗口）
     waitIfBusy("pre-wait");
     const bool off = turnOff || autoPowerOff_;
     bool full = (mode == RefreshMode::Full) || fullRequested_;
-    // Fast 限流：连续 fastRefreshLimit_ 次 Fast 后本次升级为 Full（清残影）
     if (!full && fastRefreshLimit_ != 0 && fastRefreshesSinceFull_ >= fastRefreshLimit_) {
         full = true;
     }
     fullRequested_ = false;
-    // 灰阶波形只用于 Full：Fast 请求一律走 B/W 快刷（fb_ 已是灰度的阈值版本）
     if (full && hasGrayContent()) {
-        prevFrame_ = nullptr;  // 灰阶帧自己写 DTM1/DTM2
+        prevFrame_ = nullptr;
         displayGrayFrame(off);
         return;
     }
@@ -411,7 +355,6 @@ void Uc8279cDisplay::display(RefreshMode mode, bool turnOff) {
 }
 
 void Uc8279cDisplay::displayBw(bool full, bool turnOff) {
-    // 从灰阶模式恢复到 BW 模式：需重新初始化控制器（RST 脉冲，不断电）
     if (grayControllerMode_) {
         hardwareReset();
         initController(false);
@@ -436,14 +379,10 @@ void Uc8279cDisplay::displayBw(bool full, bool turnOff) {
     cmdData(CMD_VCOM_DATA_INTERVAL, &interval, 1);
     if (fast) loadFastLut(); else loadFullLut();
 
-    // 跨控制器复位的 Fast：把面板上实际显示的上一帧写回 DTM1（复位后 DTM1 是全白），
-    // Fast LUT 才能只驱动变化像素且不留残影。连续刷新时控制器在刷新后自行把新帧
-    // 作为下一次的旧帧（mains 模式只写 DTM2 即依赖于此），无需重写。
     const uint8_t* previous = fast ? prevFrame_ : nullptr;
     if (previous != nullptr) writeFrame(CMD_DTM1, previous);
     writeFrame(CMD_DTM2, fb_);
     if (!refresh(turnOff)) {
-        // 刷新命令被吞：RST 重置控制器并重推一帧
         ESP_LOGW(TAG_UC, "display: 刷新未启动，重置控制器重试");
         waitIfBusy("retry-wait");
         hardwareReset();
@@ -464,8 +403,6 @@ void Uc8279cDisplay::waitRefreshComplete() {
     waitIfBusy("refresh");
 }
 
-// ── 四级灰阶刷新 ─────────────────────────────────────────────────────────────
-
 void Uc8279cDisplay::displayGray(bool turnOff) {
     if (offscreen_) return;
     RefreshScope scope;
@@ -474,7 +411,6 @@ void Uc8279cDisplay::displayGray(bool turnOff) {
     waitIfBusy("gray-pre-wait");
     fullRequested_ = false;
     const bool off = turnOff || autoPowerOff_;
-    // 无灰阶平面（无灰度内容）时退化为 B/W 完整刷新
     if (!planesActive_ || !fbGrayMsb_ || !fbGrayLsb_) {
         displayBw(true, off);
         return;
@@ -483,17 +419,14 @@ void Uc8279cDisplay::displayGray(bool turnOff) {
 }
 
 void Uc8279cDisplay::displayGrayFrame(bool turnOff) {
-    // 灰阶模式需要重新初始化控制器（grayMode=true，RST 脉冲，不断电）
     hardwareReset();
     initController(true);
 
-    // CrossLink: MSB→DTM1, LSB→DTM2，均自底向上并补 48 行白填充
     writeFrame(CMD_DTM1, fbGrayMsb_);
     writeFrame(CMD_DTM2, fbGrayLsb_);
     loadGrayLut();
 
     if (!refresh(turnOff)) {
-        // 刷新命令被吞：RST 重置控制器并重推一帧
         ESP_LOGW(TAG_UC, "displayGray: 刷新未启动，重置控制器重试");
         waitIfBusy("retry-wait");
         hardwareReset();
@@ -505,18 +438,14 @@ void Uc8279cDisplay::displayGrayFrame(bool turnOff) {
             ESP_LOGE(TAG_UC, "displayGray: 重试仍失败，画面可能残留");
         }
     }
-    // 灰阶帧本身是完整波形：重置 Fast 计数。紧随其后的第一次 B/W 刷新由
-    // displayBw() 强制为 Full（控制器复位后 DTM1 为全白，Fast 会留残影）。
     fastRefreshesSinceFull_ = 0;
 }
-
-// ── 深睡眠 ───────────────────────────────────────────────────────────────────
 
 void Uc8279cDisplay::deepSleep() {
     if (offscreen_) return;
     fastRefreshesSinceFull_ = 0;
     prevFrame_ = nullptr;
-    if (controllerPending_) return;  // 本次唤醒从未上电：控制器仍在上次的深睡中
+    if (controllerPending_) return;
     if (screenOn_) {
         sendCmd(CMD_POWER_OFF);
         waitBusy("power-off");
@@ -526,13 +455,10 @@ void Uc8279cDisplay::deepSleep() {
     cmdData(CMD_DEEP_SLEEP, &check, 1);
 }
 
-// ── BUSY 等待 ────────────────────────────────────────────────────────────────
-
 void Uc8279cDisplay::waitBusy(const char* tag) {
     (void)tag;
     const int64_t start = esp_timer_get_time();
 
-    // 阶段1：等待进入忙态（初始即空闲时，最多等 settle 窗口确认）
     bool busy = (gpio_get_level(gn(EPD_BUSY)) == 0);
     if (!busy) {
         while (esp_timer_get_time() - start < BUSY_SETTLE_US) {
@@ -544,26 +470,21 @@ void Uc8279cDisplay::waitBusy(const char* tag) {
         }
     }
 
-    // 阶段2：等待 BUSY 回 HIGH 且保持空闲确认时长，确保刷新真正结束。
-    // 灰阶等刷新 BUSY 可能分段（短暂释放后又拉低），若只等第一次回 HIGH
-    // 会提前返回，上层随后 hardwareReset 会打断仍在进行的刷新导致状态错乱。
     int idleMs = 0;
     while (esp_timer_get_time() - start < BUSY_TIMEOUT_US) {
         if (gpio_get_level(gn(EPD_BUSY)) == 0) {
-            idleMs = 0;  // 又变忙：刷新未结束，重置空闲计数
+            idleMs = 0;
         } else if (++idleMs >= BUSY_IDLE_CONFIRM_MS) {
-            break;  // 持续空闲，确认完成
+            break;
         }
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
 void Uc8279cDisplay::waitIfBusy(const char* tag) {
-    if (gpio_get_level(gn(EPD_BUSY)) != 0) return;  // 空闲：不必等待 settle 窗口
+    if (gpio_get_level(gn(EPD_BUSY)) != 0) return;
     waitBusy(tag);
 }
-
-// ── SPI 底层传输 ─────────────────────────────────────────────────────────────
 
 void Uc8279cDisplay::spiTransmit(const uint8_t* data, size_t len) {
     if (!spi_) {
@@ -571,21 +492,21 @@ void Uc8279cDisplay::spiTransmit(const uint8_t* data, size_t len) {
         return;
     }
     spi_transaction_t t = {};
-    t.length = static_cast<size_t>(len) * 8;  // 位长度
+    t.length = static_cast<size_t>(len) * 8;
     t.tx_buffer = data;
     (void)spi_device_polling_transmit(spi_, &t);
 }
 
 void Uc8279cDisplay::sendCmd(uint8_t cmd) {
     gpio_set_level(gn(EPD_CS), 0);
-    gpio_set_level(gn(EPD_DC), 0);  // DC LOW = 命令
+    gpio_set_level(gn(EPD_DC), 0);
     spiTransmit(&cmd, 1);
     gpio_set_level(gn(EPD_CS), 1);
 }
 
 void Uc8279cDisplay::sendData(uint8_t data) {
     gpio_set_level(gn(EPD_CS), 0);
-    gpio_set_level(gn(EPD_DC), 1);  // DC HIGH = 数据
+    gpio_set_level(gn(EPD_DC), 1);
     spiTransmit(&data, 1);
     gpio_set_level(gn(EPD_CS), 1);
 }
@@ -599,22 +520,19 @@ void Uc8279cDisplay::sendData(const uint8_t* data, size_t len) {
 
 void Uc8279cDisplay::cmdData(uint8_t cmd, const uint8_t* data, size_t len) {
     gpio_set_level(gn(EPD_CS), 0);
-    gpio_set_level(gn(EPD_DC), 0);  // 命令
+    gpio_set_level(gn(EPD_DC), 0);
     spiTransmit(&cmd, 1);
     if (len > 0 && data != nullptr) {
-        gpio_set_level(gn(EPD_DC), 1);  // 数据
+        gpio_set_level(gn(EPD_DC), 1);
         spiTransmit(data, len);
     }
     gpio_set_level(gn(EPD_CS), 1);
 }
 
-// ── Framebuffer 操作 (逻辑 portrait 坐标) ──────────────────────────────────
-
 void Uc8279cDisplay::clear() {
     if (fb_) {
-        memset(fb_, 0xff, FRAMEBUFFER_SIZE);  // 全白
+        memset(fb_, 0xff, FRAMEBUFFER_SIZE);
     }
-    // 全白帧无灰度：停用灰阶平面，下一个灰度像素时再从 fb_ 同步
     planesActive_ = false;
 }
 
@@ -622,7 +540,6 @@ void Uc8279cDisplay::drawPixel(int16_t x, int16_t y, uint8_t color) {
     if (!fb_) return;
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
 
-    // portrait→native 旋转: nativeX=y, nativeY=551-x
     const uint16_t nativeX = static_cast<uint16_t>(y);
     const uint16_t nativeY = static_cast<uint16_t>(PANEL_HEIGHT - 1 - x);
 
@@ -630,12 +547,11 @@ void Uc8279cDisplay::drawPixel(int16_t x, int16_t y, uint8_t color) {
     const uint8_t bit = 7 - (nativeX & 0x7);
 
     if (color) {
-        fb_[byteIdx] |= (1 << bit);    // 1 = 白
+        fb_[byteIdx] |= (1 << bit);
     } else {
-        fb_[byteIdx] &= ~(1 << bit);   // 0 = 黑
+        fb_[byteIdx] &= ~(1 << bit);
     }
 
-    // 灰阶平面激活时同步更新（黑→00, 白→11），保持 BW 与灰阶一致
     if (planesActive_) {
         setGrayPlanes(byteIdx, bit, color ? 3 : 0);
     }
@@ -656,7 +572,6 @@ uint8_t Uc8279cDisplay::getPixel(int16_t x, int16_t y) const {
 
 void Uc8279cDisplay::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_t color) {
     if (!fb_) return;
-    // 裁剪到有效范围
     if (w <= 0 || h <= 0) return;
 
     int16_t x0 = (x < 0) ? 0 : x;
@@ -671,8 +586,6 @@ void Uc8279cDisplay::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_
     }
 }
 
-// ── 四级灰阶 framebuffer 操作 (逻辑 portrait 坐标) ─────────────────────────
-
 void Uc8279cDisplay::ensureGrayBuffers() {
     if (planesActive_) return;
     if (!fbGrayMsb_) {
@@ -681,8 +594,7 @@ void Uc8279cDisplay::ensureGrayBuffers() {
     if (!fbGrayLsb_) {
         fbGrayLsb_ = static_cast<uint8_t*>(heap_caps_malloc(FRAMEBUFFER_SIZE, MALLOC_CAP_SPIRAM));
     }
-    if (!fb_ || !fbGrayMsb_ || !fbGrayLsb_) return;  // PSRAM 分配失败，放弃灰阶
-    // 从 fb_ 同步：bit=0(黑) → MSB=0,LSB=0；bit=1(白) → MSB=1,LSB=1
+    if (!fb_ || !fbGrayMsb_ || !fbGrayLsb_) return;
     memcpy(fbGrayMsb_, fb_, FRAMEBUFFER_SIZE);
     memcpy(fbGrayLsb_, fb_, FRAMEBUFFER_SIZE);
     planesActive_ = true;
@@ -707,25 +619,21 @@ void Uc8279cDisplay::drawPixelGray(int16_t x, int16_t y, uint8_t gray) {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
     if (gray > 15) gray = 15;
 
-    // 与 drawPixel 相同的 portrait→native 旋转
     const uint16_t nativeX = static_cast<uint16_t>(y);
     const uint16_t nativeY = static_cast<uint16_t>(PANEL_HEIGHT - 1 - x);
     const uint32_t byteIdx = static_cast<uint32_t>(nativeY) * PANEL_ROW_BYTES + (nativeX >> 3);
     const uint8_t bit = 7 - (nativeX & 0x7);
 
-    // B/W 平面：灰度阈值化（Fast 刷新显示此版本）
     if (grayToBw(gray)) {
         fb_[byteIdx] |= static_cast<uint8_t>(1u << bit);
     } else {
         fb_[byteIdx] &= static_cast<uint8_t>(~(1u << bit));
     }
 
-    // 16 级 → 4 级: 0-3=黑(00), 4-7=深灰(01), 8-11=浅灰(10), 12-15=白(11)
     const uint8_t level = gray >> 2;
     if (!planesActive_) {
-        // 纯黑/纯白不需要灰阶平面（fb_ 已精确表示）
         if (level == 0 || level == 3) return;
-        ensureGrayBuffers();  // 同步自 fb_（已含本像素的阈值版本）
+        ensureGrayBuffers();
         if (!planesActive_) return;
     }
     setGrayPlanes(byteIdx, bit, level);
@@ -746,13 +654,11 @@ uint8_t Uc8279cDisplay::grayLevel(int16_t x, int16_t y) const {
 }
 
 void Uc8279cDisplay::clearGray() {
-    // 丢弃灰阶平面；帧内容保持 fb_ 中的 B/W（阈值）版本
     planesActive_ = false;
 }
 
 bool Uc8279cDisplay::hasGrayContent() const {
     if (!planesActive_ || !fbGrayMsb_ || !fbGrayLsb_) return false;
-    // 灰度像素即 MSB != LSB（01 深灰 / 10 浅灰）
     for (uint32_t i = 0; i < FRAMEBUFFER_SIZE; ++i) {
         if ((fbGrayMsb_[i] ^ fbGrayLsb_[i]) != 0) return true;
     }

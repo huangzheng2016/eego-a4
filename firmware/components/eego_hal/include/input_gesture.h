@@ -7,16 +7,12 @@
 #include "input_events.h"
 
 namespace eego {
-
 class ButtonGestureFsm {
  public:
   void reset(int64_t now_us, uint8_t pressed_mask, bool wake_release_gate);
   std::vector<ButtonEvent> sample(ButtonId id, bool pressed, int64_t now_us);
   std::vector<ButtonEvent> tick(int64_t now_us);
 
-  // 双击检测默认关闭：短按在释放时立即发出 ShortPress。仅当存在双击绑定时
-  // 为 Up/Down 开启（开启后 ShortPress 延迟 kInputDoublePressUs 以等待第二击）。
-  // Power 永不等待双击，此设置对其无效。
   void setDoublePressEnabled(ButtonId id, bool enabled);
   bool doublePressEnabled(ButtonId id) const;
 

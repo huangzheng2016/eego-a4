@@ -5,9 +5,7 @@
 #include <cstring>
 
 namespace eego::ble::tunnel {
-
 namespace {
-
 uint8_t* defaultAlloc(size_t bytes) { return static_cast<uint8_t*>(std::malloc(bytes)); }
 void defaultRelease(uint8_t* ptr) { std::free(ptr); }
 
@@ -59,7 +57,6 @@ void makeAck(uint8_t out[4], uint8_t id, uint16_t next_seq) {
 }
 
 void makeAbort(uint8_t out[4], uint8_t id, AbortReason reason) {
-  // ABORT 是单帧控制消息：START|END 置位（ACK 不置位）。
   writeHeader(out, static_cast<uint8_t>((kTypeAbort << 4) | kFlagStart | kFlagEnd), id,
               static_cast<uint16_t>(reason));
 }
@@ -86,7 +83,7 @@ size_t encodeFrames(uint8_t id, const uint8_t* head, uint16_t head_len, const ui
 
   uint8_t frame[512 + kHeaderBytes];
   const size_t limit = chunk > sizeof(frame) ? sizeof(frame) : chunk;
-  size_t offset = 0;  // 消息字节偏移
+  size_t offset = 0;
   for (size_t seq = 0; seq < frames; seq++) {
     size_t pos = kHeaderBytes;
     uint8_t flags = static_cast<uint8_t>(kTypeData << 4);
@@ -190,7 +187,6 @@ Result Reassembler::feed(const uint8_t* frame, size_t len, int64_t now_ms) {
   const uint8_t* payload = frame + kHeaderBytes;
   size_t payload_len = len - kHeaderBytes;
   if (h.start()) {
-    // 新消息：放弃任何未完成的旧消息（浏览器重试）。
     reset();
     if (h.seq != 0 || payload_len < kPreludeBytes) return fail(Result::BadFrame);
     const uint32_t total = getU32(payload);

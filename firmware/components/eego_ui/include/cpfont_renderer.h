@@ -1,19 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
-// cpfont_renderer.h — CPFONT v4 / .eefont 字体解析与渲染（纯 ESP-IDF 移植版）
 //
-// 格式（CPFONT v4，同时接受 .eefont 换皮）：
-//   [全局头 32B]  magic 8B + u16 version + u16 flags + u8 styleCount + ...
-//   [样式 TOC 32B × styleCount]
-//   [区间表 12B × intervalCount]   first/u32, last/u32, offset/u32
-//   [字形表 16B × glyphCount]      w,h,advanceX(u16),left(i16),top(i16),
 //                                  dataLen(u16),dataOff(u32)
 //   [kern / ligature ...]
-//   [位图区] 1-bit(8px/byte,MSB) 或 2-bit(4px/byte,4 级灰度)
 //
-// magic 校验放宽：同时接受 "CPFONT\0\0" 与 "EEFONT\0\0"（.eefont 支持）。
-// advanceX 为 1/16px 单位，有效像素 advance = (advanceX + 8) >> 4。
-// 渲染：drawText(x, top, utf8)，baseline = top + ascender。
 #pragma once
 
 #include <stdint.h>
@@ -23,7 +12,6 @@
 #include "portrait_canvas.h"
 
 namespace eego {
-
 class CpFontRenderer {
 public:
     struct FontInfo {
@@ -52,20 +40,14 @@ public:
     bool hasCodepoint(uint32_t codepoint) const;
     uint16_t countMissing(const char* utf8Text) const;
 
-    // 在 (x, top) 绘制 UTF-8 文本：baseline = top + ascender。
-    // scale 整数放大，bold 走 x+1 二次绘制仿粗。返回结束 x 坐标。
     int16_t drawText(PortraitCanvas& canvas, int16_t x, int16_t top,
                      const char* utf8Text, int16_t scale = 1, bool bold = false);
 
-    // 以统一灰度 gray(0-15, 0=黑/15=白)绘制文本（用 drawPixelGray 上屏）。
-    // 用于设置页等需要"深灰辅助文字"的场景。返回结束 x 坐标。
     int16_t drawTextGray(PortraitCanvas& canvas, int16_t x, int16_t top,
                          const char* utf8Text, int16_t scale, uint8_t gray);
 
-    // 测量一行 UTF-8 文本的像素宽度（按 effective advance 累加）
     int16_t textWidth(const char* utf8Text);
 
-    // 字体高度（行高：优先 advanceY，否则 ascender - descender）
     int16_t fontHeight() const;
 
 private:
@@ -85,8 +67,8 @@ private:
     };
 
     FontInfo info_{};
-    Interval* intervals_ = nullptr;   // PSRAM（回退内部 RAM）
-    uint8_t* bitmap_ = nullptr;       // 位图读取缓冲（PSRAM 优先）
+    Interval* intervals_ = nullptr;
+    uint8_t* bitmap_ = nullptr;
     size_t bitmapCapacity_ = 0;
     FILE* file_ = nullptr;
     const uint8_t* memory_ = nullptr;

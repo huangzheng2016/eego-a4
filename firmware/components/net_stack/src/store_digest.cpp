@@ -3,9 +3,6 @@
 
 namespace eego::net::internal {
 namespace {
-
-// FNV-1a 64 + splitmix64 终结混合：逐记录散列后求和（可交换累积器，entries_
-// 顺序变化——如 evict 交换删除——不影响结果；记录增删改变总和）。
 constexpr uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime = 1099511628211ull;
 
@@ -48,8 +45,6 @@ uint64_t recordDigest(const alert_core::AlertRecord& r) {
 }  // namespace
 
 uint64_t alertStoreDigest(const alert_core::AlertStore& store) {
-  // list 空过滤 + include_muted + since=0 + limit=0（0 = 不限）= 全量指针视图，
-  // 零拷贝遍历（allRecords 会整表拷贝，摘要路径不需要）。
   const auto all = store.list("", "", "", "", true, 0, 0);
   uint64_t sum = 0;
   for (const alert_core::AlertRecord* r : all) {

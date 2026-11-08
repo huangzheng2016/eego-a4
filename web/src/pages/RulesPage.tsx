@@ -1,7 +1,6 @@
 // Alert rules editor (dashboard.alert_rules, dashboard_core model.h AlertRule):
 // list + form with an expression helper, live syntax check and a preview of
 // the rule against the latest known metric value. Rules are part of the
-// dashboard draft and take effect after "应用到设备".
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { useEnumLabel, useI18n } from '../i18n';
 import { useDraft } from '../state/draft';

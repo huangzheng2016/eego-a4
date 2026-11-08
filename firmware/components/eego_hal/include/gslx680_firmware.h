@@ -1,20 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
 #pragma once
 
 #include <stdint.h>
 #include <stddef.h>
 
-// GSLX680 触控固件表（EEGO A4）
-// 提取自 CrossLink EEGO A4 v1.0.10 ESP32-S3 应用镜像。
-// 每条记录为 {页内寄存器偏移 offset, 32 位写入值 value}；
-// offset == 0xf0 表示页选择寄存器，其余 offset 为当前页内的 32 位寄存器地址。
-// 上传协议：写 0xf0 选页，随后将连续寄存器（offset 递增 4）批量写入。
 // Source image SHA-256: 43264c93c8e371db6f2e44574027e50d9444dcff40cc6a645828d2558d70cf24
 // Raw table SHA-256:   076ac8cb283d055660f79f7ea0e10a33533563065d6866c095ad3e74537f3051
 
 namespace eego {
-
 struct Gslx680FirmwareEntry {
   uint8_t offset;
   uint32_t value;

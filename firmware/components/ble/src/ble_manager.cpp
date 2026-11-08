@@ -31,20 +31,17 @@
 extern "C" void ble_store_config_init(void);
 
 namespace eego::ble {
-
 namespace {
-
 constexpr char kTag[] = "ble";
 constexpr size_t kAdvQueueLength = 8;
 constexpr size_t kMaxAdvBytes = 31;
-constexpr int64_t kPasskeyWindowMs = 30000;      // SMP 超时
-constexpr int64_t kPairFailWindowMs = 300000;    // 5 分钟内
-constexpr uint32_t kPairFailLimit = 3;           // 失败 3 次
-constexpr int64_t kPairLockMs = 300000;          // 锁定 5 分钟
-constexpr int64_t kTunnelQuietMs = 30000;        // 隧道活跃期间不开监听窗口
+constexpr int64_t kPasskeyWindowMs = 30000;
+constexpr int64_t kPairFailWindowMs = 300000;
+constexpr uint32_t kPairFailLimit = 3;
+constexpr int64_t kPairLockMs = 300000;
+constexpr int64_t kTunnelQuietMs = 30000;
 constexpr size_t kMaxFrameBytes = 516;
 
-// e3e0a400-7c1b-4f7e-9d2a-5ee90a4b00xx（小端字节序）
 #define EEGO_TUNNEL_UUID(lo) \
   BLE_UUID128_INIT(lo, 0x00, 0x4b, 0x0a, 0xe9, 0x5e, 0x2a, 0x9d, 0x7e, 0x4f, 0x1b, 0x7c, 0x00, 0xa4, 0xe0, 0xe3)
 
@@ -322,7 +319,6 @@ std::string BleManager::infoJson() const {
 }
 
 // ---------------------------------------------------------------------------
-// 主机生命周期
 // ---------------------------------------------------------------------------
 
 bool BleManager::observerDueLocked(int64_t now) const {
@@ -330,7 +326,6 @@ bool BleManager::observerDueLocked(int64_t now) const {
   if (recovery_ap_active_.load() || now < next_observer_ms_) return false;
   if (now < observer_defer_until_ms_.load()) return false;
   if (link_.load() != LinkState::None && now - last_tunnel_ms_.load() < kTunnelQuietMs) return false;
-  // WiFi 正在关联/握手：推迟 BLE 扫描窗口，避免共存时隙争用导致连接失败。
   if (eego::net::WifiManager::instance().state() == eego::net::WifiState::Connecting) return false;
   if (!mains_ && (!battery_window_open_ || battery_scan_done_)) return false;
   return true;
@@ -439,8 +434,6 @@ void BleManager::startObserverWindowLocked() {
   if (!host_synced_.load() || scanning_.load()) return;
   const int64_t now = nowMs();
   ble_gap_disc_params params = {};
-  // 被动扫描 ~25% 占空比（interval 100ms / window 25ms，单位 0.625ms）：与 WiFi
-  // 共用 2.4G 射频（软件共存），高占空比会挤占 STA 关联/握手时隙。
   params.itvl = 0xA0;
   params.window = 0x28;
   params.passive = 1;
@@ -523,7 +516,6 @@ void BleManager::startAdvertising() {
 }
 
 // ---------------------------------------------------------------------------
-// GAP / GATT 回调（NimBLE 主机任务）
 // ---------------------------------------------------------------------------
 
 int BleManager::onScanEvent(struct ble_gap_event* event, void* arg) {
@@ -589,7 +581,6 @@ int BleManager::onConnEvent(struct ble_gap_event* event, void* arg) {
       params.latency = 0;
       params.supervision_timeout = BLE_GAP_SUPERVISION_TIMEOUT_MS(4000);
       ble_gap_update_params(conn, &params);
-      // 主动请求安全：已绑定的对端直接重新加密，新对端触发配对码。
       const int sec_rc = ble_gap_security_initiate(conn);
       ESP_LOGI(kTag, "link connected (security initiate rc=%d)", sec_rc);
       return 0;
@@ -626,7 +617,7 @@ int BleManager::onConnEvent(struct ble_gap_event* event, void* arg) {
         ble_sm_inject_io(event->passkey.conn_handle, &io);
         ESP_LOGI(kTag, "pairing: passkey displayed");
       } else if (io.action == BLE_SM_IOACT_NUMCMP) {
-        io.numcmp_accept = 0;  // 只接受配对码（DisplayOnly）
+        io.numcmp_accept = 0;
         ble_sm_inject_io(event->passkey.conn_handle, &io);
       } else {
         ble_gap_terminate(event->passkey.conn_handle, BLE_ERR_AUTH_FAIL);
@@ -660,8 +651,6 @@ int BleManager::onConnEvent(struct ble_gap_event* event, void* arg) {
         ESP_LOGI(kTag, "link authenticated (bonded=%d)", desc.sec_state.bonded ? 1 : 0);
       } else if (found && !pairing_attempt &&
                  event->enc_change.status == BLE_HS_HCI_ERR(BLE_ERR_PINKEY_MISSING)) {
-        // 对端（电脑）已删除配对而本机仍有旧绑定：删掉旧绑定并重新发起配对，
-        // 否则每次重连都会在这里失败。
         ESP_LOGW(kTag, "peer lost its bond; deleting ours and re-pairing");
         ble_store_util_delete_peer(&desc.peer_id_addr);
         self->link_ = LinkState::Connected;
@@ -671,7 +660,6 @@ int BleManager::onConnEvent(struct ble_gap_event* event, void* arg) {
           ble_gap_terminate(conn, BLE_ERR_AUTH_FAIL);
         }
       } else if (!pairing_attempt) {
-        // 未显示配对码就失败（加密恢复中断等）：不计入锁定次数，断开让浏览器重试。
         self->link_ = LinkState::Connected;
         ESP_LOGW(kTag, "link encryption failed status=%d (no pairing attempt)", event->enc_change.status);
         ble_gap_terminate(conn, BLE_ERR_AUTH_FAIL);
@@ -720,7 +708,6 @@ int BleManager::onGattAccess(uint16_t conn_handle, uint16_t attr_handle,
   (void)arg;
   BleManager& self = instance();
   if (ctxt == nullptr) return BLE_ATT_ERR_UNLIKELY;
-  // 第二道防线：特征权限已要求加密+认证，这里再核对当前连接。
   ble_gap_conn_desc desc = {};
   if (ble_gap_conn_find(conn_handle, &desc) != 0 || !desc.sec_state.encrypted ||
       !desc.sec_state.authenticated || desc.sec_state.key_size != 16) {
@@ -745,7 +732,6 @@ int BleManager::onGattAccess(uint16_t conn_handle, uint16_t attr_handle,
 }
 
 void BleManager::sendControl(uint16_t conn, const uint8_t frame[4]) {
-  // 主机任务内只尝试一次（NOTIFY_TX 事件也在本任务处理，不能在这里等待）。
   if (!tx_subscribed_.load()) return;
   os_mbuf* om = ble_hs_mbuf_from_flat(frame, tunnel::kHeaderBytes);
   if (om == nullptr) return;
@@ -754,7 +740,6 @@ void BleManager::sendControl(uint16_t conn, const uint8_t frame[4]) {
 
 void BleManager::setConnSpeed(uint16_t conn, bool fast) {
   if (conn == 0xffff || conn_fast_.exchange(fast) == fast) return;
-  // 传输时 15–30 ms；空闲 3 s 后 90–120 ms，减少与 WiFi 抢射频（弱信号下 DHCP 更容易成功）。
   ble_gap_upd_params params = {};
   params.itvl_min = BLE_GAP_CONN_ITVL_MS(fast ? 15 : 90);
   params.itvl_max = BLE_GAP_CONN_ITVL_MS(fast ? 30 : 120);
@@ -832,7 +817,7 @@ bool BleManager::notifyFrame(uint16_t conn, const uint8_t* frame, size_t len, in
     if (nowMs() > deadline_ms) return false;
     os_mbuf* om = ble_hs_mbuf_from_flat(frame, static_cast<uint16_t>(len));
     if (om != nullptr) {
-      const int rc = ble_gatts_notify_custom(conn, g_tx_handle, om);  // 总是消费 om
+      const int rc = ble_gatts_notify_custom(conn, g_tx_handle, om);
       if (rc == 0) return true;
       if (rc != BLE_HS_ENOMEM && rc != BLE_HS_EBUSY) {
         ESP_LOGW(kTag, "notify rc=%d", rc);
@@ -851,7 +836,7 @@ esp_err_t BleManager::sendMessage(uint8_t id, const uint8_t* head, uint16_t head
   const uint16_t conn = conn_handle_.load();
   size_t chunk = static_cast<size_t>(att_mtu_.load()) - 3;
   if (chunk > 512) chunk = 512;
-  if (chunk < tunnel::kMinChunk) chunk = tunnel::kMinChunk;  // MTU 23 → 20 字节帧仍可用
+  if (chunk < tunnel::kMinChunk) chunk = tunnel::kMinChunk;
   const int64_t deadline = nowMs() + timeout_ms;
   xSemaphoreTake(g_send_mutex, portMAX_DELAY);
   const size_t frames = tunnel::encodeFrames(
@@ -885,7 +870,6 @@ esp_err_t BleManager::sendEvent(const char* json) {
 }
 
 // ---------------------------------------------------------------------------
-// 广播监听结果处理（app_task）
 // ---------------------------------------------------------------------------
 
 void BleManager::drainAdvertisementsLocked() {
@@ -948,11 +932,8 @@ void BleManager::drainAdvertisementsLocked() {
 }
 
 // ---------------------------------------------------------------------------
-// 电源 / 恢复热点 / 绑定
 // ---------------------------------------------------------------------------
 
-// 配对进行中或监听窗口未结束时推迟深睡；空闲的管理连接不阻止休眠（请求本身经
-// lastAuthenticatedRequestMs 延长交互期）。
 bool BleManager::sleepBlocked() const { return passkey_valid_.load() || scanning_.load(); }
 
 esp_err_t BleManager::beforeSleep() {
@@ -970,8 +951,6 @@ esp_err_t BleManager::beforeSleep() {
 bool BleManager::beginRecoveryAp() {
   lock();
   UnlockGuard guard{mutex_};
-  // 热点期间只暂停广播监听（扫描会把射频拉离 AP 信道）；管理广播保留，
-  // 首次配置也可以走蓝牙。
   if (scanning_.load()) stopObserverWindowLocked();
   recovery_ap_active_ = true;
   return true;
@@ -1058,7 +1037,6 @@ void BleManager::service(bool mains) {
     const uint16_t conn = conn_handle_.load();
     if (conn != 0xffff) ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
   }
-  // 半截上传超时：丢弃并通知浏览器重试。
   uint8_t timed_out_id = 0;
   bool timed_out = false;
   {

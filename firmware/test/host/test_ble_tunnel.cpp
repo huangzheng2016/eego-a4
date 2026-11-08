@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// BLE 管理隧道 v1 帧格式（ble/tunnel_frame.h）：CRC、编解码往返、重组器错误路径，
-// 以及与 web 端（web/src/api/ble/protocol.ts）共用的字节级夹具。
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -58,7 +56,6 @@ TEST(ble_tunnel, crc32_vectors) {
   const std::string s = "123456789";
   CHECK_EQ(crc32(reinterpret_cast<const uint8_t*>(s.data()), s.size()), 0xCBF43926u);
   CHECK_EQ(crc32(nullptr, 0), 0u);
-  // 分段累加 = 一次计算
   const uint8_t* p = reinterpret_cast<const uint8_t*>(s.data());
   CHECK_EQ(crc32(p + 4, 5, crc32(p, 4)), 0xCBF43926u);
 }
@@ -96,7 +93,7 @@ TEST(ble_tunnel, single_frame_and_empty_body) {
   uint16_t ack = 0;
   CHECK(r.ackDue(ack));
   CHECK_EQ(ack, 1);
-  CHECK_EQ(r.feed(frames[0].data(), frames[0].size(), 0), Result::Busy);  // 未 release
+  CHECK_EQ(r.feed(frames[0].data(), frames[0].size(), 0), Result::Busy);
   r.release();
   CHECK_EQ(r.feed(frames[0].data(), frames[0].size(), 0), Result::Complete);
 }
@@ -106,11 +103,10 @@ TEST(ble_tunnel, too_large) {
   const auto frames = encode(1, "{}", pattern(2000), 244);
   CHECK_EQ(r.feed(frames[0].data(), frames[0].size(), 0), Result::TooLarge);
   CHECK(!r.receiving());
-  // 默认上限：384 KiB 响应 > 196 KiB 请求上限
   Reassembler big;
   uint8_t start[14] = {0x01, 9, 0, 0};
   const uint32_t total = static_cast<uint32_t>(kMaxResponseBytes);
-  std::memcpy(start + 4, &total, 4);  // 小端主机
+  std::memcpy(start + 4, &total, 4);
   CHECK_EQ(big.feed(start, sizeof(start), 0), Result::TooLarge);
 }
 
@@ -136,7 +132,6 @@ TEST(ble_tunnel, restart_and_abort) {
   const auto b = encode(2, "{\"x\":1}", pattern(50), 100);
   Reassembler r;
   CHECK_EQ(r.feed(a[0].data(), a[0].size(), 0), Result::Ok);
-  // 新 START 放弃未完成的旧消息
   Result last = Result::Ok;
   for (const auto& f : b) last = r.feed(f.data(), f.size(), 0);
   CHECK_EQ(last, Result::Complete);
@@ -188,7 +183,6 @@ TEST(ble_tunnel, control_frames) {
   CHECK_EQ(h.seq, 4);
 }
 
-// 与 web 共用的夹具：存在时逐字节核对（web/test 用同一文件）。
 TEST(ble_tunnel, shared_fixture) {
   std::ifstream in(std::string(EEGO_FIRMWARE_ROOT) + "/test/host/fixtures/ble_tunnel_vectors.json");
   if (!in) {

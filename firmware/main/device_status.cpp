@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 设备状态标签、图标与状态行绘制（契约见 device_status.h）。
 #include "device_status.h"
 
 #include <algorithm>
@@ -12,9 +11,7 @@
 #include "ui_text.h"
 
 namespace panel {
-
 namespace {
-
 int16_t fontH(int16_t scale) {
   return static_cast<int16_t>(eego::FontManager::instance().uiFontHeight() * scale);
 }
@@ -143,7 +140,6 @@ std::vector<std::pair<std::string, std::string>> powerStatusRows(const PowerStat
     }
     rows.emplace_back(tr(Str::LblCharge), charge);
   }
-  // 已唤醒的长标签含「无操作 N 秒后休眠」，与自动休眠行重复 → 用短写法。
   rows.emplace_back(tr(Str::LblRunState), in.state.state == DeviceState::Awake
                                                ? std::string(tr(Str::StateAwake))
                                                : deviceStateLabel(in.state, tz));
@@ -186,7 +182,6 @@ void drawStateIcon(eego::PortraitCanvas& c, int16_t x, int16_t y, int16_t s, Dev
       c.fillCircle(cx, cy, static_cast<int16_t>(std::max<int16_t>(2, r / 3)), 0);
       break;
     case DeviceState::KeepAwake: {
-      // 太阳：实心圆盘 + 8 道 2px 光线。
       const int16_t core = static_cast<int16_t>(std::max<int16_t>(3, r * 2 / 5));
       c.fillCircle(cx, cy, core, 0);
       static constexpr float kDx[8] = {1.0f, 0.7071f, 0.0f, -0.7071f, -1.0f, -0.7071f, 0.0f, 0.7071f};
@@ -207,7 +202,6 @@ void drawStateIcon(eego::PortraitCanvas& c, int16_t x, int16_t y, int16_t s, Dev
       break;
     }
     case DeviceState::Idle: {
-      // 时钟：2px 圆框 + 时针（向上）与分针（向右）。
       c.drawCircle(cx, cy, static_cast<int16_t>(r - 1), 0);
       c.drawCircle(cx, cy, static_cast<int16_t>(r - 2), 0);
       const int16_t hand = static_cast<int16_t>(r - 4);
@@ -217,7 +211,6 @@ void drawStateIcon(eego::PortraitCanvas& c, int16_t x, int16_t y, int16_t s, Dev
     }
     case DeviceState::Sleeping:
     case DeviceState::NightPause: {
-      // 月牙：实心圆减去右上偏移的白色圆。
       c.fillCircle(cx, cy, static_cast<int16_t>(r - 1), 0);
       c.fillCircle(static_cast<int16_t>(cx + r * 2 / 5), static_cast<int16_t>(cy - r * 3 / 10),
                    static_cast<int16_t>(r * 3 / 4), 1);
@@ -241,7 +234,6 @@ void drawStatusLine(eego::PortraitCanvas& c, int16_t x, int16_t y, int16_t w, in
   const int16_t left_x = static_cast<int16_t>(x + pad);
   const int16_t right_edge = static_cast<int16_t>(x + w - pad);
   if (content.pager) {
-    // 细 ‹ ›（2px 线宽）：虚拟翻屏键的提示，紧贴两端。
     const int16_t cy = static_cast<int16_t>(band_y + band_h / 2);
     const int16_t half = static_cast<int16_t>(std::max<int>(4, band_h / 5));
     for (int16_t d = 0; d < 2; ++d) {

@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// POST /api/v1/dashboard/render-preview —— 候选 bundle 的设备端离屏渲染预览。
 //
-// httpd 只解析/校验（与 /dashboard/validate 同一 DashboardStore::parse），然后经
-// AdminCommand 队列（RenderPreview）把任务交给 app_task（UI 唯一属主）；app_task 调用
-// app 侧注册的 provider，用真实 dashboard_ui 渲染器 + 字体画到独立的离屏
-// framebuffer（绝不碰实屏 framebuffer），再按 4-bpp 行写入 admin 在 PSRAM 分配的
-// BMP 缓冲。任务对象由 shared_ptr 持有：httpd 等待超时后 app_task 仍可安全写完。
-// admin 不依赖 UI 头：渲染实现位于 main（见 app_main.cpp setRenderPreviewProvider）。
 
 #include <cstddef>
 #include <cstdint>

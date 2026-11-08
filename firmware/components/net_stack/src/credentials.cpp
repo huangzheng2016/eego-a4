@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// NVS 凭据存储实现（wifi/sec/source 命名空间，自管读写）。
 #include "net_stack/credentials.h"
 #include "net_stack/wifi_list.h"
 
@@ -16,7 +15,7 @@ static const char* TAG = "net.cred";
 static const char* kNsWifi = "wifi";
 static const char* kNsSec = "sec";
 static const char* kKeyCount = "count";
-constexpr size_t kMaxWifiAccounts = kMaxWifiNetworks;  // wifi_list.h：门户/admin/BLE 共用上限
+constexpr size_t kMaxWifiAccounts = kMaxWifiNetworks;
 
 esp_err_t CredentialStore::ensureNvs() {
   esp_err_t err = nvs_flash_init();
@@ -25,7 +24,7 @@ esp_err_t CredentialStore::ensureNvs() {
     ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_flash_erase());
     err = nvs_flash_init();
   }
-  if (err == ESP_ERR_INVALID_STATE) return ESP_OK;  // 已被其他组件初始化
+  if (err == ESP_ERR_INVALID_STATE) return ESP_OK;
   if (err != ESP_OK) ESP_LOGE(TAG, "nvs_flash_init failed: %s", esp_err_to_name(err));
   return err;
 }
@@ -34,7 +33,7 @@ size_t CredentialStore::loadWifiAccounts(std::vector<WifiAccount>& out) {
   out.clear();
   if (ensureNvs() != ESP_OK) return 0;
   nvs_handle_t h;
-  if (nvs_open(kNsWifi, NVS_READONLY, &h) != ESP_OK) return 0;  // 命名空间不存在 = 未配网
+  if (nvs_open(kNsWifi, NVS_READONLY, &h) != ESP_OK) return 0;
 
   uint8_t count = 0;
   nvs_get_u8(h, kKeyCount, &count);
@@ -67,7 +66,7 @@ esp_err_t CredentialStore::saveWifiAccounts(const std::vector<WifiAccount>& in) 
   esp_err_t err = nvs_open(kNsWifi, NVS_READWRITE, &h);
   if (err != ESP_OK) return err;
 
-  err = nvs_erase_all(h);  // 整命名空间重写，避免残留旧索引
+  err = nvs_erase_all(h);
   if (err == ESP_OK) {
     for (size_t i = 0; i < in.size() && err == ESP_OK; i++) {
       char key[16];
@@ -81,7 +80,6 @@ esp_err_t CredentialStore::saveWifiAccounts(const std::vector<WifiAccount>& in) 
   if (err == ESP_OK) err = nvs_set_u8(h, kKeyCount, (uint8_t)in.size());
   if (err == ESP_OK) err = nvs_commit(h);
   nvs_close(h);
-  // 只记条数，不记任何凭据内容（M13 日志边界）
   if (err == ESP_OK) ESP_LOGI(TAG, "wifi accounts saved: %u", (unsigned)in.size());
   else ESP_LOGE(TAG, "wifi accounts save failed: %s", esp_err_to_name(err));
   return err;

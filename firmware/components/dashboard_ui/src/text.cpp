@@ -9,7 +9,6 @@
 namespace eego::dashboard::ui {
 namespace {
 
-// 字号阶梯（与 panels.cpp / 设备页 TextStyle 一致）：说明 1x、正文 2x。
 constexpr int16_t kScaleCaption = 1;
 constexpr int16_t kScaleBody = 2;
 

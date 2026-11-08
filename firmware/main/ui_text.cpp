@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 中英文案表实现（见 ui_text.h）。
 #include "ui_text.h"
 
 #include <cctype>
@@ -7,9 +6,7 @@
 #include <strings.h>  // strcasecmp
 
 namespace panel {
-
 namespace {
-
 struct Entry {
   const char* zh;
   const char* en;

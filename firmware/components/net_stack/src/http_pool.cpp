@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// KeyedPool 会话池实现 —— 本翻译单元是 net_stack 内唯一调用
-// esp_http_client 的地方（net_task 单属主，M12 定稿）。
 #include "net_stack/http_pool.h"
 
 #include <algorithm>
@@ -16,20 +14,17 @@
 #include "esp_timer.h"
 
 namespace eego::net {
-
 static const char* TAG = "net.pool";
 static const char* kUserAgent = "eego-a4-alert-panel/1.0";
-// 小响应阈值：不超过此值直接放 std::string，超过则走 PSRAM 缓冲
 constexpr size_t kSmallBodyLimit = 4096;
 
 // ---------------------------------------------------------------------------
-// URL 解析（仅支持 http/https://host[:port]/path?query，不支持 userinfo）
 // ---------------------------------------------------------------------------
 struct ParsedUrl {
   std::string scheme;
   std::string host;
   uint16_t port = 0;
-  std::string path;  // "/path?query"，空则为 "/"
+  std::string path;
   bool valid = false;
 };
 
@@ -66,7 +61,6 @@ static ParsedUrl parseUrl(const std::string& url) {
 }
 
 // ---------------------------------------------------------------------------
-// NetResponse 所有权
 // ---------------------------------------------------------------------------
 NetRequest::~NetRequest() {
   for (auto& header : headers) {
@@ -120,14 +114,13 @@ struct HttpPool::Impl {
 
   PoolConfig cfg;
 
-  // 接收缓冲（每个会话一份；event_handler 经 user_data 绑定）
   struct RxBuf {
-    std::string small;   // ≤ kSmallBodyLimit 时的累积缓冲
-    char* ps = nullptr;  // PSRAM 缓冲
+    std::string small;
+    char* ps = nullptr;
     size_t len = 0;
     size_t cap = 0;
-    size_t init_cap = 64 * 1024;   // 来自 PoolConfig.rx_buf_init
-    size_t max_cap = 512 * 1024;   // 来自 PoolConfig.rx_buf_max
+    size_t init_cap = 64 * 1024;
+    size_t max_cap = 512 * 1024;
     bool use_ps = false;
     bool overflow = false;
     std::map<std::string, std::string>* headers = nullptr;
@@ -136,26 +129,21 @@ struct HttpPool::Impl {
   struct Session {
     esp_http_client_handle_t handle = nullptr;
     std::string key;       // scheme://host:port#verify
-    std::string host;      // 纯主机名（esp_http_client 的 host 不含端口）
+    std::string host;
     std::string scheme;
     uint16_t port = 0;
     bool tls_verify = true;
     int64_t last_used_ms = 0;
-    // 本会话已设置过的请求头键（小写）。esp_http_client 的头存活于 handle 整个
-    // 生命周期，跨请求粘连——每请求必须删除"上次设置但本次未设置"的头，
-    // 否则同 host 的 Authorization/条件 GET 校验器会泄漏给后续请求。
     std::set<std::string> req_headers;
     RxBuf rx;
   };
 
-  // 条件 GET 校验器：host+path → ETag/Last-Modified（会话重建后仍有效）
   struct Validator {
     std::string etag;
     std::string last_modified;
   };
   std::map<std::string, Validator> validators_;
 
-  // host 级节流：传输失败冷却 + 服务器拒绝分级退避
   struct HostState {
     int64_t transport_cooldown_until_ms = 0;
     int64_t server_cooldown_until_ms = 0;
@@ -176,7 +164,6 @@ struct HttpPool::Impl {
     return u.scheme + "://" + u.host + ":" + std::to_string(u.port);
   }
 
-  // 条件 GET 校验器键：scheme://host:port + path（跨会话/重建有效，http/https 不串）
   std::string validatorKey(const Session& s, const std::string& path) const {
     return s.scheme + "://" + s.host + ":" + std::to_string(s.port) + path;
   }
@@ -202,7 +189,6 @@ struct HttpPool::Impl {
 
   void evictLruIfFull() {
     if (sessions_.size() < cfg.max_sessions) return;
-    // 单属主模型下无"使用中"会话（execute 顺序执行），直接关最旧
     auto oldest = std::min_element(
         sessions_.begin(), sessions_.end(),
         [](const std::unique_ptr<Session>& a, const std::unique_ptr<Session>& b) {
@@ -244,7 +230,7 @@ struct HttpPool::Impl {
     switch (evt->event_id) {
       case HTTP_EVENT_ON_DATA:
         if (rx && evt->data_len > 0) {
-          if (rx->overflow) break;  // 已判溢出：丢弃后续数据，绝不静默累积
+          if (rx->overflow) break;
           if (rx->use_ps) {
             size_t need = rx->len + evt->data_len;
             if (need > rx->cap) {
@@ -266,12 +252,11 @@ struct HttpPool::Impl {
               memcpy(rx->ps + rx->len, evt->data, evt->data_len);
               rx->len += evt->data_len;
             } else {
-              rx->overflow = true;  // 到顶仍放不下：报错，绝不静默截断
+              rx->overflow = true;
             }
           } else {
             rx->small.append((const char*)evt->data, evt->data_len);
             if (rx->small.size() > kSmallBodyLimit) {
-              // 小响应升级 PSRAM（移动已有字节）
               rx->use_ps = true;
               rx->cap = rx->init_cap;
               rx->ps = (char*)heap_caps_malloc(rx->cap, MALLOC_CAP_SPIRAM);
@@ -306,7 +291,6 @@ struct HttpPool::Impl {
     return ESP_OK;
   }
 
-  // 单次执行（不重建）。返回的 resp.status==-1 表示传输级失败。
   NetResponse executeOnce(Session* s, const NetRequest& req, const ParsedUrl& u) {
     NetResponse resp;
     s->rx.headers = &resp.headers;
@@ -314,7 +298,6 @@ struct HttpPool::Impl {
     s->rx.len = 0;
     s->rx.overflow = false;
 
-    // 本次请求将设置的头键（小写）
     std::set<std::string> current_headers = {"user-agent", "accept"};
     for (const auto& h : req.headers) {
       std::string k = h.name;
@@ -332,9 +315,6 @@ struct HttpPool::Impl {
         if (!val->last_modified.empty()) current_headers.insert("if-modified-since");
       }
     }
-    // 删除"上次设置但本次未设置"的头：esp_http_client 的头随 handle 生命周期
-    // 粘连，不删则同 host 的 Authorization/条件 GET 校验器/自定义头会随
-    // keep-alive 会话泄漏给后续请求（跨源凭证卫生，review r1 P2）
     for (const auto& k : s->req_headers) {
       if (!current_headers.count(k)) esp_http_client_delete_header(s->handle, k.c_str());
     }
@@ -374,7 +354,6 @@ struct HttpPool::Impl {
     }
     resp.status = esp_http_client_get_status_code(s->handle);
 
-    // 完整性校验：Content-Length vs 实收（chunked 为 -1，跳过）
     int64_t clen = esp_http_client_get_content_length(s->handle);
     size_t received = s->rx.use_ps ? s->rx.len : s->rx.small.size();
     if (resp.status > 0 && clen > 0 && (int64_t)received < clen) {
@@ -392,7 +371,6 @@ struct HttpPool::Impl {
       return resp;
     }
 
-    // 条件 GET 校验器更新（2xx 才更新；304 沿用旧值）
     if (resp.status == 304) {
       resp.not_modified = true;
     } else if (resp.ok()) {
@@ -403,7 +381,6 @@ struct HttpPool::Impl {
         validators_[validatorKey(*s, u.path)] = std::move(v);
     }
 
-    // body 所有权转移
     if (s->rx.use_ps && s->rx.ps) {
       if (s->rx.len < s->rx.cap) s->rx.ps[s->rx.len] = '\0';
       resp.psbuf_ = s->rx.ps;
@@ -419,7 +396,6 @@ struct HttpPool::Impl {
 };
 
 // ---------------------------------------------------------------------------
-// HttpPool 公共接口
 // ---------------------------------------------------------------------------
 HttpPool::HttpPool(const PoolConfig& cfg) : impl_(std::make_unique<Impl>(cfg)) {}
 HttpPool::~HttpPool() {
@@ -437,7 +413,6 @@ NetResponse HttpPool::execute(const NetRequest& req) {
   const std::string hkey = impl_->hostKey(u);
   const int64_t now = Impl::nowMs();
 
-  // 主机级节流检查（传输冷却 / 服务器退避）
   auto hit = impl_->hosts_.find(hkey);
   if (hit != impl_->hosts_.end()) {
     const Impl::HostState& hs = hit->second;
@@ -459,7 +434,7 @@ NetResponse HttpPool::execute(const NetRequest& req) {
     impl_->evictLruIfFull();
     auto ns = std::make_unique<Impl::Session>();
     ns->key = skey;
-    ns->host = u.host;  // 纯主机名（端口走 esp_http_client_config_t.port）
+    ns->host = u.host;
     ns->scheme = u.scheme;
     ns->port = u.port;
     ns->tls_verify = req.tls_verify;
@@ -469,7 +444,6 @@ NetResponse HttpPool::execute(const NetRequest& req) {
   if (!s->handle && !impl_->openSession(s)) {
     resp.error = "session init failed";
     resp.status = -1;
-    // 从池中移除失败会话
     for (auto it = impl_->sessions_.begin(); it != impl_->sessions_.end(); ++it) {
       if (it->get() == s) {
         impl_->sessions_.erase(it);
@@ -481,7 +455,6 @@ NetResponse HttpPool::execute(const NetRequest& req) {
 
   resp = impl_->executeOnce(s, req, u);
 
-  // 传输级失败（非 overflow/不完整，那些已作废弃处理）：重建会话重试一次
   if (resp.status == -1 && !s->rx.overflow) {
     ESP_LOGW(TAG, "request failed (%s), rebuild session and retry once: %s",
              resp.error.c_str(), skey.c_str());
@@ -494,7 +467,6 @@ NetResponse HttpPool::execute(const NetRequest& req) {
     }
   }
 
-  // 会话作废条件：overflow / 响应不完整 / 传输重试后仍失败
   if (s->rx.overflow ||
       (resp.status == -1 && resp.error != "host cooldown (transport)" &&
        resp.error != "host backoff (server)")) {
@@ -505,12 +477,10 @@ NetResponse HttpPool::execute(const NetRequest& req) {
         break;
       }
     }
-    // 主机冷却 30s（传输失败）
     impl_->hosts_[hkey].transport_cooldown_until_ms = now + impl_->cfg.host_cooldown_ms;
     return resp;
   }
 
-  // 服务器拒绝分级退避：429/5xx → Retry-After 优先，否则 30s 起翻倍封顶 300s
   if (resp.status == 429 || resp.status >= 500) {
     Impl::HostState& hs = impl_->hosts_[hkey];
     int64_t cooldown = 30000;
@@ -525,7 +495,7 @@ NetResponse HttpPool::execute(const NetRequest& req) {
     ESP_LOGW(TAG, "host %s server backoff %lldms (status=%d)", hkey.c_str(),
              (long long)cooldown, resp.status);
   } else if (resp.status > 0) {
-    impl_->hosts_[hkey].server_backoff_level = 0;  // 收到正常响应即复位
+    impl_->hosts_[hkey].server_backoff_level = 0;
   }
   return resp;
 }

@@ -1,16 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 触控标定 NVS 持久化（见 touch_calibration_store.h）。
 #include "touch_calibration_store.h"
 
 #include "nvs.h"
 #include "nvs_flash.h"
 
 namespace eego::touchcal {
-
 namespace {
-
-// 触控在 NVS 初始化之前启动（board 启动合同）：这里幂等地确保 NVS 可用。
-// 分区需擦除等异常情况留给组合根（CredentialStore::ensureNvs）处理，此处只读失败。
 esp_err_t ensureNvs() {
   const esp_err_t err = nvs_flash_init();
   return err == ESP_ERR_INVALID_STATE ? ESP_OK : err;

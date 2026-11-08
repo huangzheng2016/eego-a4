@@ -1,28 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 触控仿射标定：映射、最小二乘拟合、合理性校验与持久化编码（纯逻辑，见头文件）。
 #include "touch_calibration.h"
 
 #include <cmath>
 #include <cstring>
 
 namespace eego::touchcal {
-
 namespace {
-
-// 出厂映射：x = rawY*551/680，y = (920-rawX)*767/920，公共分母 680*920。
 constexpr int32_t kDefaultDen = 680 * 920;                  // 625600
 constexpr int32_t kDefaultB = 551 * 920;                    // 506920
 constexpr int32_t kDefaultD = -767 * 680;                   // -521560
 constexpr int32_t kDefaultF = 920 * 767 * 680;              // 479835200
-constexpr double kScaleX0 = 551.0 / 680.0;                  // 逻辑 x / rawY
-constexpr double kScaleY0 = 767.0 / 920.0;                  // 逻辑 y / -rawX
-constexpr double kMaxScaleDeviation = 0.30;                 // 主轴缩放 ±30%
-constexpr double kMaxCrossRatio = 0.25;                     // 交叉项（旋转/错切）
-constexpr double kMaxCenterShiftPx = 160.0;                 // 屏幕中心平移
+constexpr double kScaleX0 = 551.0 / 680.0;
+constexpr double kScaleY0 = 767.0 / 920.0;
+constexpr double kMaxScaleDeviation = 0.30;
+constexpr double kMaxCrossRatio = 0.25;
+constexpr double kMaxCenterShiftPx = 160.0;
 constexpr int32_t kFitDen = 1 << 16;
-constexpr double kMinRawSpread = 60.0;                      // 各轴原始坐标标准差下限
-constexpr double kMinDecorrelation = 0.1;                   // det/(Sxx*Syy) 下限
-constexpr int kDuplicateRaw = 40;                           // 与上一点重合判定（raw 单位）
+constexpr double kMinRawSpread = 60.0;
+constexpr double kMinDecorrelation = 0.1;
+constexpr int kDuplicateRaw = 40;
 
 int64_t floorDiv(int64_t num, int64_t den) {
   int64_t q = num / den;
@@ -74,15 +70,14 @@ bool isDefault(const Affine& affine) { return sameAffine(affine, defaultAffine()
 bool plausible(const Affine& t) {
   if (t.den <= 0) return false;
   const double den = static_cast<double>(t.den);
-  const double a = t.a / den;  // x / rawX（交叉）
-  const double b = t.b / den;  // x / rawY（主轴）
-  const double d = t.d / den;  // y / rawX（主轴，负）
-  const double e = t.e / den;  // y / rawY（交叉）
+  const double a = t.a / den;
+  const double b = t.b / den;
+  const double d = t.d / den;
+  const double e = t.e / den;
   if (std::fabs(b / kScaleX0 - 1.0) > kMaxScaleDeviation) return false;
   if (std::fabs(-d / kScaleY0 - 1.0) > kMaxScaleDeviation) return false;
   if (std::fabs(a) > kMaxCrossRatio * kScaleX0) return false;
   if (std::fabs(e) > kMaxCrossRatio * kScaleY0) return false;
-  // 出厂映射下屏幕中心对应的原始点，经本标定后不应偏离中心太远。
   const double rawY = (kLogicalW / 2) / kScaleX0;
   const double rawX = 920.0 - (kLogicalH / 2) / kScaleY0;
   const double cx = a * rawX + b * rawY + t.c / den;
@@ -149,14 +144,12 @@ FitResult fit(const Pair* pairs, size_t count, double maxResidualPx) {
     result.error = FitError::Degenerate;
     return result;
   }
-  // 中心化正规方程：[sxx sxy; sxy syy] [p q]^T = [s*u ...]
   const double a = (sxu * syy - syu * sxy) / det;
   const double b = (syu * sxx - sxu * sxy) / det;
   const double c = mu - a * mx - b * my;
   const double d = (sxv * syy - syv * sxy) / det;
   const double e = (syv * sxx - sxv * sxy) / det;
   const double f = mv - d * mx - e * my;
-  // 映射用 floor：常数项 +0.5 使整数化结果为四舍五入。
   const double scale = static_cast<double>(kFitDen);
   const double coeffs[6] = {a * scale, b * scale, (c + 0.5) * scale,
                             d * scale, e * scale, (f + 0.5) * scale};

@@ -1,18 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 统一时间源实现 —— 见 time_source.h。
 #include "time_source.h"
 
 #include <ctime>
 #include <sys/time.h>
 
-#include "net_stack/time_sync.h"  // eego::net::kPlausibleUnixFloor（共享下限）
+#include "net_stack/time_sync.h"
 #include "pcf8563_rtc.h"
 
 namespace panel {
-
 namespace {
-
-// RTC 句柄（无状态驱动对象；legacy I2C 端口级锁保证跨任务共享安全）
 eego::Pcf8563Rtc& timeRtc() {
   static eego::Pcf8563Rtc inst(I2C_NUM_0);
   return inst;
@@ -25,7 +21,7 @@ uint64_t TimeSource::now() {
   if (sys >= eego::net::kPlausibleUnixFloor) return sys;
   const eego::RtcTime t = timeRtc().readTime();
   if (t.valid) return static_cast<uint64_t>(timeRtc().toEpoch(t));
-  return sys;  // 退化值（0 附近）；调用方以 valid() 判定，不得当作有效时间
+  return sys;
 }
 
 bool TimeSource::valid() {
@@ -56,7 +52,7 @@ bool TimeSource::writeRtc(uint64_t unix_now) {
   rt.hour = static_cast<uint8_t>(tm_buf.tm_hour);
   rt.minute = static_cast<uint8_t>(tm_buf.tm_min);
   rt.second = static_cast<uint8_t>(tm_buf.tm_sec);
-  rt.weekday = static_cast<uint8_t>(tm_buf.tm_wday);  // 0=周日（与 RtcTime 约定一致）
+  rt.weekday = static_cast<uint8_t>(tm_buf.tm_wday);
   rt.valid = true;
   return timeRtc().writeTime(rt) == ESP_OK;
 }

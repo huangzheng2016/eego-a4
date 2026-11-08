@@ -4,9 +4,7 @@
 #include <cstdlib>
 
 namespace eego {
-
 namespace {
-
 int absolute(int value) { return value < 0 ? -value : value; }
 
 }  // namespace
@@ -123,7 +121,6 @@ std::vector<ButtonEvent> ButtonGestureFsm::sample(ButtonId id, bool pressed,
     return out;
   }
   if (!doublePressEnabled(id)) {
-    // 无双击绑定（或 Power）：立即发出短按，不引入 280ms 延迟
     current.pending_short_deadline_us = 0;
     out.push_back({id, ButtonAction::ShortPress, now_us});
     return out;
@@ -271,7 +268,6 @@ std::vector<TouchEvent> TouchGestureFsm::sample(TouchContact contact, uint16_t x
         absolute(static_cast<int>(y) - static_cast<int>(start_y_)) > kTouchSlopPx) {
       moved_ = true;
     }
-    // 只在越过 slop 后发 Move：slop 内的抖动不应取消点按或长按
     if (moved_) out.push_back({TouchEventType::Move, x, y, now_us});
   }
   expireHold(now_us, out);

@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
-// font_manager.cpp — 字体管理器实现
 #include "font_manager.h"
 
 #include <cstring>
@@ -14,7 +12,6 @@
 #include "sd_card.h"
 
 namespace eego {
-
 static const char* TAG = "eego.fontmgr";
 
 FontManager& FontManager::instance() {
@@ -47,8 +44,7 @@ FontFormat FontManager::detectFormat(const char* path) {
     uint8_t magic[8] = {};
     size_t n = fread(magic, 1, sizeof(magic), f);
     fclose(f);
-    if (n < 6) return FontFormat::EdcbookBin;  // 太短，按 .bin 处理（会加载失败）
-    // EEFONT / CPFONT → CPFONT v4；其他 → EDCBook .bin
+    if (n < 6) return FontFormat::EdcbookBin;
     if (memcmp(magic, "EEFONT", 6) == 0 || memcmp(magic, "CPFONT", 6) == 0) {
         return FontFormat::CpFontV4;
     }
@@ -57,7 +53,6 @@ FontFormat FontManager::detectFormat(const char* path) {
 
 bool FontManager::loadInto(const char* path, FontFormat& fmtOut,
                            EdcFont*& edcOut, CpFontRenderer*& cpOut) {
-    // 释放旧实例
     if (edcOut) { delete edcOut; edcOut = nullptr; }
     if (cpOut)  { delete cpOut;  cpOut = nullptr; }
     fmtOut = FontFormat::Unknown;
@@ -123,7 +118,6 @@ void FontManager::drawText(PortraitCanvas& canvas, int16_t x, int16_t y,
     } else if (uiFmt_ == FontFormat::EdcbookBin && uiEdc_) {
         uiEdc_->drawText(canvas, utf8, x, y, scale, bold);
     } else {
-        // 未加载 SD 字体：内置 5x7 ASCII 回退字体（保证面板始终可显示文字）
         fallbackDrawText(canvas, x, y, utf8, scale, 0);
         if (bold) fallbackDrawText(canvas, x + 1, y, utf8, scale, 0);
     }
@@ -166,9 +160,8 @@ int16_t FontManager::uiFontAscender() const {
         if (ascender > 0) return ascender;
         return (int16_t)(uiCp_->fontHeight() * 4 / 5);
     }
-    // EDCBook 以 cell 顶部为原点，无显式 ascender：按行高 4/5 近似。
     if (uiFmt_ == FontFormat::EdcbookBin && uiEdc_) return (int16_t)(uiEdc_->fontHeight() * 4 / 5);
-    return FALLBACK_GLYPH_H;  // 5x7 回退字体无下行部，基线即 cell 底部
+    return FALLBACK_GLYPH_H;
 }
 
 int16_t FontManager::bodyFontHeight() const {

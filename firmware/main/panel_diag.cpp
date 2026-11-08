@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// diag 串口命令钩子实现（app_task 上下文；由 app_main 注册到 diag::Handlers）。
 //
-// secrets 边界：本文件只输出状态/计数/标识（ssid、源 id、告警标题截断），
-// 绝不读取/打印 WiFi 密码、管理密码、ingest key、token 或 config 全文。
 #include "panel_app.h"
 
 #include <cstdio>
@@ -21,9 +18,7 @@
 namespace admin = eego::admin;
 
 namespace panel {
-
 namespace {
-
 void printOk(bool ok) { printf("[%s] ", ok ? "PASS" : "FAIL"); }
 
 const char* pageName(Page p) {
@@ -59,7 +54,6 @@ void PanelApp::diagBattery() {
   const eego::BatteryInfo bat = eego::PowerManager::instance().readBattery();
   printf("battery: %u mV, %u%%, charging=%d\n", bat.millivolts, bat.percent,
          bat.charging ? 1 : 0);
-  // 电池模式跨深睡状态（硬件测试：唤醒次数/失败退避/上次刷屏/快连缓存）。
   const battery::RtcState& rtc = battery::rtcState();
   printf("battery-mode: wake=%s wakes=%u failures=%u frame_valid=%d refreshed=%llu "
          "full=%llu fast_since_full=%u bucket=%d ap=%d ch=%u\n",
@@ -79,7 +73,6 @@ void PanelApp::diagRtc() {
     printf("rtc: %04u-%02u-%02u %02u:%02u:%02u wday=%u valid=%d\n", t.year, t.month, t.day,
            t.hour, t.minute, t.second, t.weekday, t.valid ? 1 : 0);
   }
-  // 统一时间源状态（M21）：net_task 快照（含 SNTP 同步状态）+ 本地判定
   const eego::net::NetStatusSnapshot& ns = netStatus();
   printf("time: valid=%d now=%llu sntp_synced=%d last_sync_at=%llu\n", ns.time.valid ? 1 : 0,
          static_cast<unsigned long long>(ns.time.now), ns.time.sntp_synced ? 1 : 0,
@@ -117,7 +110,6 @@ void PanelApp::diagNet() {
          static_cast<unsigned>(ns.alert_db.records), static_cast<unsigned>(ns.alert_db.file_bytes),
          static_cast<unsigned>(ns.alert_db.compactions),
          static_cast<unsigned>(ns.alert_db.io_failures));
-  // 数据源状态属于 dashboard（唯一取数模型）：见 `dashboard status`。
   for (const DashboardSourceInfo& src : dashboard_.sources()) {
     printf("  source %s enabled=%d data=%d offline=%d fail=%u http=%d\n", src.id.c_str(),
            src.enabled ? 1 : 0, src.has_data ? 1 : 0, src.offline ? 1 : 0,
@@ -162,7 +154,6 @@ void PanelApp::diagInject(const char* json) {
     printf("ERR inject: %s.%s\n", err.field.c_str(), err.message.c_str());
     return;
   }
-  // 只入队：net_task 在 AlertStore 上下文执行摄入（M12 单属主模型）
   const alert_core::AlertSource src{alert_core::kSourceKindSerialInject,
                                     alert_core::kSourceKindSerialInject, "uart0"};
   const bool ok = eego::net::NetStack::instance().ingestExternal(events, src);
@@ -191,7 +182,6 @@ void PanelApp::diagSmoke() {
     }
   };
 
-  // 1. 显示 + 灰阶链路（视觉确认：四级灰条 + 全量刷新）
   check(deps_.boot.displayReady, "display", deps_.boot.displayReady ? "ready" : "not ready");
   if (deps_.boot.displayReady && deps_.canvas != nullptr) {
     eego::PortraitCanvas& c = *deps_.canvas;
@@ -206,10 +196,9 @@ void PanelApp::diagSmoke() {
     c.waitRefreshComplete();
     printf("[PASS] display-gray: 4 gray bars drawn (visual check, full refresh)\n");
     pass++;
-    markDirty(true);  // 恢复当前页
+    markDirty(true);
   }
 
-  // 2. 字体
   const bool fontLoaded = eego::FontManager::instance().uiLoaded();
   if (fontLoaded) {
     check(true, "font", "SD font loaded");
@@ -219,7 +208,6 @@ void PanelApp::diagSmoke() {
     warn++;
   }
 
-  // 3. SD 读写
   eego::SdCard& sd = eego::SdCard::instance();
   if (sd.ready()) {
     static const char kSmokePath[] = "/alertpanel/.smoke";
@@ -245,7 +233,6 @@ void PanelApp::diagSmoke() {
     check(true, "rtc", "time valid");
   }
 
-  // 5. 快照链路（publisher → net_task 发布）
   if (deps_.publisher != nullptr) {
     auto snap = deps_.publisher->acquire();
     check(snap != nullptr, "snapshot", snap ? "published" : "never published");
@@ -253,15 +240,12 @@ void PanelApp::diagSmoke() {
     check(false, "snapshot", "publisher not wired");
   }
 
-  // 6. net_task 查询链路
   const eego::net::NetStatusSnapshot& ns = netStatus();
   check(ns.running, "net", ns.running ? "net_task running" : "net_task not running");
 
-  // 7. 配置
   check(admin::ConfigStore::instance().valid(), "config",
         admin::ConfigStore::instance().valid() ? "config.json valid" : "config invalid/bak");
 
-  // 8. DeviceSettings 快照 + store 静音规则数
   std::vector<alert_core::MuteRule> mute_rules;
   eego::net::NetStack::instance().queryMuteRules(mute_rules);
   printf("[PASS] settings: lang=%s pmode=%d battery=%umin/stale %umin mute_rules=%u\n",

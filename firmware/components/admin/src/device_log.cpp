@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 调试日志环形缓冲 + coredump 崩溃摘要 —— 见 include/admin/device_log.h。
 #include "admin/device_log.h"
 
 #include <cstdarg>
@@ -22,20 +21,17 @@
 #endif
 
 namespace eego::admin::devlog {
-
 namespace {
-
 constexpr char kTag[] = "devlog";
 constexpr size_t kRingBytes = 32 * 1024;  // PSRAM
 
 vprintf_like_t g_prev = nullptr;
 SemaphoreHandle_t g_mutex = nullptr;
 char* g_ring = nullptr;
-size_t g_head = 0;  // 下一个写入位置
+size_t g_head = 0;
 bool g_wrapped = false;
-char g_line[256];  // 受 g_mutex 保护
+char g_line[256];
 
-// 日志级别字母：跳过可能的 ANSI 颜色前缀 "\033[0;31m"。
 char levelOf(const char* fmt) {
   if (fmt == nullptr) return 0;
   if (fmt[0] == '\033') {
@@ -48,7 +44,7 @@ char levelOf(const char* fmt) {
 void appendLocked(const char* text, size_t n) {
   for (size_t i = 0; i < n; i++) {
     const char c = text[i];
-    if (c == '\033') {  // 去掉颜色转义
+    if (c == '\033') {
       while (i < n && text[i] != 'm') i++;
       continue;
     }
@@ -65,7 +61,6 @@ int hook(const char* fmt, va_list ap) {
   va_copy(copy, ap);
   const int r = g_prev != nullptr ? g_prev(fmt, ap) : vprintf(fmt, ap);
   const char lv = levelOf(fmt);
-  // ISR 内不能取互斥量；忙时直接跳过这一行（串口仍有）。
   if ((lv == 'E' || lv == 'W' || lv == 'I') && g_ring != nullptr && !xPortInIsrContext() &&
       xSemaphoreTake(g_mutex, 0) == pdTRUE) {
     const int n = vsnprintf(g_line, sizeof(g_line), fmt, copy);
@@ -107,7 +102,6 @@ void appendHex(std::string& out, uint32_t v) {
   out += b;
 }
 
-// 分配失败：记下大小、请求的内存类型和当时的余量（不分配内存，只格式化到静态缓冲）。
 void onAllocFailed(size_t size, uint32_t caps, const char* function) {
   ESP_LOGE(kTag, "alloc failed: %u bytes caps=0x%lx in %s; internal free=%u largest=%u, psram free=%u",
            static_cast<unsigned>(size), static_cast<unsigned long>(caps), function ? function : "?",
@@ -136,9 +130,7 @@ void install() {
   }
   g_prev = esp_log_set_vprintf(&hook);
   heap_caps_register_failed_alloc_callback(&onAllocFailed);
-  // WiFi 驱动在弱信号下每 100 ms 打一行 "m f null"，会冲掉有用的日志；连接状态由 net.wifi 记录。
   esp_log_level_set("wifi", ESP_LOG_ERROR);
-  // 每分钟记一次内存水位，崩溃前的趋势可在「设备调试日志」里看到。
   const esp_timer_create_args_t args = {.callback = &logHeap, .arg = nullptr,
                                         .dispatch_method = ESP_TIMER_TASK, .name = "devlog_heap",
                                         .skip_unhandled_events = true};
@@ -158,7 +150,6 @@ std::string tail(size_t max_bytes) {
   const size_t start = (g_head + kRingBytes - n) % kRingBytes;
   for (size_t i = 0; i < n; i++) out.push_back(g_ring[(start + i) % kRingBytes]);
   xSemaphoreGive(g_mutex);
-  // 从第一个完整行开始
   if (n == max_bytes) {
     const size_t nl = out.find('\n');
     if (nl != std::string::npos) out.erase(0, nl + 1);

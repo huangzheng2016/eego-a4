@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// 面板界面中英文案（M11：界面中英双语；默认中文，S4 设置/串口 lang 切换）。
 //
-// 使用：tr(Str::Xxx) 按当前语言返回静态字符串（生命周期永久，勿 free）。
-// 新增文案：在 PANEL_STR_LIST 加一行 X(键, 中文, 英文)，枚举与表自动同步。
-// 含 printf 占位符（%u/%s）的词条在两种语言中占位符顺序必须一致。
 
 #include <cstdint>
 
@@ -16,7 +12,6 @@ enum class Lang : uint8_t {
   En = 1,
 };
 
-// X(键, 中文, English)
 #define PANEL_STR_LIST(X) \
   X(PageDetail, "告警详情", "ALERT") \
   X(PageStatus, "设备状态", "STATUS") \
@@ -321,14 +316,11 @@ enum class Str : uint16_t {  // >255 entries possible
 #undef X
 };
 
-// 当前界面语言（默认中文）。切换后由调用方触发整页重绘。
 Lang currentLang();
 void setLang(Lang lang);
 
-// 按当前语言取词条。越界键返回空串（防御；编译期枚举不会越界）。
 const char* tr(Str s);
 
-// "zh"|"en"（大小写不敏感）→ Lang；失败返回 false。
 bool langFromString(const char* s, Lang& out);
 const char* langCode(Lang lang);
 

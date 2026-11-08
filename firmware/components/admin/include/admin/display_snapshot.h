@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// GET /api/v1/display/snapshot.bmp —— 当前墨水屏帧（portrait 552×768，1-bpp BMP）。
-// admin 不依赖 UI/显示驱动：由 app 侧注册一个 provider，把当前帧按 portrait
-// 方向打包成 1-bpp 行写入 admin 在 PSRAM 中分配的缓冲区。
 
 #include <cstddef>
 #include <cstdint>

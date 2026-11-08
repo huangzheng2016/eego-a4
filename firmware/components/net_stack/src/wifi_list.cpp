@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// WiFi 网络列表纯逻辑（见 wifi_list.h）。不得输出任何密码。
 #include "net_stack/wifi_list.h"
 
 #include <cstring>
@@ -32,11 +31,11 @@ bool seedWifiDefaults(std::vector<WifiAccount>& stored, const WifiDefault* defau
     }
     result.push_back(std::move(account));
   }
-  if (result.empty()) return false;  // 无有效默认值：不动 NVS
+  if (result.empty()) return false;
   const size_t default_count = result.size();
   if (!replace) {
     for (const auto& account : stored) {
-      if (result.size() >= kMaxWifiNetworks) break;  // 末尾（最低优先级）的非默认网络被丢弃
+      if (result.size() >= kMaxWifiNetworks) break;
       bool is_default = false;
       for (size_t i = 0; i < default_count; i++) is_default = is_default || result[i].ssid == account.ssid;
       if (!is_default) result.push_back(account);
@@ -55,8 +54,6 @@ bool seedWifiDefaults(std::vector<WifiAccount>& stored, const WifiDefault* defau
   return true;
 }
 
-// ---- 诊断：原因码 / 认证方式 ----------------------------------------------------
-// 数值取自 ESP-IDF v5.5 esp_wifi_types_generic.h wifi_err_reason_t（纯数值，主机可测）。
 
 const char* wifiReasonName(uint8_t reason) {
   switch (reason) {
@@ -154,7 +151,6 @@ const char* wifiReasonShort(uint8_t reason, bool english) {
   }
 }
 
-// wifi_auth_mode_t（v5.5）：0 OPEN … 13 DPP；更新的枚举值统一 OTHER。
 const char* wifiAuthModeName(int authmode) {
   switch (authmode) {
     case 0: return "OPEN";
@@ -175,7 +171,6 @@ const char* wifiAuthModeName(int authmode) {
   }
 }
 
-// ---- 诊断：离线记录 ----------------------------------------------------------------
 
 const char* wifiAttemptResultName(WifiAttemptResult r) {
   switch (r) {
@@ -202,7 +197,7 @@ void WifiDiagLog::applySeen(WifiNetworkDiag& n) const {
   n.authmode = -1;
   for (const auto& e : snap_.scan) {
     if (e.ssid != n.ssid) continue;
-    n.seen = true;  // scan 已按信号降序：首个即最强
+    n.seen = true;
     n.rssi = e.rssi;
     n.channel = e.channel;
     n.authmode = e.authmode;
@@ -228,7 +223,7 @@ void WifiDiagLog::recordScan(bool ok, std::vector<WifiScanEntry> entries, int64_
   snap_.scan_ok = ok;
   std::vector<WifiScanEntry> merged;
   for (auto& e : entries) {
-    if (e.ssid.empty()) continue;  // 隐藏 SSID
+    if (e.ssid.empty()) continue;
     bool dup = false;
     for (auto& m : merged) {
       if (m.ssid != e.ssid) continue;
@@ -238,7 +233,6 @@ void WifiDiagLog::recordScan(bool ok, std::vector<WifiScanEntry> entries, int64_
     }
     if (!dup) merged.push_back(std::move(e));
   }
-  // 插入排序（≤ 几十条）：信号降序，稳定。
   for (size_t i = 1; i < merged.size(); i++) {
     for (size_t j = i; j > 0 && merged[j].rssi > merged[j - 1].rssi; j--) {
       std::swap(merged[j], merged[j - 1]);
@@ -372,7 +366,6 @@ bool WifiReconnectScheduler::driverRestartDue(int64_t now) const {
   return now - since >= kWifiDriverRestartMs;
 }
 
-// ---- 信号质量 / 链路统计 / 漫游 ------------------------------------------------
 
 WifiSignal wifiSignalQuality(int rssi) {
   if (rssi >= 0) return WifiSignal::None;
@@ -432,7 +425,7 @@ WifiLinkSummary WifiLinkStats::summary(int64_t now) const {
   int64_t newest = -1;
   for (size_t i = 0; i < count_; i++) {
     const Sample& s = ring_[(head_ + kCap - 1 - i) % kCap];
-    if (now - s.at > kWifiLinkWindowMs) break;  // 由新到旧，越界即止
+    if (now - s.at > kWifiLinkWindowMs) break;
     if (out.samples == 0 || s.rssi < out.min) out.min = s.rssi;
     if (s.at > newest) {
       newest = s.at;
@@ -442,7 +435,6 @@ WifiLinkSummary WifiLinkStats::summary(int64_t now) const {
     out.samples++;
   }
   if (out.samples > 0) {
-    // 向零取整的负数平均会偏乐观：按四舍五入。
     const int n = static_cast<int>(out.samples);
     out.avg = static_cast<int8_t>((sum - n / 2) / n);
   }

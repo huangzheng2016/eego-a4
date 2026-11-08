@@ -33,7 +33,6 @@ interface SecretFieldProps {
   reloadCreds: () => Promise<void>;
   /** Suggested key for a new credential. */
   suggest: string;
-  /** Label for the secret ("令牌" / "请求头的值"). */
   secretLabel: string;
   compact?: boolean;
   /** Reports whether a typed-but-unsaved secret is pending. */

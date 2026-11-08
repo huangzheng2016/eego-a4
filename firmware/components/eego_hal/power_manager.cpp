@@ -1,7 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
-// EEGO A4 电源管理实现 — GPIO4 锁存 + 电池 ADC + 充电状态
-// 纯 ESP-IDF v5.x，使用 adc_oneshot + adc_cali_scheme (curve_fitting)
 #include "power_manager.h"
 #include "frontlight.h"
 
@@ -21,14 +18,12 @@
 static const char* PM_TAG = "eego_pm";
 
 namespace eego {
-
 PowerManager& PowerManager::instance() {
     static PowerManager inst;
     return inst;
 }
 
 void PowerManager::holdPower() {
-    // GPIO4 电源锁存 — 系统启动后首项硬件操作
     gpio_config_t io_conf;
     memset(&io_conf, 0, sizeof(io_conf));
     io_conf.pin_bit_mask = (1ULL << POWER_LATCH);
@@ -38,11 +33,8 @@ void PowerManager::holdPower() {
     io_conf.intr_type = GPIO_INTR_DISABLE;
     gpio_config(&io_conf);
 
-    // 先解除 hold 才能驱动引脚
     gpio_hold_dis(static_cast<gpio_num_t>(POWER_LATCH));
-    // 拉高锁存电源
     gpio_set_level(static_cast<gpio_num_t>(POWER_LATCH), 1);
-    // 锁存引脚状态，保证轻睡/深睡期间不断电
     gpio_hold_en(static_cast<gpio_num_t>(POWER_LATCH));
     gpio_deep_sleep_hold_en();
 
@@ -71,7 +63,6 @@ void PowerManager::initAdc() {
         ESP_LOGE(PM_TAG, "ADC channel config failed: %s", esp_err_to_name(err));
     }
 
-    // 校准 — ESP32-S3 仅支持 curve fitting
     adc_cali_curve_fitting_config_t caliCfg;
     memset(&caliCfg, 0, sizeof(caliCfg));
     caliCfg.unit_id = ADC_UNIT_1;
@@ -86,23 +77,17 @@ void PowerManager::initAdc() {
 }
 
 void PowerManager::detectLm3630a() {
-    // 读取 FrontlightManager 缓存的前光存在性（首次探测由 FrontlightManager
-    // 完成并缓存，此处非破坏性读取，不再 toggle GPIO12，避免关闭前光）
     lm3630aPresent_ = FrontlightManager::instance().lm3630aChipPresent();
     configureChargePin();
 }
 
 void PowerManager::configureChargePin() {
-    // Auto：LM3630A 在位 → 充电状态 active-high（INPUT_PULLDOWN），
-    //       不在位 → active-low（INPUT_PULLUP）。这只是经验规则，个别批次相反，
-    //       由 setChargePolarity（设置 charge_signal）覆盖。
     switch (chargePolarity_) {
         case ChargePolarity::ActiveHigh: chargeActiveHigh_ = true; break;
         case ChargePolarity::ActiveLow: chargeActiveHigh_ = false; break;
         case ChargePolarity::Auto: chargeActiveHigh_ = lm3630aPresent_; break;
     }
 
-    // 配置 GPIO11 充电状态引脚
     gpio_config_t io_conf;
     memset(&io_conf, 0, sizeof(io_conf));
     io_conf.pin_bit_mask = (1ULL << CHARGE_STATUS);
@@ -138,7 +123,6 @@ void PowerManager::ensureInitialized() {
 }
 
 uint8_t PowerManager::percentFromMillivolts(uint16_t mv) {
-    // Li-ion 放电曲线（电压→百分比），线性插值
     // 3.00V→0%, 3.70V→20%, 3.80V→50%, 4.00V→80%, 4.10V→100%
     if (mv >= 4100) return 100;
     if (mv <= 3000) return 0;
@@ -174,7 +158,6 @@ BatteryInfo PowerManager::readBattery() {
 
     if (!adcUnit_) return info;
 
-    // 采样多次取平均，降低噪声
     int rawSum = 0;
     const int samples = 4;
     for (int i = 0; i < samples; i++) {
@@ -190,11 +173,9 @@ BatteryInfo PowerManager::readBattery() {
     if (adcCali_) {
         adc_cali_raw_to_voltage(adcCali_, avgRaw, &adcMv);
     } else {
-        // 无校准时粗略换算：12bit @ 11dB 衰减 → 0~3.3V 范围
         adcMv = static_cast<int>(static_cast<float>(avgRaw) * 3300.0f / 4095.0f);
     }
 
-    // 实际电池电压 = ADC 毫伏 × 分压系数
     info.millivolts = static_cast<uint16_t>(
         static_cast<float>(adcMv) * BATTERY_DIVIDER);
     info.percent = percentFromMillivolts(info.millivolts);
@@ -209,8 +190,6 @@ bool PowerManager::isCharging() {
     ensureInitialized();
 
     int level = gpio_get_level(static_cast<gpio_num_t>(CHARGE_STATUS));
-    // active-high: 充电时 HIGH
-    // active-low:  充电时 LOW
     return chargeActiveHigh_ ? (level == 1) : (level == 0);
 }
 

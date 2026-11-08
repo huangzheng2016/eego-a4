@@ -1,4 +1,3 @@
-// "设备实时画面": GET /display/snapshot.bmp (1-bit 552×768) shown in a device
 // frame. Fetched only on demand (Refresh), a few seconds after every successful
 // apply (the e-ink refresh takes a moment) and, opt-in, every 30 s — opening the
 // tab does not download a frame. With several

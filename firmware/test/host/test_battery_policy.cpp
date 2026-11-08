@@ -11,7 +11,6 @@
 using namespace panel::battery;
 
 namespace {
-
 // 2026-10-25 02:00:00 UTC (= 10:00:00 at UTC+8).
 constexpr uint64_t kBase = 1792893600ULL;
 constexpr uint64_t kMinS = 60;
@@ -283,7 +282,7 @@ TEST(battery_policy, rtc_state_checksum) {
   s.consecutive_failures = 3;
   CHECK(!rtcValid(s));
   rtcSeal(s);
-  CHECK_EQ(s.manual_sleep, 0);  // 电源键休眠标志默认关
+  CHECK_EQ(s.manual_sleep, 0);
   s.manual_sleep = 1;
   CHECK(!rtcValid(s));
   rtcSeal(s);

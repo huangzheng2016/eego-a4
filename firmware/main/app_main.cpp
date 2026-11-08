@@ -1,36 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// EEGO A4 监控面板 —— 组合根。产品模型：web 端配置的 dashboard 是唯一主界面；
-// dashboard 数据源（data_pipeline）是唯一取数路径；外部告警经 POST /alerts 推送
-// 进入 alert_core store（ack/静音/持久化），再作为 dashboard 事件呈现。
 //
-// 启动流程（顺序即接线合同，M12 架构）：
-//   1. board::beginStandardHardware() 板级启动合同（GPIO4 锁存 → 触控/按键 →
-//      前光探测 → 充电极性 → RTC → SD → 显示）
-//   2. 统一时间源启动同步：RTC 有效 → settimeofday 设置系统时间（M21；
-//      SNTP 前的 TLS/日志/摄入都依赖系统时间）
-//   3. NVS（CredentialStore::ensureNvs）+ AuthManager + ConfigStore(config.json)
-//      + 类型覆盖应用到注册表 + AdminLog（级别取 admin.log_level）
-//   4. 字体：admin.font 指定路径 > SD 卡首个 .eefont/.bin > 内置 5x7 回退
-//   5. 外部告警库：SdAlertFileIo + AlertDb(/sdcard/alertpanel/alerts.db) →
-//      AlertStore.loadFrom 恢复 → 有死行即压缩 → attachDb（此后 store 写只在
-//      net_task；net_task 按节拍检查大小/死行再压缩）
-//   6. NetStack::start（注入 SnapshotPublisher/统一时间源/RTC 回写；expire
-//      巡检与首帧快照发布由 net_task 承担）→ 恢复静音规则（config.mute_rules）
-//   7. admin 注入：快照源/动作 sink（薄适配）/命令处理器/事件回调
-//   8. 模式判定：无管理密码 → 配网门户 + UI 配网页；否则 startAdminApi
-//   9. diag::start（串口命令钩子全部在 app_task 上下文执行）+ PanelApp.begin
 //
-// app_task 主循环（唯一 UI 属主）：
-//   排空触控队列（eego_touch 任务 10ms 采样）+ 按键队列，按时间戳归并 →
-//   diag::service → admin::serviceCommands(0) → app.service()（事件归并/电源
-//   FSM/按需渲染）→ 等待输入唤醒信号量（最长 kIdleWaitMs）
 //
-// 电池定时唤醒快速路径（battery_mode.h / README「电池模式」）：跳过触控固件上传、
-// 开机白屏、BLE、管理 API、串口诊断与 alerts.db 启动压缩；显示控制器推迟到真正
-// 需要刷新时才上电；WiFi 用 RTC 内存中的 BSSID/信道快连。外接电源或有人按键时
-// esp_restart() 以完整应用重启（RTC 状态保持、面板不清屏）。
 //
-// 串口诊断入口：USB Serial/JTAG 115200，输入 help 查看命令。
 
 #include "atomic_file.h"
 #include "battery_mode.h"
@@ -83,10 +55,7 @@ namespace {
 
 const char* TAG = "app";
 
-// 无输入时主循环的最长休眠；触控/按键任务入队后 give 唤醒信号量立即唤醒。
-// 至少 1 tick（100Hz tick 下 pdMS_TO_TICKS(8)==0 会退化为忙等并饿死 idle 任务）。
 constexpr uint32_t kIdleWaitMs = 20;
-// 同步触控模式（采样任务未启动）时须每 tick 轮询一次。
 constexpr uint32_t kSyncTouchPollMs = 10;
 constexpr size_t kMaxTouchEventsPerLoop = 64;
 
@@ -119,9 +88,6 @@ eego::ChargePolarity toChargePolarity(eego::settings::ChargeSignal mode) {
   return eego::ChargePolarity::Auto;
 }
 
-// frontlight_hardware 覆盖热生效：更新 FrontlightManager 与 capabilities.frontlight
-// （web admin 依 capability 门控前光字段）。回调在 DeviceSettings::update 调用者
-// 上下文（app_task）执行，update 已释放设置互斥后才通知。
 void onDeviceSettingsChanged(const eego::settings::Settings& values, uint32_t changed,
                              void* ctx) {
   (void)ctx;
@@ -143,10 +109,6 @@ void onDeviceSettingsChanged(const eego::settings::Settings& values, uint32_t ch
   }
 }
 
-// ── 编译期默认凭据（gitignored local_secrets.h；模板见 local_secrets.example.h）──
-// WiFi：每次启动确保默认网络存在、密码为编译期值且按列表顺序排在最前（其余已存
-// 网络保持顺序跟在后面；定义 EEGO_LOCAL_WIFI_REPLACE 时只保留默认网络）；
-// 管理密码：仅在尚未设置时写入。非法值在编译期即报错。
 #if defined(EEGO_LOCAL_WIFI_LIST)
 constexpr eego::net::WifiDefault kLocalWifiDefaults[] = EEGO_LOCAL_WIFI_LIST;
 #elif defined(EEGO_LOCAL_WIFI_SSID)
@@ -169,7 +131,6 @@ static_assert(eego::net::wifiCstrLen(EEGO_LOCAL_ADMIN_PASSWORD) >= 8 &&
 #endif
 
 #if defined(EEGO_HAS_LOCAL_WIFI) || defined(EEGO_LOCAL_ADMIN_PASSWORD)
-// 在 ConfigStore 初始化之后调用：播种 WiFi 时同步 config admin.wifi_list 展示引用。
 void seedLocalCredentials(admin::ConfigStore& config) {
   (void)config;
 #ifdef EEGO_HAS_LOCAL_WIFI
@@ -219,7 +180,6 @@ void seedLocalCredentials(admin::ConfigStore& config) {
 }
 #endif
 
-// 串口 `wifi [scan|retry]`：已存网络的最近尝试/结果/原因码 + 最近扫描（只打 SSID，不打密码）。
 void diagWifi(const char* arg) {
   eego::net::WifiManager& wifi = eego::net::WifiManager::instance();
   if (arg != nullptr && strcmp(arg, "retry") == 0) {
@@ -281,7 +241,6 @@ void diagWifi(const char* arg) {
   }
 }
 
-// ── 组合根持有的长生命周期对象（store/registry/publisher 必须 outlive NetStack）──
 
 eego::Uc8279cDisplay display;
 eego::Gslx680Touch touch;
@@ -291,7 +250,6 @@ eego::board::BootStatus bootStatus;
 alert_core::SnapshotPublisher publisher;
 alert_core::TypeRegistry registry;
 
-// ULID 熵源：ESP32-S3 硬件 RNG（M13：id 不可预测）
 void entropyHook(uint8_t* out, size_t n) {
   size_t i = 0;
   while (i < n) {
@@ -304,16 +262,12 @@ void entropyHook(uint8_t* out, size_t n) {
 
 alert_core::AlertStore store(registry, entropyHook);
 
-// 持久化：SD/FatFS 版 IAlertFileIo + JSONL alerts.db（先 load 后 start）
 eego::net::SdAlertFileIo alertFileIo;
 alert_core::AlertDb alertDb(alertFileIo, "/sdcard/alertpanel/alerts.db");
 
 panel::PanelApp app;
 
-// ── 字体 ─────────────────────────────────────────────────────────────────────
 
-// admin.font 指定的 SD 绝对路径优先，其次是本地内嵌字体和 SD 根目录字体；
-// 都失败保持内置 5x7 回退（面板始终可显示文字）。
 void tryLoadUiFont() {
   const std::string configured = admin::ConfigStore::instance().admin().font;
   if (!configured.empty()) {
@@ -342,7 +296,6 @@ void tryLoadUiFont() {
   ESP_LOGI(TAG, "no SD font found, using built-in 5x7 fallback");
 }
 
-// ── 跨任务事件回调（短平快：只置原子标志/投小信箱，不做渲染/IO）──────────────
 
 void onNetEvent(const eego::net::NetEvent& ev, void* ctx) {
   static_cast<panel::PanelApp*>(ctx)->notifyNetEvent(ev.wifi_state);
@@ -359,8 +312,6 @@ void onAdminEvent(const eego::admin::AdminEvent& ev, void* ctx) {
                                                        ev.window_remaining_s);
 }
 
-// net::AlertActionResult → admin::AlertActionResult 薄适配（M17/M20 同构注入点）。
-// 显式逐码映射（不依赖枚举数值一致，防未来重排）。
 admin::AlertActionResult adaptActionResult(const eego::net::AlertActionResult& r) {
   admin::AlertActionResult out;
   switch (r.code) {
@@ -388,19 +339,14 @@ admin::AlertActionResult adaptActionResult(const eego::net::AlertActionResult& r
   return out;
 }
 
-// 统一时间源已收敛到 time_source.h（M21）：TimeSource::now/valid/writeRtc，
-// RTC 句柄为函数内静态（无状态驱动对象，I2C 端口级锁跨任务安全）。
 
 }  // namespace
 
 extern "C" void app_main(void) {
-  // 先装日志缓冲：之后的 ESP_LOG 都能在网页「系统 → 设备日志」看到。
   eego::admin::devlog::install();
   ESP_LOGI(TAG, "EEGO A4 monitoring panel boot");
   eego::admin::devlog::logBootReport();
 
-  // 0. 唤醒分类：定时唤醒 = 电池快速路径；任何深睡唤醒（及快速路径主动重启）都
-  //    保留面板上的上一帧（不做开机白屏）。
   const panel::battery::WakeSource wake = panel::battery::wakeSource();
   const bool fastWake = wake == panel::battery::WakeSource::Timer;
   const bool keepPanel = panel::battery::deepSleepWake(wake) ||
@@ -409,20 +355,16 @@ extern "C" void app_main(void) {
   ESP_LOGI(TAG, "wake=%s fast=%d keep_panel=%d", panel::battery::wakeSourceName(wake),
            fastWake ? 1 : 0, keepPanel ? 1 : 0);
 
-  // 1. 板级启动合同（顺序即合同，见 board_boot.h）
   eego::board::BootOptions bootOptions;
   bootOptions.touch = !fastWake;
   bootOptions.clearDisplay = !keepPanel;
   bootOptions.deferDisplay = fastWake;
   bootStatus = eego::board::beginStandardHardware(display, touch, bootOptions);
 
-  // 2. 统一时间源启动同步（M21）：RTC 有效而系统时间不可信 → 设置系统时间
-  //    （SNTP 前的 TLS 证书校验/日志/摄入都依赖系统时间）
   if (panel::TimeSource::syncSystemFromRtc()) {
     ESP_LOGI(TAG, "system time set from RTC");
   }
 
-  // 3. SD 目录 / NVS / 认证 / 配置存储 / 类型覆盖 / 管理日志
   if (eego::SdCard::instance().ready() &&
       !eego::SdCard::instance().mkdir("/alertpanel")) {
     ESP_LOGE(TAG, "failed to create /sdcard/alertpanel");
@@ -461,7 +403,6 @@ extern "C" void app_main(void) {
   if (settingsErr != ESP_OK) {
     ESP_LOGE(TAG, "device settings init failed: %s", esp_err_to_name(settingsErr));
   }
-  // 充电脚极性覆盖须先于任何供电判定（下面的快速路径检查、PanelApp::begin）。
   eego::PowerManager::instance().setChargePolarity(
       toChargePolarity(deviceSettings.snapshot().values.charge_signal));
 #ifdef EEGO_LOCAL_POWER_MODE_MAINS
@@ -489,8 +430,6 @@ extern "C" void app_main(void) {
   }
 #endif
   if (fastWake && panel::battery::rtcState().manual_sleep == 0) {
-    // 定时唤醒时已接上电源（或被强制为常供电）：以完整应用重启。电源键休眠
-    // （manual_sleep）例外：接着电源也只取数刷屏后继续睡，按键才唤醒。
     const eego::BatteryInfo bat = eego::PowerManager::instance().readBattery();
     const bool charging = eego::PowerManager::instance().isCharging() || bat.charging;
     if (panel::battery::mainsPowered(
@@ -523,15 +462,10 @@ extern "C" void app_main(void) {
              esp_err_to_name(inputErr));
   }
 
-  // 4. 字体
   tryLoadUiFont();
 
-  // 5. 外部告警库恢复（store 写自此只在 net_task；load 先于 start，首帧快照覆盖）。
-  //    启动即压缩：append-only JSONL 的被覆盖行/墓碑在每次启动时清掉，
-  //    运行期由 net_task 按大小/死行比例再压缩（见 NetStackConfig）。
   const bool alertDbReady = eego::SdCard::instance().ready();
   if (alertDbReady) {
-    // 上次压缩替换中途断电：原文件在 .bak（eego_hal atomic_file 替换路径）。
     if (eego::fsutil::recoverFile(alertDb.path())) {
       ESP_LOGW(TAG, "alerts.db restored from interrupted replace");
     }
@@ -541,10 +475,6 @@ extern "C" void app_main(void) {
     if (alertDb.deadLines() > 0 && fastWake) {
       ESP_LOGI(TAG, "alerts.db boot compaction skipped on battery wake");
     } else if (alertDb.deadLines() > 0) {
-      // 压缩已是逐条流式写 + 分块回读校验（不整份复制），但仍需几十 KB 内部
-      // RAM（≤4 KiB 的 malloc 先走内部堆）。堆紧张时跳过，
-      // 交给 net_task 按策略稍后压缩。另以标记文件防"压缩中崩溃 → 重启 → 再压缩
-      // → 再崩溃"的循环：上次启动压缩未走完（标记仍在）则本次跳过并清标记。
       const std::string marker = alertDb.path() + ".compacting";
       const size_t freeInternal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
       const size_t largestInternal =
@@ -574,9 +504,6 @@ extern "C" void app_main(void) {
   }
   store.attachDb(&alertDb);
 
-  // 6. net_task 启动（快照发布 + expire 巡检由 net_task 承担；统一时间源 +
-  //    RTC 回写注入，M21）
-  // WiFi 快连：上次关联的 BSSID + 信道（RTC 内存；不含密码），首次连接跳过全信道扫描。
   if (panel::battery::deepSleepWake(wake)) {
     const panel::battery::RtcState& rtc = panel::battery::rtcState();
     if (rtc.ap_valid != 0) {
@@ -606,7 +533,6 @@ extern "C" void app_main(void) {
     }
   }
   {
-    // 启动 WiFi 摘要（只打 SSID，绝不打密码）：已存网络、射频模式、BLE、共存、快连提示。
     std::vector<eego::net::WifiAccount> saved;
     eego::net::CredentialStore::loadWifiAccounts(saved);
     eego::net::WifiManager::instance().syncSavedNetworks(saved);
@@ -627,8 +553,6 @@ extern "C" void app_main(void) {
              ble.compiled ? "on" : "off", eego::ble::roleName(ble.role), kCoex);
   }
 
-  // 6b. 静音规则恢复（M21）：config.mute_rules → net_task（重估已恢复记录的
-  //     muted 标志 + 快照发布）。
   {
     const std::vector<alert_core::MuteRule> mute_rules = config.muteRules();
     std::string mute_err;
@@ -637,7 +561,6 @@ extern "C" void app_main(void) {
     }
   }
 
-  // 7. admin 注入（M17 同构注入点 + M20 现成 functor/薄适配）
   eego::net::NetStack& net = eego::net::NetStack::instance();
   admin::setAlertSnapshotSource(net.alertSnapshotSource());
   admin::setAlertActionSink(
@@ -660,8 +583,6 @@ extern "C" void app_main(void) {
       });
   admin::setAdminCommandHandler(&admin::defaultCommandHandler, nullptr);
   admin::setAdminEventCallback(&onAdminEvent, &app);
-  // GET /api/v1/display/snapshot.bmp：在 httpd 任务读取当前帧缓冲（只读，渲染中可能撕裂，
-  // 不影响显示）。未就绪时返回 503。
   admin::setDisplaySnapshotProvider([](uint8_t* rows, size_t stride) {
     if (!bootStatus.displayReady) return false;
     for (int16_t y = 0; y < static_cast<int16_t>(admin::kSnapshotHeight); ++y) {
@@ -672,14 +593,11 @@ extern "C" void app_main(void) {
     }
     return true;
   });
-  // POST /api/v1/dashboard/render-preview：httpd 校验后经 AdminCommand 队列在
-  // app_task（UI 属主）执行；离屏 framebuffer，不影响实屏。
   admin::setRenderPreviewProvider([](const admin::RenderPreviewRequest& request, uint8_t* rows,
                                      size_t stride, admin::RenderPreviewResult& result) {
     return app.renderDashboardPreview(request, rows, stride, result);
   });
   net.setEventCallback(&onNetEvent, &app);
-  // POST /api/v1/device/time：浏览器（WiFi 或 BLE）校时。SNTP 优先，策略见 time_policy.h。
   admin::setTimeSetter([](int64_t unix_ms) {
     admin::TimeSetResult result;
     eego::net::NetStatusSnapshot ns;
@@ -704,8 +622,6 @@ extern "C" void app_main(void) {
     return result;
   });
 
-  // 8. 设备模式判定（M13 bootstrap）：无管理密码 → 配网门户；否则管理 API。
-  //    电池定时唤醒不启动 httpd（无人访问；按键唤醒后才可用）。
   if (fastWake) {
     ESP_LOGI(TAG, "battery wake: admin API not started");
   } else if (!admin::AuthManager::instance().hasPassword()) {
@@ -722,7 +638,6 @@ extern "C" void app_main(void) {
     }
   }
 
-  // 8b. BLE 管理隧道桥（Web Bluetooth）：门户模式下只服务 POST /setup。
   if (!fastWake) {
     const esp_err_t bridgeErr = admin::startBleBridge();
     if (bridgeErr != ESP_OK && bridgeErr != ESP_ERR_NOT_SUPPORTED) {
@@ -730,7 +645,6 @@ extern "C" void app_main(void) {
     }
   }
 
-  // 9. 串口诊断（钩子全部在 app_task 上下文执行）+ UI 属主启动
   diag::Handlers hooks;
   hooks.status = [] { app.diagStatus(); };
   hooks.battery = [] { app.diagBattery(); };
@@ -761,9 +675,6 @@ extern "C" void app_main(void) {
   deps.fastWake = fastWake;
   app.begin(deps);
 
-  // 10. app_task 主循环（唯一 UI 属主；input/net/httpd/serial 只经队列/快照交互）
-  //     触控在 eego_touch 任务中持续采样（渲染阻塞 app_task 时手势不丢），
-  //     触控/按键任务入队后 give inputWake 唤醒本循环。
   SemaphoreHandle_t inputWake = xSemaphoreCreateBinary();
   eego::ButtonManager::instance().setWakeSemaphore(inputWake);
   if (bootStatus.touchReady) {
@@ -777,9 +688,6 @@ extern "C" void app_main(void) {
   eego::ButtonEvent bevt;
   panel::InputEventBatch inputEvents;
   while (true) {
-    // 排空当前全部可观测输入；在任一 handler 可执行危险动作前，先按统一
-    // esp_timer 时间戳归并两个来源。同步模式下每轮只读一帧新触控。
-    // 本轮从阻塞（上一轮渲染/命令处理/空闲等待）恢复：此前排队的手势按此刻起算年龄。
     app.noteInputResume();
     inputEvents.clear();
     const bool touchTask = touch.pollingActive();
@@ -794,16 +702,12 @@ extern "C" void app_main(void) {
     }
     inputEvents.dispatch(app);
 
-    // 诊断开关热生效；禁用时不分发串口命令。
     if (deviceSettings.snapshot().values.diagnostics_enabled) diag::service();
 
-    // admin 命令队列（httpd → app_task；0ms = 非阻塞轮询）
     admin::serviceCommands(0);
 
-    // 应用主服务（事件归并/电源 FSM/按需渲染；电池模式可能在此深睡不返回）
     app.service();
 
-    // 有待处理输入则立即下一轮；否则阻塞等待输入唤醒（至少 1 tick，让出 CPU）
     if (touch.hasPending()) continue;
     const TickType_t wait = ticksAtLeastOne(touchTask ? kIdleWaitMs : kSyncTouchPollMs);
     if (inputWake != nullptr) {

@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
-// EEGO A4 RTC 实现 — PCF8563 I2C 实时时钟
-// 寄存器布局（PCF8563 数据手册）:
 //   0x00: Control/Status 1
 //   0x01: Control/Status 2
-//   0x02: VL 秒 (bit7=VL 标志, bit6-0=秒 BCD)
-//   0x03: 分钟 BCD
-//   0x04: 小时 BCD
-//   0x05: 日期 BCD
-//   0x06: 星期 BCD
-//   0x07: 月 BCD (bit7=世纪: 1=1900s, 0=2000s)
-//   0x08: 年 BCD
-//   0x0D: CLKOUT 控制
 #include "pcf8563_rtc.h"
 
 #include <esp_log.h>
@@ -19,13 +8,12 @@
 
 static const char* RTC_TAG = "eego_rtc";
 
-// PCF8563 寄存器地址
 static constexpr uint8_t PCF8563_REG_CONTROL_STATUS1 = 0x00;
 static constexpr uint8_t PCF8563_REG_CONTROL_STATUS2 = 0x01;
-static constexpr uint8_t PCF8563_REG_VL_SECONDS      = 0x02;  // 时间起始寄存器
+static constexpr uint8_t PCF8563_REG_VL_SECONDS      = 0x02;
 static constexpr uint8_t PCF8563_REG_CLKOUT          = 0x0D;
 static constexpr uint8_t PCF8563_CLKOUT_DISABLED     = 0x00;
-static constexpr uint8_t PCF8563_VL_FLAG             = 0x80;  // 秒寄存器 bit7
+static constexpr uint8_t PCF8563_VL_FLAG             = 0x80;
 
 static esp_err_t rtcProbeAck(i2c_port_t port, uint8_t addr) {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
@@ -42,7 +30,6 @@ static bool rtcBusInstalled(i2c_port_t port) {
            rtcProbeAck(port, eego::PCF8563_ADDRESS) == ESP_OK;
 }
 
-// 确保共享 I2C 总线已安装
 static esp_err_t rtcEnsureI2cBus(i2c_port_t port) {
     if (rtcBusInstalled(port)) return ESP_OK;
     i2c_config_t conf;
@@ -56,13 +43,11 @@ static esp_err_t rtcEnsureI2cBus(i2c_port_t port) {
     esp_err_t err = i2c_param_config(port, &conf);
     if (err != ESP_OK) return err;
     err = i2c_driver_install(port, I2C_MODE_MASTER, 0, 0, 0);
-    // v5.5.1 重复安装可返回 ESP_FAIL；后续 RTC 读写仍会验证总线。
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE && err != ESP_FAIL) return err;
     return ESP_OK;
 }
 
 namespace eego {
-
 Pcf8563Rtc::Pcf8563Rtc(i2c_port_t port) : port_(port) {}
 
 uint8_t Pcf8563Rtc::bcdToBin(uint8_t bcd) {
@@ -79,7 +64,6 @@ esp_err_t Pcf8563Rtc::readReg(uint8_t reg, uint8_t* data, size_t len) {
 }
 
 esp_err_t Pcf8563Rtc::writeReg(uint8_t reg, const uint8_t* data, size_t len) {
-    // 写操作：设备地址 + 寄存器地址 + 数据
     uint8_t buf[16];
     if (len + 1 > sizeof(buf)) return ESP_ERR_INVALID_SIZE;
     buf[0] = reg;
@@ -95,7 +79,6 @@ esp_err_t Pcf8563Rtc::begin() {
         return err;
     }
 
-    // 探测 PCF8563：读 Control/Status 1 寄存器
     uint8_t status1 = 0;
     err = readReg(PCF8563_REG_CONTROL_STATUS1, &status1, 1);
     if (err != ESP_OK) {
@@ -104,7 +87,6 @@ esp_err_t Pcf8563Rtc::begin() {
         return err;
     }
 
-    // 禁用 CLKOUT（不需要 32kHz 方波输出）
     uint8_t clkoutOff = PCF8563_CLKOUT_DISABLED;
     writeReg(PCF8563_REG_CLKOUT, &clkoutOff, 1);
 
@@ -117,7 +99,6 @@ RtcTime Pcf8563Rtc::readTime() {
     memset(&t, 0, sizeof(t));
     t.valid = false;
 
-    // 从 0x02 开始连续读 7 字节：秒/分/时/日/周/月/年
     uint8_t raw[7];
     memset(raw, 0, sizeof(raw));
     esp_err_t err = readReg(PCF8563_REG_VL_SECONDS, raw, sizeof(raw));
@@ -126,10 +107,8 @@ RtcTime Pcf8563Rtc::readTime() {
         return t;
     }
 
-    // VL 标志：秒寄存器 bit7。VL=1 表示时钟停振/电池耗尽，时间不可靠
     bool vl = (raw[0] & PCF8563_VL_FLAG) != 0;
 
-    // BCD → 二进制
     t.second  = bcdToBin(raw[0] & 0x7FU);
     t.minute  = bcdToBin(raw[1] & 0x7FU);
     t.hour    = bcdToBin(raw[2] & 0x3FU);
@@ -137,7 +116,6 @@ RtcTime Pcf8563Rtc::readTime() {
     t.weekday = bcdToBin(raw[4] & 0x07U);
     t.month   = bcdToBin(raw[5] & 0x1FU);
 
-    // 世纪位 bit7：1=1900s, 0=2000s
     uint8_t yy = bcdToBin(raw[6]);
     t.year = (raw[5] & 0x80U) ? static_cast<uint16_t>(1900 + yy)
                               : static_cast<uint16_t>(2000 + yy);
@@ -151,9 +129,8 @@ RtcTime Pcf8563Rtc::readTime() {
         ESP_LOGW(RTC_TAG, "RTC time fields are invalid");
     }
 
-    // VL 置位时清除：写回秒值（bit7=0），恢复振荡器可靠性标志
     if (vl) {
-        uint8_t secClear = binToBcd(t.second) & 0x7FU;  // 清除 VL 位
+        uint8_t secClear = binToBcd(t.second) & 0x7FU;
         writeReg(PCF8563_REG_VL_SECONDS, &secClear, 1);
         ESP_LOGW(RTC_TAG, "RTC VL flag was set (oscillator stopped), cleared");
     }
@@ -163,16 +140,14 @@ RtcTime Pcf8563Rtc::readTime() {
 
 esp_err_t Pcf8563Rtc::writeTime(const RtcTime& t) {
     uint8_t raw[7];
-    // 写秒值时 bit7=0 自动清除 VL 标志
-    raw[0] = binToBcd(t.second) & 0x7FU;                  // 秒 (VL=0)
-    raw[1] = binToBcd(t.minute) & 0x7FU;                   // 分
-    raw[2] = binToBcd(t.hour) & 0x3FU;                     // 时 (24h)
-    raw[3] = binToBcd(t.day) & 0x3FU;                      // 日
-    raw[4] = binToBcd(t.weekday) & 0x07U;                  // 星期
-    // 月：bit7=世纪 (year<2000 → 1=1900s, year>=2000 → 0=2000s)
+    raw[0] = binToBcd(t.second) & 0x7FU;
+    raw[1] = binToBcd(t.minute) & 0x7FU;
+    raw[2] = binToBcd(t.hour) & 0x3FU;
+    raw[3] = binToBcd(t.day) & 0x3FU;
+    raw[4] = binToBcd(t.weekday) & 0x07U;
     uint8_t centuryBit = (t.year < 2000) ? 0x80U : 0x00U;
     raw[5] = static_cast<uint8_t>(binToBcd(t.month) | centuryBit);
-    raw[6] = binToBcd(static_cast<uint8_t>(t.year % 100));  // 年（2位）
+    raw[6] = binToBcd(static_cast<uint8_t>(t.year % 100));
 
     esp_err_t err = writeReg(PCF8563_REG_VL_SECONDS, raw, sizeof(raw));
     if (err != ESP_OK) {
@@ -191,7 +166,6 @@ time_t Pcf8563Rtc::toEpoch(const RtcTime& t) {
     tm.tm_min = t.minute;
     tm.tm_sec = t.second;
     tm.tm_wday = t.weekday;
-    // mktime 使用本地时区；调用方可通过 setenv("TZ","UTC") 设置 UTC
     return mktime(&tm);
 }
 

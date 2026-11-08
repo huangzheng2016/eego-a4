@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 空闲感知刷新节奏（契约见 refresh_policy.h）。
 #include "refresh_policy.h"
 
 #include <algorithm>
 #include <utility>
 
 namespace panel {
-
 uint64_t nextRefreshBoundary(uint64_t unix_s, int timezone_offset_min, uint32_t interval_min) {
   const int64_t period = static_cast<int64_t>(interval_min == 0 ? 1 : interval_min) * 60;
   const int64_t offset = static_cast<int64_t>(timezone_offset_min) * 60;
   const int64_t local = static_cast<int64_t>(unix_s) + offset;
   int64_t slot = local / period;
-  if (local % period < 0) --slot;  // floor（负本地时间理论上不出现，保持正确）
+  if (local % period < 0) --slot;
   const int64_t next_local = (slot + 1) * period;
   return static_cast<uint64_t>(next_local - offset);
 }
@@ -23,7 +21,7 @@ uint64_t screenRotateEpoch(uint64_t unix_s, int64_t mono_ms, int timezone_offset
   const int64_t period = static_cast<int64_t>(period_min) * 60;
   if (unix_s >= RefreshPolicy::kMinValidUnix) {
     const int64_t local = static_cast<int64_t>(unix_s) + static_cast<int64_t>(timezone_offset_min) * 60;
-    return static_cast<uint64_t>(std::max<int64_t>(0, local) / period) + 1;  // +1：0 保留为「未设」
+    return static_cast<uint64_t>(std::max<int64_t>(0, local) / period) + 1;
   }
   return static_cast<uint64_t>(std::max<int64_t>(0, mono_ms) / (period * 1000)) + 1;
 }
@@ -39,7 +37,6 @@ void RefreshPolicy::configure(const RefreshPolicyConfig& config) {
   const bool boundary_changed = config.idle_refresh_min != config_.idle_refresh_min ||
                                 config.timezone_offset_min != config_.timezone_offset_min;
   config_ = config;
-  // 间隔/时区变化 → 重新登记边界（下次 allow 时按新配置计算）。
   if (boundary_changed) {
     due_unix_ = 0;
     due_mono_ms_ = 0;
@@ -73,7 +70,6 @@ bool RefreshPolicy::allow(int64_t mono_ms, uint64_t unix_s, bool critical_arrive
       due_unix_ = nextRefreshBoundary(unix_s, config_.timezone_offset_min, interval_min);
       const uint64_t latest = due_unix_ - static_cast<uint64_t>(interval_min) * 60;
       if (unix_s - latest < kBoundaryGraceS && last_render_unix_ < latest) due_unix_ = latest;
-      // 单调上限：边界距离 + 1 个间隔余量（墙钟回拨/跳变时仍会刷新）。
       due_mono_ms_ = mono_ms + static_cast<int64_t>(due_unix_ - unix_s) * 1000 + interval_ms;
     } else {
       due_unix_ = 0;

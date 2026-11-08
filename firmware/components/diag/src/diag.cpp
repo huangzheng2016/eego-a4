@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// diag 组件实现 —— USB Serial/JTAG 读行任务 + app_task 上下文分发（见 diag.h 契约）。
 #include "diag/diag.h"
 
 #include <cstdio>
@@ -11,20 +10,17 @@
 #include "freertos/task.h"
 
 namespace eego::diag {
-
 namespace {
-
 const char* TAG = "diag";
 
 constexpr uint32_t kQueueLen = 8;
-constexpr uint32_t kCmdMaxLen = 1024;  // inject 单行 JSON 需要余量（更大批量走 HTTP）
+constexpr uint32_t kCmdMaxLen = 1024;
 constexpr uint32_t kTaskStackBytes = 3072;
 constexpr UBaseType_t kTaskPriority = 3;
 
 QueueHandle_t g_queue = nullptr;
 Handlers g_handlers;
 
-// USB Serial/JTAG 读行任务：阻塞 fgets → 去 CRLF → 入队（命令执行不在本任务）。
 void diagTask(void* arg) {
   (void)arg;
   char line[kCmdMaxLen];
@@ -65,7 +61,6 @@ void printHelp() {
   fflush(stdout);
 }
 
-// 取命令动词（首 token）；arg 指向动词后的第一个非空字符（可能为空串）。
 void splitVerb(char* line, char*& verb, char*& arg) {
   verb = line;
   while (*verb == ' ') verb++;
@@ -130,7 +125,7 @@ void dispatch(char* line) {
 
 bool start(const Handlers& handlers) {
   g_handlers = handlers;
-  if (g_queue != nullptr) return true;  // 幂等
+  if (g_queue != nullptr) return true;
   g_queue = xQueueCreate(kQueueLen, kCmdMaxLen);
   if (g_queue == nullptr) {
     ESP_LOGE(TAG, "diag queue create failed");

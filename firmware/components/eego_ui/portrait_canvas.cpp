@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
-// PortraitCanvas 实现 — 逻辑 portrait 坐标 (552×768) 高级绘图 API
-// 封装 Uc8279cDisplay framebuffer，提供裁剪、原生四级灰阶、基本图元。
-// 灰阶由驱动层 MSB/LSB 双平面 + UC8279C 灰阶 LUT 实现，画布层仅委托。
-// 裁剪在画布层完成，不传给显示驱动。
 
 #include "portrait_canvas.h"
 
@@ -11,20 +6,14 @@
 #include "icons.h"
 
 namespace eego {
-
-// 校验 icons.h 中各图标位图尺寸与声明一致
 static_assert(sizeof(ICON_SETTINGS_72) == 72 * 72 / 8, "ICON_SETTINGS_72 尺寸错误");
 static_assert(sizeof(ICON_CHEVRON_LEFT_32) == 32 * 32 / 8, "ICON_CHEVRON_LEFT_32 尺寸错误");
 static_assert(sizeof(ICON_CHEVRON_RIGHT_16) == 16 * 16 / 8, "ICON_CHEVRON_RIGHT_16 尺寸错误");
-
-// ── 构造 ────────────────────────────────────────────────────────────────────
 
 PortraitCanvas::PortraitCanvas(Uc8279cDisplay& display)
     : display_(display),
       clipX_(0), clipY_(0), clipW_(WIDTH), clipH_(HEIGHT),
       clipEnabled_(false) {}
-
-// ── 裁剪 ────────────────────────────────────────────────────────────────────
 
 bool PortraitCanvas::inClip(int16_t x, int16_t y) const {
     if (!clipEnabled_) return true;
@@ -56,14 +45,9 @@ void PortraitCanvas::useUiContentRect() {
     setClip(UI_CONTENT_X, UI_CONTENT_Y, UI_CONTENT_WIDTH, UI_CONTENT_HEIGHT);
 }
 
-// ── 清屏 ────────────────────────────────────────────────────────────────────
-
 void PortraitCanvas::clear() {
-    // 背景允许覆盖整个物理面板，不受裁剪限制
     display_.clear();
 }
-
-// ── 像素 ────────────────────────────────────────────────────────────────────
 
 void PortraitCanvas::drawPixel(int16_t x, int16_t y, uint8_t color) {
     if (!inClip(x, y)) return;
@@ -72,11 +56,8 @@ void PortraitCanvas::drawPixel(int16_t x, int16_t y, uint8_t color) {
 
 void PortraitCanvas::drawPixelGray(int16_t x, int16_t y, uint8_t gray) {
     if (!inClip(x, y)) return;
-    // 委托驱动层写入 MSB/LSB 灰阶平面（原生四级灰阶，无抖动）
     display_.drawPixelGray(x, y, gray);
 }
-
-// ── 矩形 ────────────────────────────────────────────────────────────────────
 
 void PortraitCanvas::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_t color) {
     if (w <= 0 || h <= 0) return;
@@ -100,14 +81,11 @@ void PortraitCanvas::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_
 
 void PortraitCanvas::drawRect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_t color) {
     if (w <= 0 || h <= 0) return;
-    // 四条边用 1px 填充矩形，fillRect 内部已做裁剪
     fillRect(x, y, w, 1, color);                  // top
     fillRect(x, y + h - 1, w, 1, color);          // bottom
     fillRect(x, y, 1, h, color);                  // left
     fillRect(x + w - 1, y, 1, h, color);          // right
 }
-
-// ── 直线 (Bresenham) ─────────────────────────────────────────────────────────
 
 void PortraitCanvas::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint8_t color) {
     const int16_t dx = (x1 > x0) ? (x1 - x0) : (x0 - x1);
@@ -124,8 +102,6 @@ void PortraitCanvas::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, ui
         if (e2 < dx)  { err += dx; y0 += sy; }
     }
 }
-
-// ── 圆 (中点画圆) ────────────────────────────────────────────────────────────
 
 void PortraitCanvas::drawCircle(int16_t cx, int16_t cy, int16_t r, uint8_t color) {
     if (r <= 0) return;
@@ -159,7 +135,6 @@ void PortraitCanvas::fillCircle(int16_t cx, int16_t cy, int16_t r, uint8_t color
     int16_t err = 1 - r;
 
     while (x >= y) {
-        // 水平扫描线（同色重复绘制幂等，无副作用）
         fillRect(cx - x, cy + y, 2 * x + 1, 1, color);
         fillRect(cx - x, cy - y, 2 * x + 1, 1, color);
         fillRect(cx - y, cy + x, 2 * y + 1, 1, color);
@@ -174,10 +149,6 @@ void PortraitCanvas::fillCircle(int16_t cx, int16_t cy, int16_t r, uint8_t color
     }
 }
 
-// ── 圆角矩形 ────────────────────────────────────────────────────────────────
-
-// 圆角矩形单角四分之一圆弧（描边）。沿用中点画圆迭代，仅画选定象限的 2 个对称点。
-// quadrant: 0=左上, 1=右上, 2=左下, 3=右下
 void PortraitCanvas::drawCornerArc(int16_t cx, int16_t cy, int16_t r, int quadrant, uint8_t color) {
     if (r <= 0) return;
     int16_t x = r;
@@ -186,13 +157,13 @@ void PortraitCanvas::drawCornerArc(int16_t cx, int16_t cy, int16_t r, int quadra
     while (x >= y) {
         int16_t sx1, sy1, sx2, sy2;
         switch (quadrant) {
-            case 0: // 左上：相对 (-x,-y) 与 (-y,-x)
+            case 0:
                 sx1 = cx - x; sy1 = cy - y; sx2 = cx - y; sy2 = cy - x; break;
-            case 1: // 右上：相对 (+x,-y) 与 (+y,-x)
+            case 1:
                 sx1 = cx + x; sy1 = cy - y; sx2 = cx + y; sy2 = cy - x; break;
-            case 2: // 左下：相对 (-x,+y) 与 (-y,+x)
+            case 2:
                 sx1 = cx - x; sy1 = cy + y; sx2 = cx - y; sy2 = cy + x; break;
-            default: // 3 右下：相对 (+x,+y) 与 (+y,+x)
+            default:
                 sx1 = cx + x; sy1 = cy + y; sx2 = cx + y; sy2 = cy + x; break;
         }
         drawPixel(sx1, sy1, color);
@@ -209,7 +180,6 @@ void PortraitCanvas::drawCornerArc(int16_t cx, int16_t cy, int16_t r, int quadra
 
 void PortraitCanvas::drawRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, int16_t r, uint8_t color) {
     if (w <= 0 || h <= 0 || r < 0) return;
-    // 圆角半径不超过短边一半
     const int16_t maxr = (w < h ? w : h) / 2;
     if (r > maxr) r = maxr;
     if (r == 0) {
@@ -217,17 +187,15 @@ void PortraitCanvas::drawRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, i
         return;
     }
 
-    // 4 条直边（中间段，fillRect 内部已做裁剪）
-    fillRect(x + r, y, w - 2 * r, 1, color);              // 顶
-    fillRect(x + r, y + h - 1, w - 2 * r, 1, color);      // 底
-    fillRect(x, y + r, 1, h - 2 * r, color);              // 左
-    fillRect(x + w - 1, y + r, 1, h - 2 * r, color);      // 右
+    fillRect(x + r, y, w - 2 * r, 1, color);
+    fillRect(x + r, y + h - 1, w - 2 * r, 1, color);
+    fillRect(x, y + r, 1, h - 2 * r, color);
+    fillRect(x + w - 1, y + r, 1, h - 2 * r, color);
 
-    // 4 个圆角
-    drawCornerArc(x + r,         y + r,         r, 0, color);  // 左上
-    drawCornerArc(x + w - r - 1, y + r,         r, 1, color);  // 右上
-    drawCornerArc(x + r,         y + h - r - 1, r, 2, color);  // 左下
-    drawCornerArc(x + w - r - 1, y + h - r - 1, r, 3, color);  // 右下
+    drawCornerArc(x + r,         y + r,         r, 0, color);
+    drawCornerArc(x + w - r - 1, y + r,         r, 1, color);
+    drawCornerArc(x + r,         y + h - r - 1, r, 2, color);
+    drawCornerArc(x + w - r - 1, y + h - r - 1, r, 3, color);
 }
 
 void PortraitCanvas::fillRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, int16_t r, uint8_t color) {
@@ -239,16 +207,14 @@ void PortraitCanvas::fillRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, i
         return;
     }
 
-    // 中间纯矩形带（上下圆角之间的整片区域）
-    const int16_t topC = y + r;            // 顶部圆角中心 y
-    const int16_t botC = y + h - r - 1;    // 底部圆角中心 y
+    const int16_t topC = y + r;
+    const int16_t botC = y + h - r - 1;
     if (botC >= topC) {
         fillRect(x, topC, w, botC - topC + 1, color);
     }
 
-    // 顶部/底部圆角带：逐行扫描，由圆方程求水平半宽后一次性填充整行
-    const int16_t leftC  = x + r;            // 左圆角中心 x
-    const int16_t rightC = x + w - r - 1;    // 右圆角中心 x
+    const int16_t leftC  = x + r;
+    const int16_t rightC = x + w - r - 1;
     const int32_t r2 = (int32_t)r * r;
     for (int16_t dy = 1; dy <= r; dy++) {
         int16_t xext = 0;
@@ -256,13 +222,12 @@ void PortraitCanvas::fillRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, i
         const int16_t sx = leftC - xext;
         const int16_t sw = (rightC + xext) - sx + 1;
         if (sw > 0) {
-            fillRect(sx, topC - dy, sw, 1, color);  // 顶部行
-            fillRect(sx, botC + dy, sw, 1, color);  // 底部行
+            fillRect(sx, topC - dy, sw, 1, color);
+            fillRect(sx, botC + dy, sw, 1, color);
         }
     }
 }
 
-// 圆角灰底填充：与 fillRoundRect 相同的几何，逐像素用 drawPixelGray 写灰阶平面
 void PortraitCanvas::fillRoundRectGray(int16_t x, int16_t y, int16_t w, int16_t h, int16_t r, uint8_t gray) {
     if (w <= 0 || h <= 0 || r < 0) return;
     const int16_t maxr = (w < h ? w : h) / 2;
@@ -280,14 +245,12 @@ void PortraitCanvas::fillRoundRectGray(int16_t x, int16_t y, int16_t w, int16_t 
     const int16_t rightC = x + w - r - 1;
     const int32_t r2 = (int32_t)r * r;
 
-    // 中间矩形带（满宽）
     if (botC >= topC) {
         for (int16_t yy = topC; yy <= botC; yy++)
             for (int16_t xx = x; xx < x + w; xx++)
                 drawPixelGray(xx, yy, gray);
     }
 
-    // 顶部/底部圆角带
     for (int16_t dy = 1; dy <= r; dy++) {
         int16_t xext = 0;
         while ((int32_t)(xext + 1) * (xext + 1) + (int32_t)dy * dy <= r2) xext++;
@@ -302,9 +265,6 @@ void PortraitCanvas::fillRoundRectGray(int16_t x, int16_t y, int16_t w, int16_t 
     }
 }
 
-// ── 位图图标 ──────────────────────────────────────────────────────────────────
-
-// 1-bpp 位图：MSB-first，bit=1 画 color，bit=0 透明跳过。受当前裁剪区约束。
 void PortraitCanvas::drawIcon(int16_t x, int16_t y, const uint8_t* icon, int16_t w, int16_t h, uint8_t color) {
     if (!icon || w <= 0 || h <= 0) return;
     const int16_t rowBytes = (w + 7) / 8;
@@ -318,9 +278,6 @@ void PortraitCanvas::drawIcon(int16_t x, int16_t y, const uint8_t* icon, int16_t
     }
 }
 
-// ── 文字对齐 ──────────────────────────────────────────────────────────────────
-
-// 通过 FontManager 测量 UI 字体宽度（scale 倍）后在 [x, x+w) 区间偏移绘制。
 void PortraitCanvas::drawTextCentered(int16_t x, int16_t y, int16_t w, const char* text, int16_t scale, bool bold) {
     if (!text || w <= 0 || scale < 1) return;
     const int16_t tw = FontManager::instance().uiTextWidth(text) * scale;
@@ -337,11 +294,7 @@ void PortraitCanvas::drawTextRight(int16_t x, int16_t y, int16_t w, const char* 
     FontManager::instance().drawText(*this, x + offset, y, text, scale, bold);
 }
 
-// ── 刷新 ────────────────────────────────────────────────────────────────────
-
 void PortraitCanvas::display(RefreshMode mode) {
-    // 刷新策略在驱动层：Fast → B/W 快刷（灰度已阈值化进 fb_）；
-    // Full / 周期升级 / requestFullRefresh → 帧含灰度时走四级灰阶波形。
     display_.display(mode);
 }
 

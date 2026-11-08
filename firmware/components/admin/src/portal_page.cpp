@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 配网门户静态资源（GET / 、/portal.js 、/portal.css）。
-// 中英双语；零外部资源（CSP default-src 'self'）；一切动态文本 textContent 渲染。
 #include "portal_page.h"
 
 namespace eego::admin::pages {
@@ -107,7 +105,6 @@ function scan(){
  var L=$('list');L.textContent=i18n.scanning;
  fetch('/scan').then(function(r){return r.json();}).then(function(d){
   L.textContent='';
-  // 同名 AP 只保留信号最强的一条，按信号排序
   var best={};
   d.forEach(function(n){if(n.ssid&&(!best[n.ssid]||n.rssi>best[n.ssid].rssi))best[n.ssid]=n;});
   var list=Object.keys(best).map(function(k){return best[k];}).sort(function(a,b){return b.rssi-a.rssi;});
@@ -178,7 +175,6 @@ function conn(e){
    stop();started=Date.now();
    timer=setInterval(poll,2000);
   }else{
-   // 服务端校验拒绝（如管理密码策略）：回到密码步
    show('fail',i18n.failprefix+(s.reason||''));
    $('step1').hidden=true;
    $('step2').hidden=false;
@@ -195,8 +191,6 @@ function poll(){
   else{show('connecting');}
  }).catch(function(){});
 }
-// 静态按钮统一在此绑定（CSP default-src 'self' 禁止内联 on* 属性；
-// 同源外部脚本的 .onclick 属性赋值不受限）
 $('btn_scan').onclick=scan;
 $('passbox').onsubmit=toStep2;
 $('step2').onsubmit=conn;

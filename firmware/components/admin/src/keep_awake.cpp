@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 保持唤醒覆盖与电源状态快照（契约见 admin/keep_awake.h）。
 #include "admin/keep_awake.h"
 
 #include <atomic>
@@ -8,9 +7,7 @@
 #include "esp_timer.h"
 
 namespace eego::admin {
-
 namespace {
-
 std::atomic<int64_t> g_until_ms{0};
 std::atomic<uint32_t> g_revision{0};
 std::mutex g_power_mutex;

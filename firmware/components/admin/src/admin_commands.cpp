@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// AdminCommand 队列实现 —— 见 include/admin/admin_commands.h。
 //
-// 所有权：命令对象为 shared_ptr，队列只传指针的堆副本；httpd（入队等结果）
-// 与 app_task（serviceCommands 执行）各持一份引用，后释放者回收。
-// 等待超时不会 use-after-free：执行方写 res 在 give 之前，httpd 只在
-// take 成功后读 res。
 #include "admin/admin_commands.h"
 
 #include <memory>
@@ -15,9 +10,7 @@
 #include "net_stack/credentials.h"
 
 namespace eego::admin {
-
 namespace {
-
 struct RawCmd {
   AdminCommand cmd;
   AdminResult res;
@@ -31,8 +24,6 @@ struct RawCmd {
 using RawCmdPtr = std::shared_ptr<RawCmd>;
 
 QueueHandle_t cmdQueue() {
-  // 静态局部初始化线程安全；队列生命周期 = 组件生命周期。
-  // 队列元素为 RawCmdPtr*（堆副本指针，双方释放后 shared_ptr 回收）。
   static QueueHandle_t q = xQueueCreate(8, sizeof(RawCmdPtr*));
   return q;
 }
@@ -55,7 +46,7 @@ bool serviceCommands(uint32_t wait_ms) {
     return false;
   }
   RawCmdPtr raw = *slot;
-  delete slot;  // 释放队列中的堆副本；raw 仍持有对象
+  delete slot;
   g_handler(raw->cmd, raw->res, g_ctx);
   xSemaphoreGive(raw->done);
   return true;

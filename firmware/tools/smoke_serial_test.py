@@ -1,24 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""smoke_serial_test.py — 真机串口 smoke 清单（FW6/M19）。
-
-覆盖：启动、显示、SD、WiFi、外部告警注入、确认、API 登录状态。
-
-安全边界（强制）：本脚本**绝不刷写设备**——只做 USB Serial/JTAG 读写与局域网 HTTP
-GET/POST，不调用 esptool / idf.py / 任何写 flash 的工具。设备变砖风险为零；
-唯一副作用是注入一条测试告警并 ack-all 确认（测试数据，可清除）。
-
-前提：
-  * 设备已刷入本固件并上电（USB 连接，USB Serial/JTAG 115200，diag 命令通道已启动）
-  * pip install pyserial（仓库 requirements.txt 已固定 pyserial==3.5）
-  * WiFi 项需设备已完成首次配网；API 项需 --admin-password（或环境变量
-    SMOKE_ADMIN_PASSWORD）提供管理密码
-
-用法：
-  python3 firmware/tools/smoke_serial_test.py --port /dev/cu.usbmodem1101 \
-      [--baud 115200] [--admin-password PW] \
-      [--timeout 90] [--json]
-"""
 
 from __future__ import annotations
 
@@ -90,7 +71,6 @@ class Report:
 
 
 class Device:
-    """USB Serial/JTAG 命令通道：发一行命令，按“静默窗口”收输出。"""
 
     def __init__(self, port: str, baud: int, quiet_s: float = 0.8) -> None:
         self.ser = serial.Serial()
@@ -109,7 +89,6 @@ class Device:
         self.ser.close()
 
     def drain(self, seconds: float) -> list[str]:
-        """收集 seconds 内的串口输出；静默超过 quiet_s 提前返回（设备早已启动时不空等）。"""
         end = time.monotonic() + seconds
         lines: list[str] = []
         buf = bytearray()
@@ -155,7 +134,6 @@ class Device:
 
 
 # ---------------------------------------------------------------------------
-# HTTP（API 登录状态；仅局域网 GET/POST，绝无刷写调用）
 # ---------------------------------------------------------------------------
 
 def http_json(url: str, payload: dict | None = None, token: str | None = None,
@@ -183,7 +161,6 @@ def http_json(url: str, payload: dict | None = None, token: str | None = None,
 
 
 # ---------------------------------------------------------------------------
-# 各检查阶段
 # ---------------------------------------------------------------------------
 
 def phase_boot(dev: Device, rep: Report, timeout_s: float) -> None:
@@ -193,7 +170,6 @@ def phase_boot(dev: Device, rep: Report, timeout_s: float) -> None:
     if banner:
         rep.ok("boot", "diag 串口通道已启动")
         return
-    # 兜底：直接发 version 探测（设备可能早已启动完）
     resp = dev.cmd("version", deadline_s=8)
     if any(l.startswith("version:") for l in resp):
         rep.ok("boot", "设备已启动（version 应答正常）")
@@ -216,7 +192,7 @@ def phase_display_smoke(dev: Device, rep: Report) -> None:
     previous_quiet = dev.quiet_s
     dev.quiet_s = max(previous_quiet, 3.0)
     try:
-        resp = dev.cmd("smoke", deadline_s=60)  # 全量刷新耗时数秒
+        resp = dev.cmd("smoke", deadline_s=60)
     finally:
         dev.quiet_s = previous_quiet
     pass_lines = [l for l in resp if l.startswith("[PASS]")]
@@ -257,7 +233,6 @@ def phase_wifi(dev: Device, rep: Report) -> str | None:
 
 
 def phase_inject_alert(dev: Device, rep: Report) -> None:
-    # 串口注入外部告警（与 POST /alerts 推送同一 store 摄入路径）
     resp = dev.cmd("inject " + json.dumps(INJECT_EVENT, ensure_ascii=False))
     queued = any("inject: queued 1 event(s) -> ingested" in l for l in resp)
     rep.check(queued, "inject", "串口注入已入队 net_task",
@@ -293,7 +268,6 @@ def phase_api(rep: Report, ip: str | None, password: str | None, api_base: str |
         return
     base = (api_base or f"http://{ip}/api/v1").rstrip("/")
 
-    # 负例：无令牌 → 401 且错误封装同形（M13：不区分无令牌/错令牌）
     code, body = http_json(f"{base}/status")
     same_shape = (isinstance(body, dict) and isinstance(body.get("error"), dict)
                   and body["error"].get("code") == "unauthorized")
@@ -301,7 +275,6 @@ def phase_api(rep: Report, ip: str | None, password: str | None, api_base: str |
               f"无令牌访问 status → {code} unauthorized 同形",
               f"无令牌应 401 unauthorized，实际 {code} body={body}")
 
-    # 登录
     code, body = http_json(f"{base}/auth/login", {"password": password})
     token = body.get("token") if isinstance(body, dict) else None
     if not (code == 200 and token):
@@ -309,7 +282,6 @@ def phase_api(rep: Report, ip: str | None, password: str | None, api_base: str |
         return
     rep.ok("api-login", f"登录成功（expires_in={body.get('expires_in')}s）")
 
-    # 登录后 status：provisioned=true 且 mode 在线
     code, body = http_json(f"{base}/status", token=token)
     sec = (body or {}).get("security", {}) if isinstance(body, dict) else {}
     mode = ((body or {}).get("device", {}) or {}).get("mode", "")
@@ -317,14 +289,12 @@ def phase_api(rep: Report, ip: str | None, password: str | None, api_base: str |
               f"status 200，provisioned=true，mode={mode}",
               f"status 异常 code={code} provisioned={sec.get('provisioned')}")
 
-    # 登出（清理会话）
     code, _ = http_json(f"{base}/auth/logout", {}, token=token)
     rep.check(code in (200, 204), "api-logout", f"登出 {code}",
               f"登出异常 code={code}")
 
 
 # ---------------------------------------------------------------------------
-# 主流程
 # ---------------------------------------------------------------------------
 
 def main() -> int:

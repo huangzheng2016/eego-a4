@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 监控面板设备应用状态机实现（契约见 panel_app.h）。
 #include "panel_app.h"
 
 #include <algorithm>
@@ -36,9 +35,7 @@
 namespace admin = eego::admin;
 
 namespace panel {
-
 namespace {
-
 const char* TAG = "panel";
 
 using eego::net::AlertAction;
@@ -49,26 +46,21 @@ using eego::settings::PowerMode;
 
 constexpr uint32_t kNetBitWifi = 1u << 0;
 constexpr uint32_t kRenderThrottleMs = 250;
-constexpr int64_t kClockCheckMs = 1000;          // 状态栏分钟变化检查周期（仅分钟变化才重绘）
-constexpr int64_t kDoublePressSyncMs = 1000;     // 绑定修订号复查周期
-constexpr uint32_t kNetIdleProbeMs = 100;        // 单次 waitIdle 探测超时（入队 + 等待各 ≤100ms）
+constexpr int64_t kClockCheckMs = 1000;
+constexpr int64_t kDoublePressSyncMs = 1000;
+constexpr uint32_t kNetIdleProbeMs = 100;
 constexpr int64_t kNetIdleFirstIntervalMs = 1000;
 constexpr int64_t kNetIdleMaxIntervalMs = 5000;
-// 电池定时唤醒的硬预算（自启动起）：超时即取消在途请求、渲染已有数据并深睡。
 constexpr int64_t kFastWakeBudgetMs = 20000;
-// 等 WiFi 的上限：到点仍未连上也发起取数批次（静态源/缓存仍可渲染）。
 constexpr int64_t kFastWakeWifiWaitMs = 12000;
 constexpr int64_t kInteractiveWifiWaitMs = 15000;
-// 深睡前等 net_task 静默的预算（快速路径已取消在途请求，只需很短）。
 constexpr int64_t kFastSleepIdleBudgetMs = 2000;
 constexpr int64_t kSleepIdleBudgetMs = 8000;
-// 按键唤醒：启动后这段时间内的首个按键手势是「唤醒那一下」，不执行动作。
 constexpr int64_t kWakePressGuardMs = 1500;
 constexpr size_t kSettingsRowsPerPage = static_cast<size_t>(geom::kSettingsRowsPerPage);
-constexpr int64_t kDetailCheckMs = 1000;        // 告警详情内容变化检查周期
-constexpr int64_t kOnboardingCheckMs = 2000;    // 引导页地址/WiFi 变化检查周期
-constexpr int64_t kStatusRefreshMs = 30000;     // 状态页周期重绘（年龄/运行时长）
-
+constexpr int64_t kDetailCheckMs = 1000;
+constexpr int64_t kOnboardingCheckMs = 2000;
+constexpr int64_t kStatusRefreshMs = 30000;
 
 void localTm(const eego::settings::Settings& settings, uint64_t unix, struct tm& out) {
   const time_t local = static_cast<time_t>(static_cast<int64_t>(unix) +
@@ -76,14 +68,12 @@ void localTm(const eego::settings::Settings& settings, uint64_t unix, struct tm&
   gmtime_r(&local, &out);
 }
 
-// AdminEvent 小信箱元素（httpd/sys_evt → app_task）
 struct AdminMail {
   int type;
   int reason;
   uint32_t remainingS;
 };
 
-// AdminEventType 数值（admin/admin_types.h；以 int 传递避免头依赖扩散）
 constexpr char kWifiDiagUrl[] = "http://192.168.4.1/wifi-diag";
 
 constexpr int kEvPortalOpened = 0;
@@ -97,8 +87,6 @@ constexpr int kEvProvisionFailed = 6;
 }  // namespace
 
 int64_t PanelApp::nowMs() const { return esp_timer_get_time() / 1000; }
-
-// ── 生命周期 ────────────────────────────────────────────────────────────────
 
 void PanelApp::begin(const Deps& deps) {
   deps_ = deps;
@@ -119,15 +107,12 @@ void PanelApp::begin(const Deps& deps) {
   lastFullRenderMs_ = lastBatMs_;
 
   usbHost_ = eego::PowerManager::instance().usbHostConnected();
-  // 电源键休眠：定时唤醒沿用（快速路径取数后继续睡）；按键唤醒/上电即结束。
   battery::RtcState& rtc = battery::rtcState();
   manualSleep_ = fastWake_ && rtc.manual_sleep != 0;
   if (!fastWake_ && rtc.manual_sleep != 0) {
     rtc.manual_sleep = 0;
     battery::commitRtcState();
   }
-  // 开机不凭电压锁存外接电源：只认充电中 / USB 主机（见 battery::MainsDetector）。
-  // 电源键休眠中的定时唤醒一律按电池快速路径处理（接着电源也不进完整应用）。
   mains_ = computeMains() && !manualSleep_;
   ESP_LOGI(TAG, "power source: %s (reason: %s, %umV, charging=%d, usb=%d)",
            mains_ ? "mains" : "battery", battery::powerReasonName(mainsDetector_.reason()),
@@ -161,7 +146,6 @@ void PanelApp::begin(const Deps& deps) {
            batCache_.millivolts, batCache_.percent);
   if (battPhase_ == BattPhase::Interactive) enterInteractive(nowMs());
   if (fastWake_) {
-    // 快速路径不做首帧：面板保持上一帧，取数完成后由 presentSleepFrame 决定。
     dirty_ = false;
     forceFull_ = false;
     return;
@@ -184,8 +168,6 @@ void PanelApp::applySettings(uint32_t changed) {
     setLang(settings_.language == "en" ? Lang::En : Lang::Zh);
   }
   if ((changed & eego::settings::kChangedFrontlight) != 0) {
-    // 前光不可用（未探测到且无 present 覆盖）时跳过：硬件覆盖变化由 app_main
-    // 的设置订阅统一处理（setOverride + capabilities）。
     eego::FrontlightManager& frontlight = eego::FrontlightManager::instance();
     if (frontlight.frontlightAvailable()) {
       frontlight.setWarm(settings_.frontlight_warmth);
@@ -198,8 +180,6 @@ void PanelApp::applySettings(uint32_t changed) {
     const bool visibleNow = eego::FrontlightManager::instance().frontlightAvailable();
     if (page_ == Page::Settings) {
       if (visibleNow != frontlightRowsVisible_) {
-        // 前光行显隐变化：focus_ 是行下标，按 SettingId 重映射，保持焦点在同一
-        // 设置上（若该行被隐藏，落到其后第一个仍可见的行）。
         const std::vector<SettingId> before = visibleSettingsFor(frontlightRowsVisible_);
         const std::vector<SettingId> after = visibleSettingsFor(visibleNow);
         if (!after.empty()) {
@@ -218,17 +198,15 @@ void PanelApp::applySettings(uint32_t changed) {
           focus_ = 0;
         }
       }
-      markDirty(true);  // 前光行显隐变化 → 设置页整页重排
+      markDirty(true);
     }
     frontlightRowsVisible_ = visibleNow;
   }
   if ((changed & eego::settings::kChangedChargeSignal) != 0) {
-    // 充电脚极性已由 app_main 的订阅重配：立即重读，下一轮 service() 重新判定供电。
     charging_ = eego::PowerManager::instance().isCharging();
     batCache_.charging = charging_;
   }
   if ((changed & eego::settings::kChangedDataRefresh) != 0) {
-    // 全局刷新周期覆盖 dashboard 面板（面板上单独设定的周期优先）。
     dashboard_.setGlobalRefresh(settings_.data_refresh_s * 1000);
   }
   if ((changed & eego::settings::kChangedEpdRefresh) != 0) {
@@ -256,7 +234,6 @@ void PanelApp::onSettingsChanged(const eego::settings::Settings& values, uint32_
   PanelApp* self = static_cast<PanelApp*>(ctx);
   self->settings_ = values;
   self->applySettings(changed);
-  // 设置变更（设备设置页或 web 端应用）视为一次用户交互。
   if (changed != 0) self->noteInteraction(self->nowMs());
 }
 
@@ -267,7 +244,6 @@ battery::WakeInputs PanelApp::wakeInputs(uint64_t now_unix) const {
   in.interval_min = settings_.battery_refresh_min;
   in.night.start_min = settings_.sleep_start_min;
   in.night.end_min = settings_.sleep_end_min;
-  // 常供电只有夜间暂停会深睡：不按电量缩放/停止唤醒。
   in.battery_known = !mains_ && batCache_.millivolts > 0;
   in.battery_pct = batCache_.percent;
   in.charging = charging_ || batCache_.charging;
@@ -281,8 +257,6 @@ uint64_t PanelApp::plannedWakeAt() {
   if (mains_ && plan.kind != battery::WakeKind::NightPause) return 0;
   return plan.wake_unix;
 }
-
-// ── 跨任务通知（短平快）─────────────────────────────────────────────────────
 
 void PanelApp::notifyNetEvent(int wifiState) {
   wifiState_.store(wifiState);
@@ -298,14 +272,10 @@ void PanelApp::notifyAdminEvent(int type, int reason, uint32_t remainingS) {
 void PanelApp::drainNetBits() {
   const uint32_t bits = netBits_.exchange(0);
   if (bits == 0) return;
-  netStatusCacheMs_ = 0;  // WiFi 跃迁 → 立即刷新地址/信号缓存
+  netStatusCacheMs_ = 0;
   if (page_ != Page::Dashboard) markDirty();
 }
 
-// WiFi 持续失败 → 自动 AP 兜底（auto_ap_fallback，M13 F2）。单射频：热点会与 STA
-// 争信道，所以不在第一轮失败就开（WifiManager::apFallbackDue：连续 3 轮失败 / 已存
-// 网络 2 分钟不可见 / 无已存网络）；热点开着时 STA 继续重试，连上后自动关闭
-// （有客户端连着热点时宽限 2 分钟）。手动打开的恢复热点不自动关闭。
 void PanelApp::serviceApFallback(int64_t now) {
   if (fastWake_ || now - apFallbackCheckMs_ < 2000) return;
   apFallbackCheckMs_ = now;
@@ -330,7 +300,7 @@ void PanelApp::serviceApFallback(int64_t now) {
   apFallbackAuto_ = false;
   apConnectedSinceMs_ = -1;
   if (connected) {
-    fallbackArmed_ = false;  // 下一次离线可再次自动开热点
+    fallbackArmed_ = false;
     return;
   }
   if (fallbackArmed_ || portal.apActive() || !admin::adminApiRunning()) return;
@@ -346,7 +316,7 @@ void PanelApp::drainAdminMailbox() {
   if (adminQueue_ == nullptr) return;
   AdminMail mail;
   while (xQueueReceive(static_cast<QueueHandle_t>(adminQueue_), &mail, 0) == pdTRUE) {
-    noteInteraction(nowMs());  // 配网门户/恢复热点等管理事件：需立即显示
+    noteInteraction(nowMs());
     switch (mail.type) {
       case kEvPortalOpened:
         enterProvision();
@@ -354,7 +324,6 @@ void PanelApp::drainAdminMailbox() {
       case kEvPortalClosed:
         if (page_ == Page::Provision) {
           leaveProvision();
-          // 首次配网窗口超时：提示如何重新打开（无管理密码时设置 → 开启设置热点即重开门户）。
           if (mail.reason == 0) showBanner(tr(Str::ProvClosed), 10000);
         }
         break;
@@ -364,7 +333,6 @@ void PanelApp::drainAdminMailbox() {
         break;
       case kEvApFallbackOpened:
         netStatusCacheMs_ = 0;
-        // 整个热点窗口都显示怎么连（状态行横幅；关闭事件会清掉）。
         showBanner(tr(Str::RecoveryApStarted), 600000);
         break;
       case kEvApFallbackClosed:
@@ -383,13 +351,10 @@ void PanelApp::drainAdminMailbox() {
   }
 }
 
-// ── 主循环 ──────────────────────────────────────────────────────────────────
-
 void PanelApp::service() {
   const int64_t now = nowMs();
 
   if (restartRequested_) {
-    // 快速路径中有人按键：以完整应用重启（RTC 状态保持；面板不清屏）。
     ESP_LOGI(TAG, "button during battery wake: restarting into interactive mode");
     NetStack::instance().wifi().powerOff();
     battery::commitRtcState();
@@ -402,11 +367,9 @@ void PanelApp::service() {
   serviceKeepAwake(now);
   if (!mains_ &&
       eego::net::wifiAdminActive(now, admin::lastAuthenticatedRequestMs()) != adminActivePs_) {
-    applyWifiPowerSave();  // 管理端开始/停止使用：切换 modem sleep
+    applyWifiPowerSave();
   }
 
-  // 外部告警快照（无锁 acquire）：只有告警详情/状态页直接展示 store 内容；
-  // dashboard 告警面板由 DashboardRuntime::service 自行跟踪快照代际。
   if (deps_.publisher != nullptr) {
     auto snap = deps_.publisher->acquire();
     if (snap && snap->seq != snapshotSeq_) {
@@ -418,8 +381,6 @@ void PanelApp::service() {
 
   refreshBattery(now);
   if (now - lastChargeMs_ > 5000) {
-    // 充电脚与 USB 主机连接都只是寄存器/GPIO 读取：5s 一次，供电判定（含拔电
-    // 滞回）见 battery::MainsDetector。
     charging_ = eego::PowerManager::instance().isCharging();
     usbHost_ = eego::PowerManager::instance().usbHostConnected();
     lastChargeMs_ = now;
@@ -438,7 +399,6 @@ void PanelApp::service() {
   const bool wantMains = computeMains();
   if (wantMains != mains_ && !manualSleep_) {
     if (fastWake_) {
-      // 快速路径只初始化了最小子系统：接上电源后以完整应用重启。
       ESP_LOGI(TAG, "external power during battery wake: restarting");
       NetStack::instance().wifi().powerOff();
       battery::commitRtcState();
@@ -447,9 +407,7 @@ void PanelApp::service() {
     onModeChange(wantMains);
   }
   dashboard_.service(dashboardLive());
-  if (dashboard_.consumeConfigChanged()) noteInteraction(now);  // web 端应用/删除 dashboard
-  // web 端应用/删除 dashboard 后 runtime 自行重载；主页随可用性在
-  // Dashboard ↔ Onboarding 之间切换，依赖 dashboard 的告警详情一并退出。
+  if (dashboard_.consumeConfigChanged()) noteInteraction(now);
   const bool dashboardAvailable = dashboard_.available();
   if (dashboardAvailable != dashboardWasAvailable_) {
     dashboardWasAvailable_ = dashboardAvailable;
@@ -487,7 +445,6 @@ void PanelApp::service() {
                                                            eego::net::kWifiAdminActiveMs);
       NetStack::instance().wifi().deferRoamUntil(last_admin + eego::net::kWifiAdminActiveMs);
     }
-    // 蓝牙管理广播：常供电时常开；电池模式只在按键唤醒的交互期（首次配网页同样）。
     eego::ble::BleManager::instance().setAdminAllowed(
         settings_.ble_admin_enabled && !sleepPending_ &&
         (mains_ || battPhase_ == BattPhase::Interactive || page_ == Page::Provision));
@@ -497,8 +454,6 @@ void PanelApp::service() {
 
   if (now - lastScheduleCheckMs_ > 1000) {
     lastScheduleCheckMs_ = now;
-    // 常供电的夜间暂停：窗口内深睡到窗口结束（配网/BLE 配网期间推迟）。电池模式
-    // 由唤醒计划处理（交互期超时后的深睡计划会落到窗口结束，定时唤醒同理）。
     if (battPhase_ == BattPhase::Mains && !sleepPending_ &&
         !battery::keepAwakeBlocks(now, keepAwakeUntil(now)) &&
         !admin::ProvisionPortal::instance().apActive() &&
@@ -513,7 +468,6 @@ void PanelApp::service() {
   serviceScreens(now);
   batteryService(now);
   serviceSleep(now);
-  // 定时唤醒快速路径不做交互式渲染：深睡帧由 presentSleepFrame 统一决定。
   if (battPhase_ == BattPhase::Fetching) return;
   if (serviceTouchCalibration(now)) return;
 
@@ -532,7 +486,6 @@ void PanelApp::service() {
 
   if (page_ == Page::Dashboard) {
     if (touchMarkPending_ && now - lastRenderMs_ >= kRenderThrottleMs) {
-      // 「显示触点」：整页离屏重画（抹掉上一个标记）→ 叠加标记 → B/W 快刷。
       touchMarkPending_ = false;
       dashboard_.invalidateAll();
       dashboard_.renderOffscreen();
@@ -547,7 +500,7 @@ void PanelApp::service() {
       return;
     }
     if (dashboard_.needsRender() && displayAllowed(now)) {
-      syncDeviceState(now, true);  // 「空闲 · 下次」以本次刷屏时刻为参照
+      syncDeviceState(now, true);
       dashboard_.render();
       rotateShown_ = true;
       displayedThisBoot_ = true;
@@ -561,7 +514,6 @@ void PanelApp::service() {
     return;
   }
 
-  // 状态栏时钟：仅当显示的分钟（或时间可用性）变化时重绘
   if (now - lastClockCheckMs_ >= kClockCheckMs) {
     lastClockCheckMs_ = now;
     const int64_t key =
@@ -577,11 +529,8 @@ void PanelApp::service() {
   }
 }
 
-// ── 空闲感知刷新节奏 ────────────────────────────────────────────────────────
-
 void PanelApp::configureRefreshPolicy() {
   RefreshPolicyConfig config;
-  // 电池模式：唤醒 → 渲染 → 深睡，显示节奏由电源 FSM 决定，不做空闲合并。
   config.idle_after_min = mains_ ? settings_.idle_after_min : 0;
   config.idle_refresh_min = settings_.idle_refresh_min;
   config.critical_immediate = settings_.idle_critical_immediate;
@@ -598,7 +547,6 @@ void PanelApp::noteInteraction(int64_t now) {
 }
 
 bool PanelApp::displayAllowed(int64_t now) {
-  // 配网门户页 / 蓝牙配对码页：用户正在操作手机或电脑，始终即时刷新。
   if (page_ == Page::Provision || page_ == Page::BlePair) {
     return true;
   }
@@ -612,8 +560,6 @@ bool PanelApp::displayAllowed(int64_t now) {
              static_cast<unsigned>(settings_.idle_refresh_min));
   }
   if (!idleAnnounced_) {
-    // 刚进入空闲：即时刷一次，让状态行显示「空闲 · 下次 HH:MM」（否则屏幕会继续
-    // 显示「运行中」直到下一个边界）。
     idleAnnounced_ = true;
     return true;
   }
@@ -636,10 +582,7 @@ void PanelApp::noteDisplayed() {
   }
 }
 
-// ── 输入 ────────────────────────────────────────────────────────────────────
-
 namespace {
-
 ConfirmSource buttonSource(eego::ButtonId id) {
   switch (id) {
     case eego::ButtonId::Up: return ConfirmSource::Up;
@@ -664,7 +607,6 @@ void PanelApp::noteInputResume() { inputResumeUs_ = esp_timer_get_time(); }
 
 bool PanelApp::inputEventStale(int64_t timestampUs, int64_t nowUs) const {
   if (timestampUs <= 0 || nowUs < timestampUs) return true;
-  // 渲染等阻塞期间入队的事件：以 app_task 恢复时刻起算年龄。
   const int64_t reference = std::max(timestampUs, inputResumeUs_);
   return nowUs > reference && nowUs - reference > eego::kInputActionMaxAgeUs;
 }
@@ -683,17 +625,15 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
     stale = buttonGestureStale_[up] || buttonGestureStale_[down] ||
             inputEventStale(ev.timestamp_us, now_us);
   } else {
-    // 同一按键手势的后续事件沿用其 Press 的判定（整段保留或整段丢弃）。
     stale = buttonGestureStale_[index] || ev.timestamp_us <= 0 || now_us < ev.timestamp_us;
   }
   if (stale) return;
   if (fastWake_) {
-    restartRequested_ = true;  // 快速路径没有完整输入/显示栈：重启进交互模式
+    restartRequested_ = true;
     return;
   }
   if (ev.action == eego::ButtonAction::Press && wakePressGuardUntilMs_ != 0 &&
       now_us / 1000 < wakePressGuardUntilMs_) {
-    // 按键唤醒：唤醒的那一下（ButtonManager 启动时仍按着）只唤醒，不执行动作。
     wakePressGuardUntilMs_ = 0;
     buttonGestureStale_[index] = true;
     noteInteraction(now_us / 1000);
@@ -701,7 +641,7 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
   }
   lastInputMs_ = now_us / 1000;
   noteInteraction(lastInputMs_);
-  if (touchCal_.active()) {  // 触摸校准全屏模态：实体键 保存/重做/取消
+  if (touchCal_.active()) {
     touchCal_.handleButton(ev, lastInputMs_);
     return;
   }
@@ -720,8 +660,6 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
       if (wanted.rfind("trigger:", 0) == 0) {
         control = buttonTriggerControl(ev.id);
       } else if (ev.id == eego::ButtonId::Power) {
-        // 实体 Power 再按一次是最强确认：触控/焦点布防的控件一律可由 Power
-        // 确认，与当前焦点无关（触控点按不移动实体焦点）。
         control = wanted;
       } else {
         control = focusedControl();
@@ -737,7 +675,6 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
   }
   if (ev.action == eego::ButtonAction::LongPress) {
     if (confirm_ != ConfirmKind::None) {
-      // 布防期间长按一律取消（不确认、也不执行长按动作）。
       suppressButtonShort_[index] = true;
       clearConfirm();
       return;
@@ -758,7 +695,6 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
     }
     if (confirm_ != ConfirmKind::None) {
       if (confirmState_.pressing() && confirmState_.completePress(source, now_us)) {
-        // 确认按键只执行布防动作，不再触发其本身的短按动作。
         executeArmedConfirm();
         suppressButtonShort_[index] = false;
         return;
@@ -766,9 +702,6 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
       clearConfirm();
     }
     if (ev.id == eego::ButtonId::Power) {
-      // Power 短按 = 「选择」：有焦点（设置行、软键、仪表盘焦点框）就执行焦点项，
-      // 仅在没有焦点时休眠。外接电源下休眠需再按一次确认（深睡后管理页不可达）。
-      // 引导页是「主页」：只有用户移动过软键焦点才视为有焦点，否则仍是休眠键。
       const std::string focused =
           page_ == Page::Onboarding && !softFocusMoved_ ? std::string() : focusedControl();
       if (!focused.empty() && page_ != Page::Provision) {
@@ -816,13 +749,12 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
     stale = inputEventStale(ev.timestamp_us, now_us);
     gestureStale = stale;
   } else {
-    // 同一手势的后续事件（Move/Release/Tap/Hold/Swipe…）沿用起始 Press 的判定。
     stale = gestureStale || ev.timestamp_us <= 0 || now_us < ev.timestamp_us;
   }
   if (stale) return;
   lastInputMs_ = now_us / 1000;
   noteInteraction(lastInputMs_);
-  if (touchCal_.active()) {  // 触摸校准全屏模态：按原始坐标采样，不走页面命中
+  if (touchCal_.active()) {
     touchCal_.handleTouch(ev, lastInputMs_);
     return;
   }
@@ -866,7 +798,6 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
       break;
     case eego::TouchEventType::Hold:
       if (confirm_ != ConfirmKind::None) {
-        // 布防期间长按取消，不确认。
         suppressTouchTap_ = true;
         clearConfirm();
       } else {
@@ -881,7 +812,6 @@ void PanelApp::handleTouch(const eego::TouchEvent& ev) {
       if (confirm_ != ConfirmKind::None) {
         if (confirmState_.pressing() &&
             confirmState_.completePress(ConfirmSource::Touch, now_us)) {
-          // 再点一次同一软键/行即确认；该次点按不再执行其本身动作。
           executeArmedConfirm();
           suppressTouchTap_ = false;
           return;
@@ -1054,8 +984,6 @@ void PanelApp::goHome() {
 }
 
 void PanelApp::frontBack() {
-  // 前置键短按 = 返回：子页面回到来源/主页；dashboard 先退跳转栈，再回第一屏。
-  // 未配置 dashboard 时主页就是「空仪表盘」页。
   if (page_ == Page::Provision) return;
   if (page_ == Page::Dashboard || page_ != home()) {
     back();
@@ -1101,10 +1029,7 @@ void PanelApp::flushNavigation(int64_t now_us) {
   if (kind == NavigationKind::Page) movePage(delta);
 }
 
-// ── 导航 ────────────────────────────────────────────────────────────────────
-
 namespace {
-
 size_t wrappedIndex(size_t current, int delta, size_t count) {
   if (count == 0) return 0;
   int64_t next = (static_cast<int64_t>(current) + delta) % static_cast<int64_t>(count);
@@ -1112,8 +1037,6 @@ size_t wrappedIndex(size_t current, int delta, size_t count) {
   return static_cast<size_t>(next);
 }
 
-// 有序取值表单步：dir>0 下一档、dir<0 上一档；wrap=false 时两端钳制。
-// current 不在表中时取方向上最近的一档。
 template <typename T, size_t N>
 T stepChoice(const T (&list)[N], T current, int dir, bool wrap) {
   size_t idx = N;
@@ -1140,13 +1063,13 @@ T stepChoice(const T (&list)[N], T current, int dir, bool wrap) {
   return list[idx];
 }
 
-constexpr uint8_t kBrightnessSteps[] = {10, 25, 40, 60, 80, 100};  // 含默认 60
+constexpr uint8_t kBrightnessSteps[] = {10, 25, 40, 60, 80, 100};
 constexpr uint8_t kWarmthSteps[] = {0, 25, 50, 75, 100};
 constexpr uint32_t kDataRefreshSteps[] = {0, 60, 300, 900, 1800, 3600};
 constexpr uint32_t kEpdFullSteps[] = {0, 3600, 21600, 86400, 604800};
-constexpr uint32_t kBatteryInteractiveSteps[] = {20, 30, 60, 120, 300, 600};  // 秒
-constexpr uint32_t kIdleAfterSteps[] = {0, 1, 2, 5, 10, 15, 30, 60};  // 分钟；0 = 关闭
-constexpr uint32_t kIdleRefreshSteps[] = {2, 5, 10, 15, 30, 60};       // 分钟（整除 60）
+constexpr uint32_t kBatteryInteractiveSteps[] = {20, 30, 60, 120, 300, 600};
+constexpr uint32_t kIdleAfterSteps[] = {0, 1, 2, 5, 10, 15, 30, 60};
+constexpr uint32_t kIdleRefreshSteps[] = {2, 5, 10, 15, 30, 60};
 constexpr int kTimezoneMinMin = -720;
 constexpr int kTimezoneMaxMin = 840;
 
@@ -1168,7 +1091,6 @@ Str wakeSourceText(battery::WakeSource source) {
   }
 }
 
-// "每 N 秒/分钟/小时/天"：整除时取最大单位。
 void formatEvery(uint32_t seconds, char* out, size_t cap) {
   if (seconds >= 86400 && seconds % 86400 == 0) {
     snprintf(out, cap, tr(Str::PollEveryDayFmt), static_cast<unsigned>(seconds / 86400));
@@ -1183,7 +1105,6 @@ void formatEvery(uint32_t seconds, char* out, size_t cap) {
 
 }  // namespace
 
-// Page 维度：dashboard 上/下一屏；设置行与告警列表的上/下一项；状态子页。
 void PanelApp::movePage(int delta) {
   switch (page_) {
     case Page::Dashboard:
@@ -1195,7 +1116,7 @@ void PanelApp::movePage(int delta) {
     case Page::Settings: {
       const size_t oldPage = settingsPage();
       focus_ = wrappedIndex(focus_, delta, visibleSettings().size());
-      markDirty(settingsPage() != oldPage);  // 同页焦点移动走 Fast；跨子页整页重绘
+      markDirty(settingsPage() != oldPage);
       break;
     }
     case Page::Status: {
@@ -1213,7 +1134,6 @@ void PanelApp::movePage(int delta) {
   }
 }
 
-// 蓝牙配对：出现配对码时临时接管屏幕；配对结束（成功/失败/超时）回到原页并提示。
 void PanelApp::serviceBlePairing(int64_t now) {
   const eego::ble::Status ble = eego::ble::BleManager::instance().status();
   if (ble.pairing_passkey_valid) {
@@ -1240,7 +1160,7 @@ void PanelApp::serviceBlePairing(int64_t now) {
     bleLinkSeen_ = ble.link;
     if (wasLinked != linked) {
       if (linked) noteInteraction(now);
-      markDirty();  // 状态栏「蓝牙」胶囊
+      markDirty();
     }
   }
 }
@@ -1248,7 +1168,6 @@ void PanelApp::serviceBlePairing(int64_t now) {
 void PanelApp::leaveBlePair() {
   blePairShownKey_ = 0;
   if (blePairReturn_ == Page::Provision) {
-    // 门户页不能经 gotoPage 进入（会清掉配网状态）；直接恢复。
     page_ = Page::Provision;
     ++pageEpoch_;
     markDirty(true);
@@ -1266,7 +1185,6 @@ void PanelApp::gotoPage(Page p) {
   page_ = p;
   ++pageEpoch_;
   navigation_.cancel();
-  // 详情页默认聚焦「确认」软键；其余页从第一个软键/行开始。
   focus_ = 0;
   softFocusMoved_ = false;
   statusPage_ = 0;
@@ -1276,7 +1194,7 @@ void PanelApp::gotoPage(Page p) {
   if (p == Page::Dashboard) dashboard_.invalidateAll();
   if (p == Page::Onboarding) onboardingKey_.clear();
   syncDoublePress(false);
-  markDirty(true);  // 切页 → 下一帧 Full
+  markDirty(true);
 }
 
 void PanelApp::back() {
@@ -1285,8 +1203,6 @@ void PanelApp::back() {
       gotoPage(home());
       break;
     case Page::Help:
-      // 帮助页的来源页可能已不可进入（dashboard 期间被卸载/失效）：gotoPage 会
-      // 静默拒绝，Back 就卡在帮助页——此时回 home()。
       gotoPage(helpReturn_ == Page::Help || helpReturn_ == Page::Provision ||
                        (helpReturn_ == Page::Dashboard && !dashboard_.available())
                    ? home()
@@ -1297,11 +1213,9 @@ void PanelApp::back() {
       gotoPage(home());
       break;
     case Page::BlePair:
-      // 只离开配对码页；配对本身继续，直到对端完成或超时。
       leaveBlePair();
       break;
     case Page::Dashboard:
-      // 先退 dashboard 内部返回栈（跳转动作），否则回到默认页第一屏。
       if (!dashboard_.back() && !dashboard_.atHome()) dashboard_.home();
       break;
     default:
@@ -1309,14 +1223,12 @@ void PanelApp::back() {
   }
 }
 
-// Focus 维度：dashboard 面板焦点；设置子页跳转；其余页软键焦点。
 void PanelApp::moveFocus(int delta) {
   switch (page_) {
     case Page::Dashboard:
       dashboard_.moveFocus(delta, false);
       break;
     case Page::Settings: {
-      // 设置页不循环：与页码条两端置灰的箭头一致。
       const size_t rows = visibleSettings().size();
       const size_t pages = std::max<size_t>(1, (rows + kSettingsRowsPerPage - 1) /
                                                    kSettingsRowsPerPage);
@@ -1366,12 +1278,10 @@ void PanelApp::activateFocused() {
 void PanelApp::activateSoftKey(size_t idx) {
   switch (page_) {
     case Page::Onboarding:
-      // [状态] [设置]
       if (idx == 0) gotoPage(Page::Status);
       else if (idx == 1) gotoPage(Page::Settings);
       break;
     case Page::AlertDetail: {
-      // [确认] [静音] [删除] [趋势?] [返回]
       const DashboardAlertItem* item = detailItem();
       const alert_core::AlertRecord* rec = detailRecord();
       const size_t n = softKeyCount();
@@ -1393,13 +1303,11 @@ void PanelApp::activateSoftKey(size_t idx) {
       break;
     }
     case Page::Status:
-      // [刷新] [保持唤醒] [返回]
       if (idx == 0) doPollNow();
       else if (idx == 1) toggleKeepAwake();
       else if (idx == 2) back();
       break;
     case Page::Settings:
-      // [← 上一页] [返回] [下一页 →]
       if (idx == 0) moveFocus(-1);
       else if (idx == 1) back();
       else if (idx == 2) moveFocus(1);
@@ -1412,10 +1320,7 @@ void PanelApp::activateSoftKey(size_t idx) {
   }
 }
 
-// ── 设置行 ──────────────────────────────────────────────────────────────────
-
 std::vector<SettingId> PanelApp::visibleSettings() const {
-  // 前光不可用（未探测到且无 present 覆盖）→ 隐藏三行前光设置。
   return visibleSettingsFor(eego::FrontlightManager::instance().frontlightAvailable());
 }
 
@@ -1545,7 +1450,6 @@ bool PanelApp::adjustSettingRow(SettingId id, int dir, bool coarse, bool wrap) {
     case SettingId::BatteryRefresh:
       next.battery_refresh_min = stepChoice(eego::settings::kBatteryRefreshChoices,
                                             settings_.battery_refresh_min, step, wrap);
-      // 最长不刷屏不得短于唤醒间隔：随之抬到第一个合法档。
       if (next.battery_max_stale_min < next.battery_refresh_min) {
         for (uint32_t choice : eego::settings::kBatteryMaxStaleChoices) {
           if (choice >= next.battery_refresh_min) {
@@ -1570,7 +1474,7 @@ bool PanelApp::adjustSettingRow(SettingId id, int dir, bool coarse, bool wrap) {
           kBatteryInteractiveSteps, settings_.battery_interactive_timeout_s, step, wrap);
       break;
     case SettingId::SleepPlan: {
-      size_t idx = kSleepPlanCount;  // 自定义计划（web 设置）视为不在预设表中
+      size_t idx = kSleepPlanCount;
       for (size_t i = 0; i < kSleepPlanCount; ++i) {
         if (kSleepPlans[i].start == settings_.sleep_start_min &&
             kSleepPlans[i].end == settings_.sleep_end_min) {
@@ -1616,8 +1520,6 @@ bool PanelApp::adjustSettingRow(SettingId id, int dir, bool coarse, bool wrap) {
   markDirty();
   return true;
 }
-
-// ── 触控 ────────────────────────────────────────────────────────────────────
 
 PanelApp::TouchHit PanelApp::resolveTouchHit(int16_t x, int16_t y) const {
   TouchHit hit;
@@ -1699,8 +1601,6 @@ void PanelApp::onTouchTap(int16_t x, int16_t y) {
       activateSoftKey(static_cast<size_t>(hit.index));
       return;
     case TouchHit::Kind::Row: {
-      // 一次点按 = 聚焦 + 激活（危险动作仍经 armConfirm 布防）；点值列左/右半
-      // 对取值行做 -1/+1 调整。
       const std::vector<SettingId> rows = visibleSettings();
       const size_t row = static_cast<size_t>(hit.index);
       if (row >= rows.size()) return;
@@ -1722,7 +1622,6 @@ void PanelApp::onTouchTap(int16_t x, int16_t y) {
 }
 
 void PanelApp::onTouchHold(int16_t x, int16_t y) {
-  // 设置页长按值列：时区按 6 小时步进，其余取值行同点按（±1 档）。
   if (page_ != Page::Settings) return;
   const TouchHit hit = resolveTouchHit(x, y);
   if (hit.kind != TouchHit::Kind::Row || !(hit.valueLeft || hit.valueRight)) return;
@@ -1738,8 +1637,6 @@ void PanelApp::onTouchHold(int16_t x, int16_t y) {
 }
 
 void PanelApp::onTouchSwipe(eego::TouchEventType type, int64_t now_us) {
-  // 左滑/上滑 = 下一屏（项）；右滑/下滑 = 上一屏（项）。子页面在首屏（首项）
-  // 右滑 = 返回；dashboard 是主页，不返回。
   const bool forward =
       type == eego::TouchEventType::SwipeLeft || type == eego::TouchEventType::SwipeUp;
   const bool swipeRight = type == eego::TouchEventType::SwipeRight;
@@ -1751,9 +1648,9 @@ void PanelApp::onTouchSwipe(eego::TouchEventType type, int64_t now_us) {
     case Page::Settings:
       if (pageEdge(delta)) {
         if (swipeRight) back();
-        break;  // 已在边界：不循环
+        break;
       }
-      requestNavigation(NavigationKind::Focus, delta, now_us);  // 设置子页
+      requestNavigation(NavigationKind::Focus, delta, now_us);
       break;
     case Page::AlertDetail:
     case Page::Status:
@@ -1772,8 +1669,6 @@ void PanelApp::onTouchSwipe(eego::TouchEventType type, int64_t now_us) {
 }
 
 void PanelApp::syncDoublePress(bool force) {
-  // 双击检测会把 Up/Down 短按延迟 kInputDoublePressUs：只在当前页确有
-  // up.double / down.double 有效绑定时开启。
   const std::string context = pageContext();
   const eego::admin::InputBindingSet set = eego::admin::InputBindings::instance().snapshot();
   lastDoublePressSyncMs_ = nowMs();
@@ -1785,7 +1680,7 @@ void PanelApp::syncDoublePress(bool force) {
   doublePressRevision_ = set.revision;
   doublePressContext_ = context;
   auto bound = [&](eego::admin::InputTrigger trigger) {
-    if (page_ == Page::Provision) return false;  // 配网页不分发绑定
+    if (page_ == Page::Provision) return false;
     eego::admin::InputBinding binding;
     return eego::admin::resolveInputBinding(set.bindings, context, trigger, binding) &&
            binding.action.kind != eego::admin::InputActionKind::None;
@@ -1796,10 +1691,6 @@ void PanelApp::syncDoublePress(bool force) {
                                 bound(eego::admin::InputTrigger::DownDouble));
 }
 
-// ── 动作 ────────────────────────────────────────────────────────────────────
-
-// 告警详情「确认」：外部告警经 net_task 落 store（Active → Acked）并在
-// dashboard 视图中压制本代际；规则派生事件只在 dashboard 视图压制。
 void PanelApp::doAck() {
   const DashboardAlertItem* item = detailItem();
   if (item == nullptr) return;
@@ -1815,7 +1706,6 @@ void PanelApp::doAck() {
   if (dashboard_.acknowledgeEvent(identity)) {
     showBanner(tr(Str::DoneAck), 3000);
   } else if (!item->core_id.empty()) {
-    // dashboard 未持有该事件（理论上不会发生）：直接确认 store 记录。
     const AlertActionResult r =
         NetStack::instance().alertAction({AlertActionType::Ack, item->core_id, "panel"});
     if (r.code == AlertActionResult::Code::Ok) {
@@ -1841,10 +1731,6 @@ void PanelApp::doClear(const std::string& id) {
 }
 
 void PanelApp::doMute(const alert_core::AlertRecord& rec) {
-  // store 级静音（M21）：指纹规则经 net_task 落入 AlertStore（重估 muted
-  // 标志 + 快照发布），并持久化到 config.json（重启后恢复）。
-  // query→append→set 全程在 app_task 上下文，与 admin 配置热生效同任务串行，
-  // 无读改写竞争。
   NetStack& net = NetStack::instance();
   std::vector<alert_core::MuteRule> rules;
   if (!net.queryMuteRules(rules)) {
@@ -1862,7 +1748,7 @@ void PanelApp::doMute(const alert_core::AlertRecord& rec) {
     alert_core::MuteRule rule;
     rule.match_by = alert_core::MuteRule::MatchBy::Fingerprint;
     rule.value = rec.fingerprint;
-    rule.expires_at = 0;  // 面板静音语义：不过期（清除走 S4 清静音）
+    rule.expires_at = 0;
     rules.push_back(std::move(rule));
   }
   std::string err;
@@ -1873,7 +1759,6 @@ void PanelApp::doMute(const alert_core::AlertRecord& rec) {
   persistMuteRules(rules);
   muteRuleCount_ = rules.size();
   showBanner(tr(Str::DoneMute), 3000);
-  // 静音记录不再进入 dashboard 事件：详情列表下一次刷新时移到相邻条目。
   refreshDetailItems();
   markDirty();
 }
@@ -1918,7 +1803,6 @@ void PanelApp::doPollNow() {
 }
 
 void PanelApp::activateSettingRow(SettingId id) {
-  // 取值行：前进一档（循环）；动作/查看行：执行或横幅展示。
   if (settingAdjustable(id)) {
     adjustSettingRow(id, 1, false, true);
     return;
@@ -2000,8 +1884,6 @@ void PanelApp::doOpenRecovery() {
   admin::ProvisionPortal& portal = admin::ProvisionPortal::instance();
   esp_err_t err = ESP_OK;
   if (!portal.apActive()) {
-    // 尚无管理密码（首次配网窗口超时后）：重新打开配网门户——恢复热点上只有需要
-    // 登录的诊断页，没有密码就无从配置。
     err = admin::AuthManager::instance().hasPassword() ? portal.openApFallback() : portal.open();
   }
   if (err != ESP_OK && !(err == ESP_ERR_INVALID_STATE && portal.apActive())) {
@@ -2009,7 +1891,7 @@ void PanelApp::doOpenRecovery() {
     showBanner(tr(Str::SetupHotspotFailed), 4000);
     return;
   }
-  noteInteraction(nowMs());  // 电池交互期：恢复热点开启期间不会深睡
+  noteInteraction(nowMs());
   if (portal.isApFallbackActive()) showBanner(tr(Str::RecoveryApStarted), 600000);
   markDirty(true);
 }
@@ -2292,11 +2174,7 @@ void PanelApp::showBannerFmt(uint32_t ms, const char* fmt, ...) {
   showBanner(buf, ms);
 }
 
-// ── 电源模式 ────────────────────────────────────────────────────────────────
-
 bool PanelApp::computeMains() {
-  // GPIO11 是充电状态而非 VBUS：满电后充电停止不等于拔电。判定见 MainsDetector
-  // （充电/USB 主机/锁存 + 电压滞回）。
   battery::PowerSample sample;
   sample.charging = charging_ || batCache_.charging;
   sample.usb_host = usbHost_;
@@ -2307,8 +2185,8 @@ bool PanelApp::computeMains() {
 
 void PanelApp::onModeChange(bool mains) {
   mains_ = mains;
-  configureRefreshPolicy();          // 电池模式不做空闲合并
-  noteInteraction(nowMs());          // 插拔电源视为一次交互
+  configureRefreshPolicy();
+  noteInteraction(nowMs());
   ESP_LOGI(TAG, "power mode -> %s (reason: %s, %umV, charging=%d, usb=%d)",
            mains ? "mains" : "battery", battery::powerReasonName(mainsDetector_.reason()),
            batCache_.millivolts, (charging_ || batCache_.charging) ? 1 : 0, usbHost_ ? 1 : 0);
@@ -2316,12 +2194,11 @@ void PanelApp::onModeChange(bool mains) {
   eego::ble::BleManager::instance().setBatteryScanWindow(false);
   if (mains) {
     battPhase_ = BattPhase::Mains;
-    // 常供电不再走电池深睡（夜间暂停仍由 service() 的窗口检查发起）。
     sleepPending_ = false;
     sleepIdleWait_.active = false;
     NetStack::instance().reconnectNow();
   } else {
-    enterInteractive(nowMs());  // 拔电时用户就在旁边：先保持交互，超时后对齐深睡
+    enterInteractive(nowMs());
   }
   dashboard_.setMains(dashboardLive());
   applyWifiPowerSave();
@@ -2341,7 +2218,6 @@ void PanelApp::enterInteractive(int64_t now) {
   batchStarted_ = false;
   noteInteraction(now);
   dashboard_.setSleepFrame(false);
-  // BLE 被动扫描：电池模式每个交互窗口最多扫一轮（与旧 Serving 窗口一致）。
   eego::ble::BleManager::instance().setBatteryScanWindow(true);
   applyWifiPowerSave();
 }
@@ -2356,8 +2232,6 @@ void PanelApp::startNetIdleWait(NetIdleWait& w, int64_t now, int64_t budgetMs) {
 int PanelApp::pollNetIdle(NetIdleWait& w, int64_t now) {
   if (!w.active) return 1;
   if (now < w.nextProbeMs) return 0;
-  // net_task 按序处理命令：WaitIdle 被执行即说明此前入队的工作全部完成。
-  // 超时的探测命令留在队列中稍后被无害消费；退避间隔把它们限制在个位数。
   if (NetStack::instance().waitIdle(kNetIdleProbeMs)) {
     w.active = false;
     return 1;
@@ -2380,8 +2254,6 @@ void PanelApp::batteryService(int64_t now) {
     case BattPhase::Mains:
       return;
     case BattPhase::Fetching: {
-      // 定时唤醒：一批拉取全部到期源，硬预算 kFastWakeBudgetMs（自启动起），到点
-      // 无论结果如何都渲染已有数据并深睡。
       if (!dashboard_.available()) {
         requestSleep(now, "no dashboard");
         return;
@@ -2404,18 +2276,14 @@ void PanelApp::batteryService(int64_t now) {
       return;
     }
     case BattPhase::Interactive: {
-      // 配网门户/恢复热点/BLE 配网期间不睡（用户正在用手机操作）。
       if (admin::ProvisionPortal::instance().apActive() ||
           eego::ble::BleManager::instance().sleepBlocked()) {
         noteInteraction(now);
         return;
       }
       if (!batchStarted_ && (wifi_up || now - phaseStartMs_ >= kInteractiveWifiWaitMs)) {
-        // 交互期 dashboard 按常供电节奏自行拉取；这里只记录批次起点用于失败计数。
         batchStarted_ = true;
       }
-      // 管理后台的已认证请求同样算「有人在用」（浏览 web 端时不深睡）。
-      // 保持唤醒期间不睡；到期后按最后一次活动重新判定（过期即恢复原节奏）。
       const int64_t last = std::max(refreshPolicy_.lastInteractionMs(),
                                     admin::lastAuthenticatedRequestMs());
       if (battery::interactiveSleepDue(now, last, settings_.battery_interactive_timeout_s,
@@ -2432,15 +2300,12 @@ void PanelApp::requestSleep(int64_t now, const char* why) {
   ESP_LOGI(TAG, "sleep requested: %s", why);
   sleepPending_ = true;
   sleepRequestedMs_ = now;
-  // 停止取数：在途请求被取消，后续 tick 不再发起新请求（深睡前不带 HTTP 断电）。
   dashboard_.cancelBatteryCycle();
   startNetIdleWait(sleepIdleWait_, now, fastWake_ ? kFastSleepIdleBudgetMs : kSleepIdleBudgetMs);
 }
 
 void PanelApp::serviceSleep(int64_t now) {
   if (!sleepPending_) return;
-  // 交互期内有新输入/管理请求 → 取消本次休眠（常供电夜间暂停/定时唤醒不受影响）。
-  // 电源键休眠（入睡前）只认本机输入：浏览 web 端不阻止用户主动休眠。
   const int64_t last_input = refreshPolicy_.lastInteractionMs();
   const bool manual = manualSleep_ && !fastWake_;
   const bool cancelled =
@@ -2452,7 +2317,7 @@ void PanelApp::serviceSleep(int64_t now) {
     if (!fastWake_) manualSleep_ = false;
     sleepPending_ = false;
     sleepIdleWait_.active = false;
-    dashboard_.setMains(dashboardLive());  // 恢复取数
+    dashboard_.setMains(dashboardLive());
     return;
   }
   if (battPhase_ != BattPhase::Fetching && battery::keepAwakeBlocks(now, keepAwakeUntil(now))) {
@@ -2497,7 +2362,6 @@ void PanelApp::sleepNow() {
   batCache_ = eego::PowerManager::instance().readBattery();
   const uint64_t now_unix = TimeSource::valid() ? TimeSource::now() : 0;
 
-  // 失败退避：只有电池取数批次计数（夜间暂停/常供电不计）。
   if (!mains_ && batchStarted_) {
     if (batchSucceeded()) {
       rtc.consecutive_failures = 0;
@@ -2508,7 +2372,6 @@ void PanelApp::sleepNow() {
   }
   const battery::WakePlan plan = battery::planNextWake(wakeInputs(now_unix));
 
-  // 无线先关（刷屏的数秒内 WiFi 不再耗电）；记录本次关联的 AP 供下次快连。
   if (!fastWake_ && eego::ble::BleManager::instance().beforeSleep() != ESP_OK) {
     ESP_LOGW(TAG, "BLE stop failed; deep sleep powers the radio down anyway");
   }
@@ -2520,7 +2383,7 @@ void PanelApp::sleepNow() {
     memcpy(rtc.ap_bssid, ap.bssid, sizeof(rtc.ap_bssid));
     snprintf(rtc.ap_ssid, sizeof(rtc.ap_ssid), "%s", ap.ssid.c_str());
   } else if (fastWake_) {
-    rtc.ap_valid = 0;  // 提示没能连上：下次走常规扫描
+    rtc.ap_valid = 0;
   }
   NetStack::instance().wifi().powerOff();
 
@@ -2536,7 +2399,6 @@ void PanelApp::sleepNow() {
            static_cast<int>(plan.kind), static_cast<unsigned>(plan.interval_min),
            static_cast<unsigned long long>(plan.wake_unix),
            static_cast<unsigned>(rtc.consecutive_failures));
-  // 电量过低：只留电源键（↑/↓ 误触会反复耗电）；其余情况电源键 + ↑/↓。
   battery::deepSleep(plan.sleep_s, plan.kind != battery::WakeKind::CriticalBattery);
 }
 
@@ -2548,7 +2410,7 @@ void PanelApp::sleepByPowerKey(int64_t now) {
   }
   ESP_LOGI(TAG, "power key: sleep (%s)", mains_ ? "mains" : "battery");
   clearConfirm();
-  if (keepAwakeUntil(now) != 0) admin::setKeepAwakeMinutes(0);  // 手动休眠优先于保持唤醒
+  if (keepAwakeUntil(now) != 0) admin::setKeepAwakeMinutes(0);
   manualSleep_ = true;
   requestSleep(now, "power key");
 }
@@ -2569,7 +2431,7 @@ void PanelApp::shutdownNow() {
 
   battery::RtcState& rtc = battery::rtcState();
   rtc.manual_sleep = 0;
-  rtc.frame.valid = 0;  // 面板不再是记录的帧：下次（若仍在深睡兜底中被唤醒）不预载
+  rtc.frame.valid = 0;
   battery::commitRtcState();
 
   if (deps_.boot.displayReady && deps_.canvas != nullptr && deps_.display != nullptr) {
@@ -2610,7 +2472,6 @@ void PanelApp::drawNotice(const char* title, const char* line1, const char* line
   eego::PortraitCanvas& c = *deps_.canvas;
   c.clear();
   c.useUiContentRect();
-  // 标题 + 三行说明，整体在内容区垂直居中，左对齐于 kInnerX。
   const int16_t titleLh = lineHeight(style::kTitle.scale);
   const int16_t captionLh = lineHeight(style::kCaption.scale);
   const int16_t blockH = static_cast<int16_t>(titleLh + 8 + 3 * captionLh);
@@ -2628,7 +2489,6 @@ void PanelApp::drawNotice(const char* title, const char* line1, const char* line
   c.resetClip();
 }
 
-// 跨深睡的轮播位置（RTC 慢速内存：深睡保持，上电清零）。
 RTC_DATA_ATTR static uint32_t s_rotateScreen = 0;
 RTC_DATA_ATTR static uint64_t s_rotateEpoch = 0;
 
@@ -2639,7 +2499,6 @@ void PanelApp::rotateForSleepFrame(uint64_t slotUnix) {
     s_rotateEpoch = 0;
     return;
   }
-  // 每次唤醒至多前进一屏：周期序号（按本次刷屏的名义时刻）变化才前进。
   const uint64_t epoch = screenRotateEpoch(slotUnix, nowMs(), settings_.timezone_offset_min,
                                            settings_.screen_rotate_min);
   uint32_t index = s_rotateScreen;
@@ -2650,7 +2509,6 @@ void PanelApp::rotateForSleepFrame(uint64_t slotUnix) {
 }
 
 void PanelApp::serviceScreens(int64_t now) {
-  // 远程切屏（web「在设备上显示此屏」/ API）：视为一次交互，立即显示。
   uint32_t requested = 0;
   if (admin::consumeScreenRequest(requested) && dashboard_.available() &&
       battPhase_ != BattPhase::Fetching) {
@@ -2659,8 +2517,6 @@ void PanelApp::serviceScreens(int64_t now) {
     noteInteraction(now);
   }
 
-  // 空闲自动轮播：只在 dashboard 页、非定时唤醒批次；渲染仍受空闲刷新节奏约束，
-  // 上一次轮播画面未显示前不再前进（不跳屏）。
   const uint32_t period = settings_.screen_rotate_min;
   if (period == 0 || page_ != Page::Dashboard || dashboard_.screenCount() < 2 ||
       battPhase_ == BattPhase::Fetching) {
@@ -2679,7 +2535,7 @@ void PanelApp::serviceScreens(int64_t now) {
     } else if (epoch != rotateEpoch_ &&
                now - refreshPolicy_.lastInteractionMs() <
                    static_cast<int64_t>(period) * 60000) {
-      rotateEpoch_ = epoch;  // 用户最近操作过：本周期不轮播
+      rotateEpoch_ = epoch;
     }
   }
 
@@ -2702,11 +2558,9 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
   battery::FrameRecord& rec = rtc.frame;
   const bool critical = plan.kind == battery::WakeKind::CriticalBattery;
   const bool night = plan.kind == battery::WakeKind::NightPause;
-  // 面板内容是否就是 rec 记录的帧：只有快速路径能保证（交互期刷过别的画面）。
   const bool panel_known = fastWake_ && rec.valid != 0;
   const uint32_t interval = plan.interval_min != 0 ? plan.interval_min : settings_.battery_refresh_min;
   const uint8_t bucket = battery::batteryDisplayBucket(batCache_.percent, rtc.battery_bucket);
-  // 「更新于」：定时唤醒记为名义边界（吸收提前醒），其余记为当前分钟。
   const uint64_t slot =
       now_unix < battery::kMinValidUnix ? 0
       : fastWake_ ? battery::nominalSlot(now_unix, settings_.timezone_offset_min, interval)
@@ -2727,8 +2581,6 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
     skip = panel_known && rtc.low_battery_shown != 0 && hash == rec.hash;
   } else if (dashboard_.available()) {
     if (!fastWake_) {
-      // 交互期画面任意：回到 dashboard 主页并整帧重画。电源键休眠时正看着
-      // dashboard 则保留当前屏（「画面保留」）。
       const bool keep_screen = manualSleep_ && page_ == Page::Dashboard;
       page_ = Page::Dashboard;
       if (!keep_screen) dashboard_.home();
@@ -2736,8 +2588,6 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
       dashboard_.invalidateAll();
     }
     rotateForSleepFrame(slot);
-    // 深睡帧 = 最后一次刷屏：状态行显示「休眠中/夜间暂停 · 按键唤醒」，右侧「更新于」
-    // 固定为名义时刻，屏幕一眼可见设备在睡、数据截至何时。
     if (night) {
       DeviceStateInfo info;
       info.state = DeviceState::NightPause;
@@ -2752,7 +2602,6 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
       dashboard_.renderOffscreen();
       hash = frameHash();
     } else {
-      // 先按上次的「更新于」渲染：数据不变 ⇒ 帧完全相同 ⇒ 不刷屏（时钟不会逼出刷新）。
       if (panel_known) {
         dashboard_.setDeviceState(sleepingState(rec.refresh_unix, interval),
                                   settings_.timezone_offset_min);
@@ -2769,8 +2618,6 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
       }
     }
   } else {
-    // 未配置 dashboard：画面保持「空仪表盘」页，状态栏显示休眠中；管理地址深睡期间
-    // 不可达，地址框换成唤醒提示。
     if (night) {
       deviceState_ = DeviceStateInfo{};
       deviceState_.state = DeviceState::NightPause;
@@ -2798,8 +2645,6 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
     return;
   }
 
-  // 刷新方式：快速路径需把 SD 上的上一帧预载进 DTM1 才能 Fast；交互期控制器
-  // 本就持有当前面板内容（本次启动刷过屏）。
   uint8_t* previous = nullptr;
   bool previous_loaded = false;
   if (fastWake_) {
@@ -2834,8 +2679,6 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
   }
 }
 
-// ── 配网窗口 ────────────────────────────────────────────────────────────────
-
 void PanelApp::enterProvision() {
   provisionSucceeded_ = false;
   page_ = Page::Provision;
@@ -2848,8 +2691,6 @@ void PanelApp::leaveProvision() {
   gotoPage(home());
 }
 
-// ── 保持唤醒 / 设备状态 / 电源快照 ──────────────────────────────────────────
-
 int64_t PanelApp::keepAwakeUntil(int64_t now) const {
   const int64_t until = admin::keepAwakeUntilMs();
   return admin::keep_awake::active(now, until) ? until : 0;
@@ -2861,7 +2702,6 @@ void PanelApp::serviceKeepAwake(int64_t now) {
   const uint32_t revision = admin::keepAwakeRevision();
   if (revision != keepAwakeRevision_) {
     keepAwakeRevision_ = revision;
-    // 开启/延长（含 web 端）视为一次交互：空闲节奏立即回到 Active，状态行即时更新。
     if (active) noteInteraction(now);
     if (page_ == Page::Settings || page_ == Page::Status) markDirty();
   }
@@ -2968,10 +2808,7 @@ void PanelApp::publishPowerState(int64_t now) {
   admin::publishPowerSnapshot(p);
 }
 
-// ── 数据辅助 ────────────────────────────────────────────────────────────────
-
 void PanelApp::refreshBattery(int64_t now) {
-  // 充电头充电/满电保持期间拔电只能靠电压下降识别：采样加密到 10 s（ADC 读数很便宜）。
   const int64_t period =
       mainsDetector_.wantsFastSamples() ? battery::kFastBatterySampleMs : 60000;
   if (now - lastBatMs_ < period) return;
@@ -2993,7 +2830,6 @@ const eego::net::NetStatusSnapshot& PanelApp::netStatus() {
 }
 
 uint64_t PanelApp::nowUnix() {
-  // 统一时间源（M21）：与 net_task ingest/expire/快照 generated_at 同一墙钟
   return TimeSource::now();
 }
 
@@ -3018,7 +2854,6 @@ void PanelApp::formatTs(uint64_t ts, char* out, size_t cap) const {
 
 void PanelApp::formatAge(uint64_t ts, char* out, size_t cap) {
   if (ts == 0) {
-    // 从未发生（如源从未成功）：如实显示"从未"，而不是"刚刚"
     snprintf(out, cap, "%s", tr(Str::Never));
     return;
   }
@@ -3106,8 +2941,6 @@ void PanelApp::softKeys(SoftKeyModel* out, size_t cap) const {
   }
 }
 
-// ── 告警详情 ────────────────────────────────────────────────────────────────
-
 void PanelApp::openDetail(const std::string& panel_id, const std::string& identity) {
   detailPanel_ = panel_id;
   detailIdentity_ = identity;
@@ -3130,7 +2963,6 @@ void PanelApp::refreshDetailItems() {
       return;
     }
   }
-  // 目标已消失（静音/删除/淘汰）：停在原位置的相邻条目。
   detailIndex_ = std::min(detailIndex_, detailItems_.size() - 1);
   detailIdentity_ = detailItems_[detailIndex_].identity;
 }
@@ -3155,7 +2987,7 @@ void PanelApp::moveDetail(int delta) {
   detailIndex_ = static_cast<size_t>(next);
   detailIdentity_ = detailItems_[detailIndex_].identity;
   clearConfirm();
-  ++pageEpoch_;  // 布防中的确认绑定旧条目
+  ++pageEpoch_;
   focus_ = 0;
   markDirty();
 }
@@ -3179,8 +3011,6 @@ std::string PanelApp::detailSignature() const {
   return out;
 }
 
-// ── 渲染 ────────────────────────────────────────────────────────────────────
-
 void PanelApp::render(int64_t now) {
   if (page_ == Page::Dashboard) {
     dashboard_.render();
@@ -3190,7 +3020,6 @@ void PanelApp::render(int64_t now) {
     lastRenderMs_ = now;
     return;
   }
-  // 无锁取最新快照（发布方 net_task；代际变化即脏）
   if (deps_.publisher != nullptr) {
     auto snap = deps_.publisher->acquire();
     if (snap) {
@@ -3305,7 +3134,6 @@ void PanelApp::render(int64_t now) {
 }
 
 void PanelApp::buildStatusBar(StatusBarModel& m) {
-  // UTC 时间源不变；状态栏按 DeviceSettings 的显示时区偏移。
   renderedClockKey_ = -1;
   lastClockCheckMs_ = nowMs();
   if (TimeSource::valid()) {
@@ -3328,7 +3156,6 @@ void PanelApp::buildStatusBar(StatusBarModel& m) {
   m.portalOpen = admin::ProvisionPortal::instance().isOpen();
   m.apFallback = admin::ProvisionPortal::instance().isApFallbackActive();
   m.bleLinked = bleLinkSeen_ == eego::ble::LinkState::Authenticated;
-  // 已静音告警数（store 语义：快照内 muted 记录计数，与 S0/列表过滤一致）
   m.mutedCount = 0;
   if (snapshot_ != nullptr) {
     for (const auto& r : snapshot_->records) {
@@ -3341,7 +3168,6 @@ void PanelApp::buildStatusBar(StatusBarModel& m) {
 }
 
 namespace {
-
 const char* wifiStateText(int state) {
   switch (state) {
     case 1: return tr(Str::WifiConnecting);
@@ -3384,7 +3210,6 @@ void PanelApp::buildOnboarding(OnboardingModel& m) {
     m.network = buf;
   } else if (ap) {
     m.apMode = true;
-    // 恢复热点（已有管理密码）上没有外网：去离线 WiFi 页添加网络；首次配网门户在根路径。
     m.url = admin::ProvisionPortal::instance().isApFallbackActive() ? kWifiDiagUrl
                                                                      : admin::ProvisionPortal::kApUrl;
     snprintf(buf, sizeof(buf), "%s · %s", tr(Str::SetupHotspot), admin::ProvisionPortal::kApSsid);
@@ -3432,7 +3257,6 @@ void PanelApp::buildDetail(AlertDetailModel& m) {
   sanitizeClamped(m.message, 600);
 
   char buf[40];
-  // meta 值与 title/message 同为不可信字段（来自数据源/推送客户端），统一钳制
   auto addMeta = [&m](Str label, std::string value) {
     sanitizeClamped(value, 80);
     m.meta.emplace_back(tr(label), std::move(value));
@@ -3490,7 +3314,6 @@ void PanelApp::buildStatus(KvModel& m) {
   };
   char buf[128];
   std::vector<bool> big;
-  // 分节标题一律正文粗体（正文字号）。
   auto section = [&](Str label) {
     rows.emplace_back(tr(label), "");
     big.resize(rows.size(), false);
@@ -3503,7 +3326,6 @@ void PanelApp::buildStatus(KvModel& m) {
   };
   auto addBig = [&](Str label, std::string value) { addBigText(tr(label), std::move(value)); };
 
-  // 电源 / 休眠（正文字号，第一页最上方：设备是醒着、空闲还是即将休眠一目了然）
   section(Str::SecPower);
   {
     const int64_t now = nowMs();
@@ -3532,9 +3354,7 @@ void PanelApp::buildStatus(KvModel& m) {
     addBig(Str::LblSleeps, buf);
   }
 
-  // 网络（正文字号；未连接时逐个已存网络给出最近一次失败原因）
   section(Str::SecNetwork);
-  // 行标签已是「WiFi」：值里去掉状态文案的「WiFi 」前缀（「WiFi 已连接」→「已连接」）。
   std::string wifi = wifiStateText(ns.wifi.state);
   if (wifi.rfind("WiFi ", 0) == 0) wifi.erase(0, 5);
   if (!ns.wifi.ssid.empty()) wifi += " · " + ns.wifi.ssid;
@@ -3575,7 +3395,7 @@ void PanelApp::buildStatus(KvModel& m) {
     }
   }
   if (admin::ProvisionPortal::instance().apActive()) {
-    addBig(Str::SetupHotspot, admin::ProvisionPortal::kApSsid);  // 地址见下一行诊断页
+    addBig(Str::SetupHotspot, admin::ProvisionPortal::kApSsid);
     addBig(Str::WifiDiag, admin::ProvisionPortal::instance().isApFallbackActive()
                               ? kWifiDiagUrl
                               : admin::ProvisionPortal::kApUrl);
@@ -3593,8 +3413,7 @@ void PanelApp::buildStatus(KvModel& m) {
   }
   addBig(Str::TimeLabel, buf);
 
-  // 设备
-  section(Str::SecDevice);  // 供电/电量只在「电源 / 休眠」分节出现一次
+  section(Str::SecDevice);
   if (eego::SdCard::instance().ready()) {
     std::string storage = tr(Str::SdReady);
     if (ns.alert_db.attached) {
@@ -3622,7 +3441,6 @@ void PanelApp::buildStatus(KvModel& m) {
   formatUptime(nowMs() / 1000, buf, sizeof(buf));
   add(tr(Str::Uptime), buf);
 
-  // 数据源（dashboard 是唯一取数模型）
   section(Str::Sources);
   if (!dashboard_.available()) {
     add(tr(Str::LblDashboard), tr(Str::NoDashboard));
@@ -3655,7 +3473,6 @@ void PanelApp::buildStatus(KvModel& m) {
     }
   }
 
-  // 外部告警（POST /alerts 推送）
   section(Str::SecAlerts);
   size_t active = 0, acked = 0, muted = 0;
   if (snapshot_ != nullptr) {
@@ -3673,8 +3490,6 @@ void PanelApp::buildStatus(KvModel& m) {
            static_cast<unsigned>(acked), static_cast<unsigned>(muted));
   add("  ", buf);
 
-  // 分页按权重：小字行 1、正文字号行/分节标题 2，每页 ≤ kStatusRowsPerPage；分节
-  // 标题不落在页尾（与其首行同页）。
   big.resize(rows.size(), false);
   std::vector<size_t> starts{0};
   size_t weight = 0;
@@ -3688,7 +3503,7 @@ void PanelApp::buildStatus(KvModel& m) {
     }
     weight += w;
   }
-  statusRows_ = starts.size() * geom::kStatusRowsPerPage;  // statusPageCount() = 页数
+  statusRows_ = starts.size() * geom::kStatusRowsPerPage;
   const size_t pages = statusPageCount();
   if (statusPage_ >= pages) statusPage_ = pages - 1;
   const size_t begin = starts[statusPage_];
@@ -3729,7 +3544,6 @@ void PanelApp::buildS4(S4Model& m) {
   const size_t begin = m.page * kSettingsRowsPerPage;
   const size_t end = std::min(begin + kSettingsRowsPerPage, ids.size());
 
-  // 只为当前页构建行（避免对不可见行做 net/BLE 查询）
   char buf[96];
   const eego::ble::Status ble_runtime = eego::ble::BleManager::instance().status();
   for (size_t i = begin; i < end; i++) {
@@ -3767,7 +3581,7 @@ void PanelApp::buildS4(S4Model& m) {
         label = Str::SetRecoveryAp;
         isAction = true;
         if (admin::ProvisionPortal::instance().apActive()) {
-          value = tr(Str::On);  // 无操作 10 分钟自动关闭；不画会过期的倒计时
+          value = tr(Str::On);
         } else {
           value = tr(Str::Off);
         }

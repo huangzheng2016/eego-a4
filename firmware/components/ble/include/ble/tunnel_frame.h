@@ -1,23 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// BLE 管理隧道 v1 帧格式（纯 C++，无 IDF/NimBLE 依赖，可在主机单测）。
 //
-// 帧（小端）：
-//   byte 0   flags  bit0 START, bit1 END, bit4-7 TYPE（0 DATA, 1 ACK, 2 ABORT, 3 EVENT）
-//   byte 1   消息 id（浏览器选择；响应回显；EVENT 为 0）
-//   byte 2-3 seq    DATA: 消息内帧序号（从 0）；ACK: 已连续收到的帧数；ABORT: 原因码
 //   byte 4.. payload
-// START DATA 帧的 payload 以 10 字节前导开头：u32 total_len、u32 crc32（zlib，覆盖
-// head+body）、u16 head_len；随后是消息字节（head JSON + body 原始字节）。
-// EVENT 帧为单帧（START|END），payload 是 UTF-8 JSON，无前导。
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 
 namespace eego::ble::tunnel {
-
 constexpr uint8_t kFlagStart = 0x01;
 constexpr uint8_t kFlagEnd = 0x02;
 constexpr uint8_t kTypeData = 0x0;
@@ -52,36 +43,31 @@ struct FrameHeader {
   bool end() const { return (flags & kFlagEnd) != 0; }
 };
 
-// zlib 语义：crc32(data, len, previous_result)；初值 0。
 uint32_t crc32(const uint8_t* data, size_t len, uint32_t seed = 0);
 
 bool parseHeader(const uint8_t* frame, size_t len, FrameHeader& out);
 void writeHeader(uint8_t* out, uint8_t flags, uint8_t id, uint16_t seq);
 
-// 控制帧（固定 4 字节）。
 void makeAck(uint8_t out[4], uint8_t id, uint16_t next_seq);
 void makeAbort(uint8_t out[4], uint8_t id, AbortReason reason);
 
 using FrameSink = std::function<bool(const uint8_t* frame, size_t len)>;
 
-// 把 head+body 切成 DATA 帧（每帧 ≤ chunk 字节）。sink 返回 false 时中止并返回 0。
-// 返回帧数。chunk < kMinChunk 或 head_len 与总长不合法时返回 0。
 size_t encodeFrames(uint8_t id, const uint8_t* head, uint16_t head_len, const uint8_t* body,
                     size_t body_len, size_t chunk, const FrameSink& sink);
 
-// 帧数（不实际编码）：用于进度/测试。
 size_t frameCount(size_t total_len, size_t chunk);
 
 enum class Result : uint8_t {
-  Ok = 0,       // 已接收，等待后续帧
-  Complete,     // 整条消息到齐且 CRC 正确
-  Busy,         // 上一条完整消息尚未 release()
+  Ok = 0,
+  Complete,
+  Busy,
   TooLarge,
   SeqGap,
   Crc,
   Timeout,
   BadFrame,
-  Cancelled,    // 对端发送 ABORT
+  Cancelled,
 };
 
 AbortReason abortReasonFor(Result r);
@@ -99,7 +85,6 @@ class Reassembler {
   Reassembler& operator=(const Reassembler&) = delete;
 
   Result feed(const uint8_t* frame, size_t len, int64_t now_ms);
-  // 正在接收且超过 kIdleTimeoutMs 无新帧 → true（并复位）。
   bool expire(int64_t now_ms);
 
   bool receiving() const { return state_ == State::Receiving; }
@@ -110,10 +95,8 @@ class Reassembler {
   uint16_t headLen() const { return head_len_; }
   uint16_t framesReceived() const { return next_seq_; }
 
-  // 每收满 kAckEvery 帧或消息结束时给出 ACK 序号（下一期望 seq）。
   bool ackDue(uint16_t& next_seq);
 
-  // 处理完完整消息后归还缓冲区（复位到空闲）。
   void release();
   void reset();
 

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 管理日志实现 —— 见 include/admin/admin_log.h。
 #include "admin/admin_log.h"
 
 #include <cstdarg>
@@ -16,10 +15,9 @@ namespace eego::admin {
 
 namespace {
 constexpr size_t kRingCapacity = 128;
-constexpr int64_t kWallClockMinUnix = 1700000000;  // 2023-11-14，低于此视为未同步
+constexpr int64_t kWallClockMinUnix = 1700000000;
 const char* TAG = "admin.log";
 
-// 串口镜像的级别映射（secrets 边界由调用点保证，这里不再过滤）。
 esp_log_level_t toEsp(LogLevel lv) {
   switch (lv) {
     case LogLevel::Error: return ESP_LOG_ERROR;
@@ -112,7 +110,6 @@ std::vector<LogEntry> AdminLog::recent(size_t max_entries) const {
   const size_t count = (max_entries < n) ? max_entries : n;
   out.reserve(count);
   for (size_t i = 0; i < count; i++) {
-    // 最旧在前：未满时 0..n-1；满后从 head_ 起绕环
     size_t idx = full_ ? (head_ + n - count + i) % n : (n - count + i);
     out.push_back(ring_[idx]);
   }

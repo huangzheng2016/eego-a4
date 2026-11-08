@@ -56,8 +56,8 @@ constexpr size_t kMaxPrefsBytes = 8192;
 constexpr size_t kMaxSamples = 8192;
 constexpr size_t kMaxEvents = 1024;
 constexpr int64_t kRenderThrottleMs = 250;
-constexpr int64_t kStatusCheckMs = 1000;         // 状态行文本变化检查周期（仅文本变化才重绘）
-constexpr int64_t kStoreCheckMs = 2000;          // DashboardStore 已提交修订号检查周期
+constexpr int64_t kStatusCheckMs = 1000;
+constexpr int64_t kStoreCheckMs = 2000;
 constexpr int64_t kCarouselPeriodMs = 15000;
 
 int64_t monotonicMs() { return esp_timer_get_time() / 1000; }
@@ -283,11 +283,8 @@ struct DashboardRuntime::Impl {
   size_t focus = 0;
   size_t action_focus = 0;
   std::string focused_event_id;
-  // 面板焦点框只在用户显式选择面板（长按 ↑/↓、点按面板）后显示；翻屏清除。
   bool focus_visible = false;
-  // 本次重建中因已确认而在视图里降为 Cleared 的事件（详情页显示「已确认」）。
   std::set<std::string> acknowledged_events;
-  // 告警详情请求（PanelApp::service 取走）。
   bool detail_requested = false;
   std::string detail_panel;
   std::string detail_identity;
@@ -309,11 +306,10 @@ struct DashboardRuntime::Impl {
   int64_t last_render_ms = -10000;
   int64_t last_status_ms = -100000;
   std::string drawn_status_text;
-  // web 端 ApplyDashboard / 删除 → DashboardStore 修订号变化 → reload()/卸载
   int64_t last_store_check_ms = -100000;
   uint64_t store_revision = 0;
   bool store_configured = false;
-  bool config_changed = false;  // web 端应用/删除 dashboard（PanelApp 视为一次交互）
+  bool config_changed = false;
   bool store_seen = false;
   int64_t last_rule_eval_ms = -100000;
   int64_t last_carousel_ms = 0;
@@ -322,10 +318,8 @@ struct DashboardRuntime::Impl {
   dp::TickResult last_tick;
   ui::RenderResult last_render;
   std::string message;
-  // 设备状态（PanelApp 推送）：状态行左侧图标 + 标签。
   DeviceStateInfo device_state;
   int tz_offset_min = 0;
-  // 深睡帧：「更新于」固定为名义边界（帧哈希不随时钟变化）并附电量；false = 实时。
   bool sleep_frame = false;
   uint64_t sleep_stamp_unix = 0;
   int sleep_battery_pct = -1;
@@ -391,7 +385,6 @@ struct DashboardRuntime::Impl {
     return nullptr;
   }
 
-  // 面板布局区 = 普通 UI 安全区减去底部状态行（渲染与命中测试共用同一配置）。
   static ui::LayoutConfig layoutConfig() {
     ui::LayoutConfig config;
     config.content = ui::Rect{ui::kDashboardContent.x, ui::kDashboardContent.y,
@@ -493,8 +486,6 @@ struct DashboardRuntime::Impl {
     return commit_err == ESP_OK;
   }
 
-  // 面板刷新周期覆盖：用户在面板上单独设定的优先，其次全局覆盖
-  // （DeviceSettings.data_refresh_s），都没有则按配置。未调度的面板忽略。
   void applyRefreshOverrides(dp::DataPipeline& target, const dash::Dashboard& model) {
     for (const dash::Page& current : model.pages) {
       for (const dash::PanelSpec& panel : current.panels) {
@@ -762,7 +753,6 @@ struct DashboardRuntime::Impl {
   void moveFocus(int delta) {
     if (delta == 0) return;
     if (!focus_visible && !layout.panels.empty()) {
-      // 第一次长按只显示焦点框（落在当前面板），不跳过它。
       focus_visible = true;
       invalidateFocus();
       return;
@@ -1756,17 +1746,11 @@ struct DashboardRuntime::Impl {
     detail_identity = identity;
   }
 
-  // 告警面板的首条（活动优先、最新优先）事件；无事件返回 nullptr。
   const dash::Event* topEvent(const dash::PanelSpec& panel) const {
     const std::vector<const dash::Event*> events = eventsForPanel(panel);
     return events.empty() ? nullptr : events.front();
   }
 
-  // Power 短按（选择/确认）：
-  //   * 已显式选中面板（焦点框可见）→ 按面板类型执行：告警面板打开详情，
-  //     按钮执行动作，多图表轮换；
-  //   * 未选中面板 → 本屏有告警面板则打开其告警详情；否则显示焦点框，
-  //     再按一次执行（避免误触发按钮动作）。
   void activate() {
     if (!focus_visible) {
       for (const ui::PanelLayout& item : layout.panels) {
@@ -1851,7 +1835,6 @@ struct DashboardRuntime::Impl {
           return;
         }
         const std::vector<const dash::Event*> events = ui::alertPanelEvents(view, *item.panel);
-        // 标题/空白处：打开该面板的首条告警。
         if (!events.empty()) {
           requestDetail(item.panel->id, dashboardEventIdentity(*events.front()));
           return;
@@ -1943,8 +1926,6 @@ struct DashboardRuntime::Impl {
     next_tick_ms = last_tick_ms + std::max<int64_t>(wake, 50);
   }
 
-  // 已提交配置变化检测：DashboardStore 由 admin 在 app_task 中 commit/erase，
-  // 本函数同在 app_task，每 kStoreCheckMs 取一次快照比较修订号（无文件 IO）。
   void checkStore(int64_t now) {
     if (now - last_store_check_ms < kStoreCheckMs) return;
     last_store_check_ms = now;
@@ -2058,7 +2039,7 @@ struct DashboardRuntime::Impl {
 
   void cancelBatteryCycle() {
     if (!dashboardPipelineReady(ready, pipeline.get())) return;
-    pipeline->cancelAsync();  // 取消在途请求并挂起：直到 resumeAsync 不再发起新请求
+    pipeline->cancelAsync();
     battery_cycle_active = false;
     battery_cycle_cancelled = true;
   }
@@ -2174,10 +2155,6 @@ struct DashboardRuntime::Impl {
   std::string banner_event_id;
   std::string banner_signature;
 
-  // 底部状态行：位于普通 UI 安全区（28..740）内的最后 kStatusLineH 像素，正文字号
-  // （UI 字体 2x）+ 同尺寸状态图标。布局区（rebuildLayout 的 LayoutConfig.content）、
-  // 触控阈值、web 端 grid.ts CONTENT/STATUS_LINE_Y 与 render 工具须同步让出这段高度。
-  // 内容高 672 = 8 行 × 85px 行距 − 8px 间距（行边界为整数）。
   static constexpr int16_t kStatusLineH = 40;
   static constexpr int16_t kStatusLineY = 28 + 712 - kStatusLineH;  // 700
   static_assert(kStatusLineY == 700, "web/src/model/grid.ts STATUS_LINE_Y mirrors this");
@@ -2195,8 +2172,6 @@ struct DashboardRuntime::Impl {
     return 0;
   }
 
-  // 状态行内容：左 = 状态图标 + 标签（或临时消息/告警横幅），右 = 「更新于 HH:MM」
-  // + 页码（深睡帧为电量 + 固定的「更新于」）。stamp_unix = 本帧的刷屏时刻。
   StatusLineContent composeStatus(std::string& banner_id, uint64_t stamp_unix = 0) {
     banner_id.clear();
     StatusLineContent out;
@@ -2254,7 +2229,6 @@ struct DashboardRuntime::Impl {
     return out;
   }
 
-  // 变化检测签名：不含实时「更新于」时刻（只有内容变化才重绘，时钟本身不逼出刷新）。
   std::string statusSignature(const StatusLineContent& content) const {
     std::string signature = std::to_string(static_cast<int>(content.icon));
     signature += content.show_icon ? "|i|" : "|-|";
@@ -2309,7 +2283,6 @@ struct DashboardRuntime::Impl {
     return ready && dirty && monotonicMs() - last_render_ms >= kRenderThrottleMs;
   }
 
-  // push=false：只画进 framebuffer（电池模式先算帧哈希再决定是否/如何刷屏）。
   void render(bool push = true) {
     if (!ready || deps.canvas == nullptr) return;
     rebuildLayout();

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 认证与限速实现 —— 见 include/admin/admin_auth.h。
 #include "admin/admin_auth.h"
 
 #include <algorithm>
@@ -23,13 +22,13 @@ namespace eego::admin {
 
 namespace {
 
-constexpr uint32_t kPbkdf2Iterations = 100000;  // M13 F4：S3 单次约百毫秒级
+constexpr uint32_t kPbkdf2Iterations = 100000;
 constexpr size_t kSaltBytes = 16;
 constexpr size_t kHashBytes = 32;
 constexpr size_t kTokenBytes = 32;
-constexpr size_t kMaxSessions = 4;  // 3 个浏览器 + 1 个 BLE 链路；满则 LRU 驱逐
-constexpr uint32_t kLoginLockMs = 300000;         // 5 分钟
-constexpr uint32_t kLoginGlobalWindowMs = 60000;  // 全局 10 次/分钟
+constexpr size_t kMaxSessions = 4;
+constexpr uint32_t kLoginLockMs = 300000;
+constexpr uint32_t kLoginGlobalWindowMs = 60000;
 constexpr uint32_t kLoginGlobalLimit = 10;
 constexpr size_t kMaxLoginTracks = 16;
 constexpr size_t kMaxRateBuckets = 24;
@@ -40,9 +39,6 @@ const char kNvsIngestKey[] = "ingest_key";
 
 int64_t nowMs() { return esp_timer_get_time() / 1000; }
 
-// ---- 会话：RAM 中维护，镜像到 RTC 内存 ----
-// 深睡、软件重启后会话仍有效（网页不必重新登录）；断电即清。时间用 RTC 计时器，
-// 它跨深睡和软件复位连续计数。
 struct SessionRec {
   std::string token;
   int64_t created_ms = 0;
@@ -112,7 +108,6 @@ struct RateBucket {
 std::vector<RateBucket> g_rate_buckets;
 RateBucket g_login_global{"", 0, 0};
 
-// base64url（无填充）编码 —— token/key 的线格式（M13 F5：43 字符）。
 std::string base64UrlEncode(const uint8_t* data, size_t len) {
   static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
   std::string out;
@@ -168,7 +163,6 @@ bool hexDecode(const std::string& s, std::vector<uint8_t>& out) {
   return true;
 }
 
-// 常数时间比较（长度不等也做满轮 XOR）。
 bool constTimeEqual(const std::string& a, const std::string& b) {
   volatile uint8_t diff = static_cast<uint8_t>(a.size() ^ b.size());
   const size_t n = (a.size() > b.size()) ? a.size() : b.size();
@@ -180,7 +174,6 @@ bool constTimeEqual(const std::string& a, const std::string& b) {
   return diff == 0;
 }
 
-// PBKDF2-HMAC-SHA256 单次导出。
 bool pbkdf2Sha256(const std::string& password, const uint8_t* salt, size_t salt_len,
                   uint32_t iterations, uint8_t out[kHashBytes]) {
   const int rc = mbedtls_pkcs5_pbkdf2_hmac_ext(
@@ -189,7 +182,6 @@ bool pbkdf2Sha256(const std::string& password, const uint8_t* salt, size_t salt_
   return rc == 0;
 }
 
-// NVS 存储格式："v1$<iter>$<hex(salt||hash)>"
 std::string encodePwRecord(const uint8_t* salt, const uint8_t* hash) {
   std::vector<uint8_t> blob;
   blob.reserve(kSaltBytes + kHashBytes);
@@ -224,12 +216,11 @@ esp_err_t AuthManager::init() {
   return ESP_OK;
 }
 
-// ---- 管理密码 ----
 
 bool AuthManager::passwordPolicyOk(const std::string& password) {
   if (password.size() < 8 || password.size() > 128) return false;
   for (unsigned char c : password) {
-    if (c > 0x20) return true;  // 存在非空白字符
+    if (c > 0x20) return true;
   }
   return false;
 }
@@ -278,11 +269,10 @@ esp_err_t AuthManager::setPassword(const std::string& password) {
   const std::string rec = encodePwRecord(salt, hash);
   esp_err_t err = net::CredentialStore::saveToken(kNvsSecNs, "pw_hash", rec);
   if (err != ESP_OK) return err;
-  revokeAllSessions();  // 改密吊销全部令牌（M13 F5）
+  revokeAllSessions();
   return ESP_OK;
 }
 
-// ---- Bearer 会话 ----
 
 std::string AuthManager::createSession() {
   if (mutex_ == nullptr) return "";
@@ -303,7 +293,7 @@ std::string AuthManager::createSession() {
     for (auto it = g_sessions.begin(); it != g_sessions.end(); ++it) {
       if (it->last_used_ms < oldest->last_used_ms) oldest = it;
     }
-    g_sessions.erase(oldest);  // LRU 驱逐
+    g_sessions.erase(oldest);
   }
   g_sessions.push_back({token, now, now});
   persistSessionsLocked();
@@ -409,7 +399,6 @@ std::string AuthManager::maskedIngestKey() {
   return masked;
 }
 
-// ---- 登录限速 ----
 
 bool AuthManager::loginAllow(const std::string& ip, uint32_t& retry_after_s) {
   retry_after_s = 0;
@@ -419,7 +408,6 @@ bool AuthManager::loginAllow(const std::string& ip, uint32_t& retry_after_s) {
   const int64_t now = nowMs();
   bool allow = true;
 
-  // 全局固定窗：10 次/分钟
   if (now - g_login_global.window_start_ms > kLoginGlobalWindowMs) {
     g_login_global.window_start_ms = now;
     g_login_global.count = 0;
@@ -432,7 +420,6 @@ bool AuthManager::loginAllow(const std::string& ip, uint32_t& retry_after_s) {
     g_login_global.count++;
   }
 
-  // 每 IP 锁定
   if (allow) {
     for (auto& t : g_login_tracks) {
       if (t.ip == ip) {
@@ -445,7 +432,6 @@ bool AuthManager::loginAllow(const std::string& ip, uint32_t& retry_after_s) {
     }
   }
 
-  // 有界化：淘汰无失败且未锁定记录
   if (g_login_tracks.size() > kMaxLoginTracks) {
     g_login_tracks.erase(std::remove_if(g_login_tracks.begin(), g_login_tracks.end(),
                                         [&](const LoginTrack& t) {
@@ -492,7 +478,6 @@ void AuthManager::noteLoginFailure(const std::string& ip) {
   xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
 }
 
-// ---- 通用固定窗口限速 ----
 
 bool AuthManager::consumeBudget(const std::string& key, uint32_t window_s, uint32_t limit,
                                 uint32_t& retry_after_s) {

@@ -1,7 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
-// EEGO A4 RTC 驱动 — PCF8563 I2C 实时时钟
-// 纯 ESP-IDF，与 GSLX680 共享 I2C_NUM_0 总线
 #pragma once
 #include "eego_pins.h"
 #include <esp_err.h>
@@ -10,16 +7,15 @@
 #include <driver/i2c.h>
 
 namespace eego {
-
 struct RtcTime {
-    uint16_t year;    // 完整年（如 2026）
+    uint16_t year;
     uint8_t month;    // 1-12
     uint8_t day;      // 1-31
     uint8_t hour;     // 0-23
     uint8_t minute;   // 0-59
     uint8_t second;   // 0-59
-    uint8_t weekday;  // 0=周日 1-6=周一到周六
-    bool valid;       // false=VL 置位或日期时间字段越界，时间不可靠
+    uint8_t weekday;
+    bool valid;
 };
 
 class Pcf8563Rtc {

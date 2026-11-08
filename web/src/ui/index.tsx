@@ -106,7 +106,6 @@ export function NumberInput({
     value: number | null | undefined;
     onChange: (v: number | undefined) => void;
     allowEmpty?: boolean;
-    /** Unit shown after the input (e.g. 「秒」). */
     suffix?: ReactNode;
   }) {
   const id = useId();
@@ -394,7 +393,6 @@ export { Icon, Logo } from './icons';
 export interface ConfirmOptions {
   title: ReactNode;
   body?: ReactNode;
-  /** Confirm button label (defaults to 「确认」). */
   ok?: ReactNode;
   danger?: boolean;
 }

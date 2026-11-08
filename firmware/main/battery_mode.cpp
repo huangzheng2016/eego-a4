@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 电池模式设备侧胶水（契约见 battery_mode.h）。
 #include "battery_mode.h"
 
 #include <cstdio>
@@ -19,12 +18,9 @@
 #include "sd_card.h"
 
 namespace panel::battery {
-
 namespace {
-
 const char* TAG = "battery";
 
-// 深睡保持、上电/掉电复位清零（RTC 慢速内存）。软件重启（esp_restart）同样保持。
 RTC_DATA_ATTR RtcState g_rtc;
 bool g_rtc_checked = false;
 
@@ -116,20 +112,17 @@ bool storeFrame(const uint8_t* frame, size_t size, uint64_t hash) {
 }
 
 void deepSleep(uint64_t sleep_s, bool buttons) {
-  // GPIO4 主电源锁存：深睡期间保持高电平（否则整机断电）。
   gpio_hold_en(static_cast<gpio_num_t>(eego::POWER_LATCH));
   gpio_deep_sleep_hold_en();
 
   if (sleep_s > 0) esp_sleep_enable_timer_wakeup(sleep_s * 1000000ULL);
 
-  // Power（GPIO8，高有效，输入下拉）→ EXT0 高电平唤醒；深睡期间由 RTC IO 保持下拉。
   const gpio_num_t power = static_cast<gpio_num_t>(eego::BUTTON_POWER);
   rtc_gpio_pullup_dis(power);
   rtc_gpio_pulldown_en(power);
   esp_sleep_enable_ext0_wakeup(power, 1);
 
   if (buttons) {
-    // ↑/↓（GPIO5/GPIO7，RTC_GPIO5/7，低有效，输入上拉）→ EXT1 任一为低唤醒。
     const gpio_num_t up = static_cast<gpio_num_t>(eego::BUTTON_UP);
     const gpio_num_t down = static_cast<gpio_num_t>(eego::BUTTON_DOWN);
     rtc_gpio_pulldown_dis(up);
@@ -139,7 +132,6 @@ void deepSleep(uint64_t sleep_s, bool buttons) {
     const uint64_t mask = (1ULL << eego::BUTTON_UP) | (1ULL << eego::BUTTON_DOWN);
     esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_LOW);
   }
-  // RTC IO 上/下拉依赖 RTC_PERIPH 电源域（EXT0 本就要求其保持供电，此处显式声明）。
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
 
   ESP_LOGI(TAG, "deep sleep: timer=%llus power-key%s", static_cast<unsigned long long>(sleep_s),
@@ -149,8 +141,6 @@ void deepSleep(uint64_t sleep_s, bool buttons) {
 }
 
 void powerOff() {
-  // 电源键（GPIO8，高有效）仍按着时松开锁存，硬件可能靠按键维持供电、松手才断；
-  // 而深睡兜底的 EXT0 高电平唤醒会被按着的键立刻触发。先等松开（最多 5 s）。
   const gpio_num_t power = static_cast<gpio_num_t>(eego::BUTTON_POWER);
   for (int i = 0; i < 50 && gpio_get_level(power) != 0; ++i) vTaskDelay(pdMS_TO_TICKS(100));
 
@@ -160,7 +150,6 @@ void powerOff() {
   gpio_set_level(latch, 0);
   vTaskDelay(pdMS_TO_TICKS(1500));
 
-  // 仍在运行 = 外接电源供电：只认电源键的深睡（无定时器），锁存保持低电平。
   ESP_LOGW(TAG, "still powered (external supply): deep sleep until the power key");
   deepSleep(0, false);
 }

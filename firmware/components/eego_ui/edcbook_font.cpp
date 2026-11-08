@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
-// edcbook_font.cpp — EDCBook .bin 字体解析实现（纯 ESP-IDF 移植版，Task 7）
 //
-// 移植自 eego-a4-weread 参考实现（原始格式由 EDCBook_FontTool 工具链产出），关键改动：
-//   - Arduino SD/File → SdCard::instance().open() 返回 FILE*（fseek/fread）
-//   - heap_caps 走 esp_heap_caps.h（PSRAM 优先，内部 RAM 回退）
 //   - Arduino Serial → ESP_LOGx
-//   - std::vector<Entry> → PSRAM 数组 Entry* entries_
-//   - drawTextFontScaled 渲染逻辑内联到 EdcFont::drawText
 #include "edcbook_font.h"
 
 #include <cstring>
@@ -18,14 +11,11 @@
 #include "sd_card.h"
 
 namespace eego {
-
 static const char* TAG = "eego.edcfont";
 
-// 条目在文件中的固定大小（struct.pack('<HHBBbbIII') = 2+2+1+1+1+1+4+4+4 = 20）
 static const int ENTRY_SIZE  = 20;
 static const int HEADER_SIZE = 5;  // u32 char_count + u8 font_height
 
-// PSRAM 优先，失败回退内部 RAM（保证无 PSRAM 时仍可加载小字体）
 static void* allocPsram(size_t n) {
     void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
     if (!p) p = heap_caps_malloc(n, MALLOC_CAP_8BIT);
@@ -105,7 +95,6 @@ bool EdcFont::load(const char* path) {
     }
     ESP_LOGI(TAG, "%s 字符数=%u 字高=%d", path, (unsigned)char_count_, font_height_);
 
-    // 条目索引读进 PSRAM
     size_t table_bytes = (size_t)char_count_ * ENTRY_SIZE;
     uint8_t* raw = (uint8_t*)allocPsram(table_bytes);
     if (!raw) {
@@ -161,7 +150,6 @@ bool EdcFont::decodeGlyph(int idx, std::vector<uint8_t>& out,
     if (!loaded_ || idx < 0 || idx >= (int)char_count_) return false;
     const Entry& e = entries_[idx];
 
-    // 命中字形缓存：免 SD 读 + 免霍夫曼解码
     auto it = cache_.find(e.cp);
     if (it != cache_.end()) {
         const GCEnt& g = it->second;
@@ -171,18 +159,14 @@ bool EdcFont::decodeGlyph(int idx, std::vector<uint8_t>& out,
     }
 
     w = e.w; h = e.h; xo = e.xo; yo = e.yo; adv = e.adv;
-    out.assign((size_t)w * h, 15);  // 默认白
-    if (e.size == 0 || w == 0 || h == 0) return true;  // 空白字符
+    out.assign((size_t)w * h, 15);
+    if (e.size == 0 || w == 0 || h == 0) return true;
 
     uint8_t* bmp = (uint8_t*)allocPsram(e.size);
     if (!bmp) return false;
     bool okr = readAt(e.off, bmp, e.size);
     if (!okr) { heap_caps_free(bmp); return false; }
 
-    // 霍夫曼位流解码（MSB first）：
-    //   "0"       → 白(15)
-    //   "10"      → 黑(0)
-    //   "11"+4bit → 灰(1..14)
     int total = w * h;
     int px = 0;
     size_t bytepos = 0;
@@ -200,7 +184,6 @@ bool EdcFont::decodeGlyph(int idx, std::vector<uint8_t>& out,
         int b1 = readBit();
         if (b1 < 0) break;
         if (b1 == 0) { out[px++] = 0; continue; }
-        // "11" + 4bit 灰度
         int g = 0;
         for (int k = 0; k < 4; k++) {
             int bb = readBit();
@@ -211,7 +194,6 @@ bool EdcFont::decodeGlyph(int idx, std::vector<uint8_t>& out,
     }
     heap_caps_free(bmp);
 
-    // 写入缓存（预算超出整体清空——面板文本顺序读取，偶发清空无伤）
     size_t pixBytes = (size_t)w * h;
     if (cache_bytes_ + pixBytes > CACHE_CAP) {
         for (auto& kv : cache_) heap_caps_free(kv.second.pix);
@@ -257,7 +239,6 @@ int EdcFont::drawOnce(PortraitCanvas& canvas, const char* utf8,
             continue;
         }
         if (gray == 0) {
-            // 默认：按字形灰度绘制（g: 0=黑..15=白），白(15)=背景跳过
             for (int row = 0; row < h; row++) {
                 for (int col = 0; col < w; col++) {
                     uint8_t g = pix[(size_t)row * w + col];
@@ -274,7 +255,6 @@ int EdcFont::drawOnce(PortraitCanvas& canvas, const char* utf8,
                 }
             }
         } else {
-            // 统一灰度：所有墨色像素渲染为 gray（深灰辅助文字）
             for (int row = 0; row < h; row++) {
                 for (int col = 0; col < w; col++) {
                     if (pix[(size_t)row * w + col] >= 15) continue;
@@ -299,7 +279,6 @@ int EdcFont::drawText(PortraitCanvas& canvas, const char* utf8,
                       int x, int y, int scale, bool bold) {
     if (scale < 1) scale = 1;
     int endX = drawOnce(canvas, utf8, x, y, scale, 0);
-    // 仿粗体：位图字体没有真粗体，x+1 二次绘制
     if (bold) drawOnce(canvas, utf8, x + 1, y, scale, 0);
     return endX;
 }

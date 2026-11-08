@@ -1,22 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// fallback_font.cpp — 内置 5x7 ASCII 回退字体实现
 //
-// 字形表：0x20..0x5F（空格/标点/数字/大写字母）+ 少量符号（° · – — − … ▲ ▼），每字形 5 字节列编码，
-// 每字节一列，bit0=顶行 … bit6=底行（7 行有效）。小写映射到大写，
-// 其余码点画 .notdef 占位框（空心矩形）。
 
 #include "fallback_font.h"
 
 namespace eego {
-
 namespace {
-
-// .notdef 占位框（空心矩形）
 constexpr uint8_t GLYPH_NOTDEF[5] = {0x7F, 0x41, 0x41, 0x41, 0x7F};
 
-// 5x7 字形表（0x20 起，连续至 0x5F）
 constexpr uint8_t GLYPHS[64][5] = {
-    {0x00, 0x00, 0x00, 0x00, 0x00},  // 0x20 空格
+    {0x00, 0x00, 0x00, 0x00, 0x00},
     {0x00, 0x00, 0x5F, 0x00, 0x00},  // !
     {0x00, 0x07, 0x00, 0x07, 0x00},  // "
     {0x14, 0x7F, 0x14, 0x7F, 0x14},  // #
@@ -76,14 +68,12 @@ constexpr uint8_t GLYPHS[64][5] = {
     {0x07, 0x08, 0x70, 0x08, 0x07},  // Y
     {0x61, 0x51, 0x49, 0x45, 0x43},  // Z
     {0x00, 0x7F, 0x41, 0x41, 0x00},  // [
-    {0x02, 0x04, 0x08, 0x10, 0x20},  // \ 反斜杠
+    {0x02, 0x04, 0x08, 0x10, 0x20},
     {0x00, 0x41, 0x41, 0x7F, 0x00},  // ]
     {0x04, 0x02, 0x01, 0x02, 0x04},  // ^
-    {0x40, 0x40, 0x40, 0x40, 0x40},  // _ 下划线
+    {0x40, 0x40, 0x40, 0x40, 0x40},
 };
 
-// 取字符字形：ASCII 直接映射（小写→大写），其余返回占位框
-// 常用非 ASCII 符号（仪表盘单位/占位）：° · – — − … ▲ ▼
 struct ExtraGlyph {
     uint32_t codepoint;
     uint8_t columns[5];
@@ -112,7 +102,6 @@ const uint8_t* glyphFor(uint32_t codepoint) {
     return GLYPH_NOTDEF;
 }
 
-// UTF-8 解码下一个码点（非法序列按单字节占位处理并推进 1 字节）
 uint32_t nextCodepoint(const uint8_t*& p) {
     uint32_t c = *p++;
     if (c < 0x80) return c;
@@ -132,7 +121,7 @@ uint32_t nextCodepoint(const uint8_t*& p) {
         p += 3;
         return c;
     }
-    return 0xFFFD;  // 非法序列：占位
+    return 0xFFFD;
 }
 
 void drawGlyph(PortraitCanvas& canvas, int16_t x, int16_t y, const uint8_t* glyph,

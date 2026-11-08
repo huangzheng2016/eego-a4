@@ -1,5 +1,4 @@
 // Screen strip above the canvas: a dashboard has 1..MAX_SCREENS screens and
-// each page IS one device screen. Tabs "第 n 屏" (device order = visible pages
 // in array order), drag to reorder, double-click to rename, plus add /
 // duplicate / delete and "show this screen on the device".
 import { useRef, useState, type DragEvent } from 'react';

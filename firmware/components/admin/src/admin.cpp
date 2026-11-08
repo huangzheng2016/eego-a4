@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// admin 组件装配 —— 注入点存储、事件发射、默认命令处理器。
 #include "admin/admin.h"
 
 #include <algorithm>
@@ -23,16 +22,13 @@
 #include "source_credential_usage.h"
 
 namespace eego::admin {
-
 namespace {
-
 AlertSnapshotSource g_snapshot_source;
 AlertActionSink g_action_sink;
 AdminEventCallback g_event_cb = nullptr;
 void* g_event_ctx = nullptr;
 alert_core::TypeRegistry* g_registry = nullptr;
 
-// 延迟重启（esp_timer 一次性；≥2s 让 202/204 响应先 flush，M13 高危端点守卫）
 esp_timer_handle_t g_reboot_timer = nullptr;
 
 void rebootTimerCallback(void* arg) {
@@ -41,12 +37,12 @@ void rebootTimerCallback(void* arg) {
 }
 
 void scheduleReboot(uint32_t delay_ms) {
-  if (delay_ms < 2000) delay_ms = 2000;  // M13：≥2s
+  if (delay_ms < 2000) delay_ms = 2000;
   if (g_reboot_timer == nullptr) {
     const esp_timer_create_args_t args = {
         .callback = &rebootTimerCallback, .name = "admin_reboot"};
     if (esp_timer_create(&args, &g_reboot_timer) != ESP_OK) {
-      esp_restart();  // 定时器都建不起来就直接重启
+      esp_restart();
       return;
     }
   }
@@ -54,7 +50,6 @@ void scheduleReboot(uint32_t delay_ms) {
   esp_timer_start_once(g_reboot_timer, static_cast<int64_t>(delay_ms) * 1000);
 }
 
-// 只删除明确列出的配置/数据文件。不得递归删目录：字体和未知用户文件保留。
 bool removeFactoryConfigs() {
   static constexpr const char* kPaths[] = {
       "/sdcard/alertpanel/config.json",
@@ -132,7 +127,6 @@ bool applyRuntime(const RuntimeConfig& config, uint32_t sections, std::string& e
 }  // namespace
 
 // ===========================================================================
-// 注入点与事件
 // ===========================================================================
 
 void setAlertSnapshotSource(AlertSnapshotSource src) { g_snapshot_source = std::move(src); }
@@ -148,7 +142,6 @@ void emitAdminEvent(const AdminEvent& ev) {
 }
 
 namespace internal {
-
 const AlertSnapshotSource& snapshotSource() { return g_snapshot_source; }
 const AlertActionSink& actionSink() { return g_action_sink; }
 AdminEventCallback eventCallback() { return g_event_cb; }
@@ -159,7 +152,6 @@ void setRegistry(alert_core::TypeRegistry* reg) { g_registry = reg; }
 }  // namespace internal
 
 // ===========================================================================
-// 默认命令处理器（app_task 上下文执行）
 // ===========================================================================
 
 void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx) {
@@ -299,7 +291,6 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
     }
 
     case AdminCommandType::ApplyWifi: {
-      // NVS 为密码权威（M13 §4）；config wifi_list 仅 ssid+pass_ref 展示引用。
       std::vector<net::WifiAccount> previous;
       net::CredentialStore::loadWifiAccounts(previous);
       std::vector<net::WifiAccount> accounts;
@@ -363,8 +354,6 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       } else {
         ADMIN_LOG_ERROR("wifi_list config sync failed: %s", err.c_str());
       }
-      // 只在影响当前连接时重连：未连接、当前网络被删除或其密码变化。
-      // 纯排序/增删其他网络不打断现有连接（新顺序在下次断线重连时生效）。
       const auto& wifi = net::WifiManager::instance();
       bool reconnect = !wifi.isConnected();
       if (!reconnect) {

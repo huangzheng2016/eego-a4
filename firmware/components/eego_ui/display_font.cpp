@@ -6,7 +6,6 @@
 
 namespace eego::display_font {
 namespace {
-
 using display_font_data::DisplayFontData;
 using display_font_data::DisplayGlyph;
 
@@ -45,7 +44,6 @@ const DisplayGlyph* findGlyph(const DisplayFontData& f, uint32_t cp) {
     return low < f.glyph_count && f.glyphs[low].codepoint == cp ? &f.glyphs[low] : nullptr;
 }
 
-// UI 字体回退字符的放大倍数：行高接近显示字号。
 int16_t fallbackScale(const DisplayFontData& f) {
     const int16_t ui = FontManager::instance().uiFontHeight();
     if (ui <= 0) return 1;
@@ -53,7 +51,6 @@ int16_t fallbackScale(const DisplayFontData& f) {
     return scale < 1 ? 1 : scale;
 }
 
-// 将码点编码为 UTF-8（回退绘制用）。
 void encodeUtf8(uint32_t cp, char out[5]) {
     if (cp < 0x80) { out[0] = static_cast<char>(cp); out[1] = 0; return; }
     if (cp < 0x800) {
@@ -91,7 +88,6 @@ void drawGlyph(PortraitCanvas& canvas, const DisplayFontData& f, const DisplayGl
             pos += run;
             continue;
         }
-        // 按行切分 run：整段实心用 fillRect，灰阶逐像素。
         while (run > 0 && pos < total) {
             const uint16_t x = static_cast<uint16_t>(pos % g.width);
             const uint16_t y = static_cast<uint16_t>(pos / g.width);

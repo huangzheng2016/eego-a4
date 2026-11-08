@@ -17,7 +17,6 @@ export function HttpStatusBadge({ status, children }: { status: number; children
   return <Badge tone={status >= 200 && status < 300 ? 'ok' : 'danger'}>{children}</Badge>;
 }
 
-/** Relative time ("3 分钟前") for a unix-seconds timestamp; absolute time in the tooltip. */
 export function RelTime({ ts }: { ts?: number }) {
   const { lang } = useI18n();
   if (!ts) return <span className="dim">—</span>;

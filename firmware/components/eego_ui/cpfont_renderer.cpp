@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
-// cpfont_renderer.cpp — CPFONT v4 / .eefont 字体解析实现（纯 ESP-IDF 移植版，Task 8）
 //
-// 移植自 eego-a4-weread 参考实现（原始：eego-a4-template-firmware lib/EegoA4Ui，MIT），关键改动：
-//   - SDCardManager + SdFat FsFile → SdCard::instance() + FILE*（fseek/fread）
-//   - magic 校验放宽：同时接受 "CPFONT\0\0" 与 "EEFONT\0\0"（.eefont 换皮核心）
-//   - PortraitCanvas 由 drawText 参数传入（不持有引用）
-//   - 增加 scale / bold 渲染、textWidth、fontHeight
 //   - Arduino Serial → ESP_LOGx
 #include "cpfont_renderer.h"
 
@@ -19,7 +12,6 @@
 #include "sd_card.h"
 
 namespace eego {
-
 static const char* TAG = "eego.cpfont";
 
 constexpr uint16_t CPFONT_VERSION = 4;
@@ -32,14 +24,12 @@ constexpr uint32_t LIGATURE_BYTES = 8;
 constexpr uint32_t MAX_INTERVALS = 4096;
 constexpr uint32_t MAX_GLYPHS = 65536;
 
-// PSRAM 优先，失败回退内部 RAM
 static void* allocPsram(size_t n) {
     void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
     if (!p) p = heap_caps_malloc(n, MALLOC_CAP_8BIT);
     return p;
 }
 
-// 同时接受 "CPFONT\0\0" 与 "EEFONT\0\0"
 static bool isValidMagic(const uint8_t* header) {
     if (header[6] != 0 || header[7] != 0) return false;
     if (memcmp(header, "CPFONT", 6) == 0) return true;
@@ -208,7 +198,6 @@ bool CpFontRenderer::loadMetadata(const char* sourceName) {
         return false;
     }
 
-    // 校验区间表覆盖所有字形
     uint32_t expectedGlyphOffset = 0;
     uint32_t previousLast = 0;
     for (uint32_t index = 0; index < info_.intervalCount; ++index) {
@@ -355,8 +344,6 @@ void CpFontRenderer::drawGlyph(PortraitCanvas& canvas, const int16_t cursorX,
     const int16_t originX = cursorX + glyph.left * scale;
     const int16_t originY = baseline - glyph.top * scale;
     const uint32_t pixels = (uint32_t)glyph.width * glyph.height;
-    // 电子墨水屏只有黑白两色，2-bit 灰度抗锯齿经 Bayer 抖动后边缘会产生白点/噪点。
-    // 直接二值化：level >= 1 即画纯黑，既消除白点又保持笔画清晰。
 
     for (uint32_t position = 0; position < pixels; ++position) {
         const int16_t gx = (int16_t)(position % glyph.width);
@@ -368,14 +355,13 @@ void CpFontRenderer::drawGlyph(PortraitCanvas& canvas, const int16_t cursorX,
             const uint8_t packed = bitmap_[position >> 2];
             const uint8_t shift = (uint8_t)((3 - (position & 3U)) * 2);
             uint8_t level = (packed >> shift) & 0x03U;
-            if (level == 0) continue;  // 透明/白
+            if (level == 0) continue;
             ink = true;
         } else {
             const uint8_t packed = bitmap_[position >> 3];
             ink = ((packed >> (7 - (position & 7U))) & 0x01U) != 0;
         }
         if (!ink) continue;
-        // gray==0 走纯黑（drawPixel）；gray>0 走 drawPixelGray 统一灰度填充
         if (gray == 0) {
             if (scale == 1) {
                 canvas.drawPixel(px, py, 0);

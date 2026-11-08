@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 移植自 eego-a4-weread（GPL-3.0）同名文件；原始硬件事实来自 eego-a4-template-firmware（MIT）。
-// GSLX680 电容触控驱动实现（EEGO A4）— 纯 ESP-IDF
 //
-// 协议说明：EEGO A4 的 GSLX680 固件表为 {页内 offset, 32 位 value} 结构，
-// 上传时通过 0xf0 寄存器选页，再将页内连续寄存器（offset 递增 4）批量写入。
-// 这与通用 GSL1680 的 0xbc/0xbd/0xbe 单字节流式上传不同，是本设备的实际协议，
-// 移植自 eego-a4-template-ref/lib/InputManager 的 gslx680* 实现。
 #include "gslx680_touch.h"
 #include "gslx680_firmware.h"
 #include "touch_calibration_store.h"
@@ -17,15 +11,13 @@
 #include <string.h>
 
 namespace eego {
-
 namespace {
-constexpr uint32_t kTouchPollPeriodMs = 10;   // 采样周期（100Hz tick 下 = 1 tick）
+constexpr uint32_t kTouchPollPeriodMs = 10;
 constexpr UBaseType_t kTouchQueueLen = 64;
-constexpr UBaseType_t kMoveReserveSlots = 16;  // 队列余量不足时丢弃 Move，保留关键事件
+constexpr UBaseType_t kMoveReserveSlots = 16;
 constexpr uint32_t kTouchTaskStack = 4096;
-constexpr UBaseType_t kTouchTaskPriority = 3;  // 高于 app_task(1)/按键(2)，I²C 读 <1ms
+constexpr UBaseType_t kTouchTaskPriority = 3;
 
-// 最少 1 个 tick 的毫秒延时（兼容 100Hz tick 配置下 pdMS_TO_TICKS 小于 1 的情况）
 void delayMs(uint32_t ms) {
     TickType_t ticks = pdMS_TO_TICKS(ms);
     if (ticks == 0) ticks = 1;
@@ -37,14 +29,11 @@ Gslx680Touch::Gslx680Touch() {}
 
 Gslx680Touch::~Gslx680Touch() { end(); }
 
-// --- I²C 原语 ---
-
 esp_err_t Gslx680Touch::writeReg(uint8_t reg, const uint8_t* data, size_t len) {
     if (len == 0 || data == nullptr) {
         return i2c_master_write_to_device(i2cPort_, GSLX680_ADDRESS, &reg, 1,
                                           pdMS_TO_TICKS(100));
     }
-    // 固件批量写入最大 64 字节 + 1 寄存器字节
     uint8_t buf[65];
     buf[0] = reg;
     memcpy(buf + 1, data, len);
@@ -66,8 +55,6 @@ esp_err_t Gslx680Touch::readReg(uint8_t reg, uint8_t* data, size_t len) {
     return i2c_master_write_read_device(i2cPort_, GSLX680_ADDRESS, &reg, 1, data,
                                         len, pdMS_TO_TICKS(100));
 }
-
-// --- 芯片控制（移植自参考代码 gslx680ClearRegisters/ResetChip/StartChip/Check）---
 
 void Gslx680Touch::clearRegisters() {
     writeReg32(0xe0, 0x00000088);
@@ -101,11 +88,6 @@ bool Gslx680Touch::checkChip() {
            status[3] == 0x5a;
 }
 
-// --- 固件上传 ---
-// offset==0xf0：页选择，直接写 32 位值到 0xf0。
-// 其余：将最多 16 个连续 32 位寄存器（offset 递增 4）合并为一次 I²C 写入，
-//      起始寄存器为首个 offset。参考代码的 OEM 批量优化。
-
 esp_err_t Gslx680Touch::uploadFirmware() {
     size_t i = 0;
     while (i < GSLX680_FIRMWARE_COUNT) {
@@ -131,7 +113,7 @@ esp_err_t Gslx680Touch::uploadFirmware() {
             ++i;
         }
         if (words == 0) {
-            ++i;  // 安全跳过非预期条目
+            ++i;
             continue;
         }
         if (writeReg(firstReg, payload, static_cast<size_t>(words) * 4) != ESP_OK)
@@ -140,12 +122,9 @@ esp_err_t Gslx680Touch::uploadFirmware() {
     return ESP_OK;
 }
 
-// --- 生命周期 ---
-
 esp_err_t Gslx680Touch::begin(i2c_port_t port) {
     i2cPort_ = port;
 
-    // 配置共享 I²C 总线（SDA=2, SCL=1, 400kHz）
     i2c_config_t conf;
     memset(&conf, 0, sizeof(conf));
     conf.mode = I2C_MODE_MASTER;
@@ -157,12 +136,10 @@ esp_err_t Gslx680Touch::begin(i2c_port_t port) {
     esp_err_t err = i2c_param_config(i2cPort_, &conf);
     if (err != ESP_OK) return err;
 
-    // 安装驱动；若已安装（与 PCF8563 共享 I2C_NUM_0）则视为成功
     err = i2c_driver_install(i2cPort_, I2C_MODE_MASTER, 0, 0, 0);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
     initialized_ = true;
 
-    // 探测并演练页选择寄存器（与 CrossLink 一致）
     uint8_t probe = 0;
     if (readReg(0xf0, &probe, 1) != ESP_OK ||
         writeReg32(0xf0, 0x00000012) != ESP_OK ||
@@ -171,14 +148,12 @@ esp_err_t Gslx680Touch::begin(i2c_port_t port) {
         return ESP_FAIL;
     }
 
-    // 复位/清寄存器序列
     clearRegisters();
     resetChip();
     resetChip();
     clearRegisters();
     resetChip();
 
-    // 上传固件并启动
     if (uploadFirmware() != ESP_OK) {
         enabled_ = false;
         return ESP_FAIL;
@@ -187,7 +162,6 @@ esp_err_t Gslx680Touch::begin(i2c_port_t port) {
     resetChip();
     startChip();
 
-    // 校验：0xb0 应返回 0x5a5a5a5a
     if (!checkChip()) {
         resetChip();
         startChip();
@@ -205,18 +179,11 @@ esp_err_t Gslx680Touch::begin(i2c_port_t port) {
 
 void Gslx680Touch::end() {
     enabled_ = false;
-    // 任务仍存活时它还在使用 gestures_/pressed_：不得重置，留给任务退出后。
     if (!stopPolling()) return;
     gestures_.reset();
     pending_.clear();
     pressed_.store(false);
-    // 不卸载共享 I²C 总线（与 PCF8563 共用 I2C_NUM_0）
 }
-
-// --- 采样 ---
-// 读 0x80 的 24 字节帧：
-//   frame[0] = 触点数；point0 的 raw_y 在 bytes[4-5]、raw_x 在 bytes[6-7]（小端）。
-// 屏下电容键 sentinel：raw_x==0x03a0 且 raw_y==0x1020。
 
 std::vector<TouchEvent> Gslx680Touch::sampleFrame() {
     const int64_t now = esp_timer_get_time();
@@ -242,7 +209,7 @@ std::vector<TouchEvent> Gslx680Touch::sampleFrame() {
             rawY = rawYWord & 0x0fff;
             rawX = rawXWord & 0x0fff;
             screenFrame = true;
-            if (!gestures_.screenPressed()) {  // 新的屏幕接触：重置原始坐标累计
+            if (!gestures_.screenPressed()) {
                 rawSumX_ = rawSumY_ = 0;
                 rawCount_ = 0;
             }
@@ -257,7 +224,6 @@ std::vector<TouchEvent> Gslx680Touch::sampleFrame() {
             events = gestures_.sample(TouchContact::Screen, x, y, now);
         }
     }
-    // 附带原始坐标：Press/Move 用本帧值，接触结束类事件用本次接触的均值。
     for (TouchEvent& ev : events) {
         if (screenFrame &&
             (ev.type == TouchEventType::Press || ev.type == TouchEventType::Move)) {
@@ -279,8 +245,6 @@ std::vector<TouchEvent> Gslx680Touch::sampleFrame() {
     pressed_.store(gestures_.screenPressed());
     return events;
 }
-
-// --- 仿射标定 ---
 
 touchcal::Affine Gslx680Touch::calibration() const {
     std::lock_guard<std::mutex> lock(calMutex_);
@@ -309,18 +273,16 @@ esp_err_t Gslx680Touch::clearCalibration() {
     return touchcal::erasePersisted();
 }
 
-// --- 后台采样任务 ---
-
 esp_err_t Gslx680Touch::startPolling(SemaphoreHandle_t wake) {
     if (!enabled_) return ESP_ERR_INVALID_STATE;
     if (running_.load()) return ESP_OK;
-    if (!taskExited_.load()) return ESP_ERR_INVALID_STATE;  // 上一个任务尚未退出
+    if (!taskExited_.load()) return ESP_ERR_INVALID_STATE;
     wake_ = wake;
     if (queue_ == nullptr) {
         queue_ = xQueueCreate(kTouchQueueLen, sizeof(TouchEvent));
         if (queue_ == nullptr) return ESP_ERR_NO_MEM;
     }
-    pending_.clear();  // 同步模式残留事件不再交付
+    pending_.clear();
     running_.store(true);
     taskExited_.store(false);
     if (xTaskCreate(&Gslx680Touch::pollTask, "eego_touch", kTouchTaskStack, this,
@@ -339,8 +301,6 @@ bool Gslx680Touch::stopPolling() {
         return true;
     }
     running_.store(false);
-    // 让任务自行退出（不可外部删除：它可能正持有 I²C 端口锁，或阻塞在与
-    // RTC/前光共享的 I²C 事务上）。等到 taskExited_ 置位，上限 3 s。
     for (int i = 0; i < 300 && !taskExited_.load(); ++i) delayMs(10);
     if (!taskExited_.load()) {
         ESP_LOGE("gslx680", "touch task did not exit; sampling state left untouched");
@@ -360,7 +320,7 @@ void Gslx680Touch::pollTask(void* arg) {
         for (const TouchEvent& ev : events) {
             if (ev.type == TouchEventType::Move &&
                 uxQueueSpacesAvailable(self->queue_) < kMoveReserveSlots) {
-                self->dropped_.fetch_add(1);  // 消费者落后：Move 可合并丢弃
+                self->dropped_.fetch_add(1);
                 continue;
             }
             if (xQueueSend(self->queue_, &ev, 0) == pdTRUE) {
@@ -377,8 +337,6 @@ void Gslx680Touch::pollTask(void* arg) {
     vTaskDelete(nullptr);
 }
 
-// --- 消费者接口 ---
-
 bool Gslx680Touch::hasPending() const {
     if (pollingActive() || (!taskExited_.load() && queue_ != nullptr))
         return uxQueueMessagesWaiting(queue_) > 0;
@@ -393,8 +351,6 @@ TouchEvent Gslx680Touch::poll() {
         return none;
     }
 
-    // 任务已被要求停止但尚未退出：不能同步采样（与任务并发访问手势 FSM/I²C）。
-    // 只交付任务已排队的事件。
     if (!taskExited_.load()) {
         TouchEvent ev;
         if (queue_ != nullptr && xQueueReceive(queue_, &ev, 0) == pdTRUE) return ev;

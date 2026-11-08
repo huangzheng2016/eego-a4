@@ -2,7 +2,6 @@
 #pragma once
 
 // alerts.db persistence: JSONL append + compaction (M11 §4: "SD alerts.db,
-// JSONL 追加 + 定期压缩").
 //
 // File access goes through IAlertFileIo so alert_core stays free of SD/FatFS
 // or any other platform dependency. The firmware wires an SD-backed

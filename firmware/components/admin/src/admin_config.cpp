@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 配置存储实现 —— 见 include/admin/admin_config.h。
 #include "admin/admin_config.h"
 
 #include <algorithm>
@@ -23,19 +22,17 @@ namespace eego::admin {
 
 namespace {
 
-constexpr size_t kMaxConfigBodyBytes = 4 * 1024;  // M13：config body ≤4KB（httpd 强制）
+constexpr size_t kMaxConfigBodyBytes = 4 * 1024;
 constexpr size_t kMaxOverrides = 64;
 constexpr size_t kMaxWifiList = net::kMaxWifiNetworks;
-constexpr size_t kMaxMuteRules = 32;              // M21：静音规则上限
+constexpr size_t kMaxMuteRules = 32;
 constexpr int64_t kSchemaVersion = 1;
-constexpr int64_t kMaxMuteExpiresAt = 4102444800LL;  // 2100-01-01T00:00:00Z（规则 TTL 上限）
+constexpr int64_t kMaxMuteExpiresAt = 4102444800LL;
 
-// ---- DOM 小工具（alert_core::JsonValue 无可变查找，这里补齐）----
 const alert_core::JsonValue* objGet(const alert_core::JsonValue& obj, const char* key) {
   return obj.find(key);
 }
 
-// JsonValue 只提供 const 访问器；值语义类型，const_cast 安全。
 alert_core::JsonValue::Object& mutableItems(alert_core::JsonValue& obj) {
   return const_cast<alert_core::JsonValue::Object&>(obj.objectItems());
 }
@@ -82,7 +79,7 @@ bool keyEndsWith(const std::string& s, const char* suffix) {
 }
 
 bool isSensitiveKey(const std::string& key_lower) {
-  if (keyEndsWith(key_lower, "_ref")) return false;  // *_ref 引用可显示
+  if (keyEndsWith(key_lower, "_ref")) return false;
   if (key_lower.find("password") != std::string::npos ||
       key_lower.find("passwd") != std::string::npos ||
       key_lower.find("passphrase") != std::string::npos ||
@@ -91,8 +88,6 @@ bool isSensitiveKey(const std::string& key_lower) {
     return true;
   }
   if (key_lower == "key" || key_lower == "apikey" || key_lower == "api-key") return true;
-  // *_key 后缀覆盖 api_key/access_key 等未来 schema 字段；
-  // dedup_key 是去重字段名列表（非机密），显式豁免防过度掩码（review P2-5）
   if (keyEndsWith(key_lower, "_key") && key_lower != "dedup_key") return true;
   return false;
 }
@@ -101,7 +96,6 @@ bool isSensitiveHeaderName(const std::string& name_lower) {
   return net::CredentialStore::sensitiveHeaderName(name_lower);
 }
 
-// 深拷贝 + secrets 掩码（M13：远程响应 secrets 省略或 "********"）。
 alert_core::JsonValue maskDom(const alert_core::JsonValue& v, const std::string& key_ctx) {
   using alert_core::JsonValue;
   switch (v.type()) {
@@ -122,7 +116,6 @@ alert_core::JsonValue maskDom(const alert_core::JsonValue& v, const std::string&
         if (lower == "header_secret_refs" && kv.second.type() == JsonValue::Type::Object) {
           out.emplace_back(kv.first, cloneDom(kv.second));
         } else if (lower == "headers" && kv.second.type() == JsonValue::Type::Object) {
-          // headers（遗留文件内容保留时同样掩码）：按头名敏感程度掩码值
           JsonValue::Object hdrs;
           hdrs.reserve(kv.second.objectItems().size());
           for (const auto& h : kv.second.objectItems()) {
@@ -150,7 +143,6 @@ alert_core::JsonValue maskDom(const alert_core::JsonValue& v, const std::string&
   }
 }
 
-// ---- 校验工具 ----
 
 bool isControlFree(const std::string& s) {
   for (unsigned char c : s) {
@@ -164,7 +156,6 @@ bool validSsid(const std::string& s) {
 }
 
 bool validPassRef(const std::string& s) {
-  // "nvs:wifi/<idx>" 或空（空 = 无凭据引用）
   if (s.empty()) return true;
   if (s.compare(0, 9, "nvs:wifi/") != 0) return false;
   const std::string idx = s.substr(9);
@@ -186,9 +177,6 @@ void addErr(FieldErrors& errs, const std::string& field, const std::string& msg)
   errs.push_back({field, msg});
 }
 
-// admin 域白名单校验（M13 §3）。current_wifi_list_json 非空时执行只读
-// 一致性比较。strict_unknown=false（启动校验）时容忍未知字段（前向兼容，
-// 字段保留但不应用）；true（PUT）时未知字段即错误。
 void validateAdminSection(const alert_core::JsonValue& admin, FieldErrors& errs,
                           const std::string& current_wifi_list_json, bool strict_unknown) {
   using alert_core::JsonValue;
@@ -204,7 +192,6 @@ void validateAdminSection(const alert_core::JsonValue& admin, FieldErrors& errs,
         addErr(errs, "admin.wifi_list", "must be an array");
         continue;
       }
-      // wifi_list 只能经 /api/v1/config/wifi 变更；PUT 携带一致副本视为 no-op
       if (v.toString() != current_wifi_list_json) {
         addErr(errs, "admin.wifi_list",
                "read-only here; manage via /api/v1/config/wifi");
@@ -344,12 +331,6 @@ void validateOverridesSection(const alert_core::JsonValue& obj, FieldErrors& err
   }
 }
 
-// ---- mute_rules 节（M21）----
-// JSON 形状：{"match_by": "type"|"source"|"fingerprint", "value": "...",
-//            "expires_at": <unix 秒，可选，0/缺省 = 永不过期>}
-// expires_at 用绝对 unix 秒而非相对 TTL：重启恢复后规则过期语义不变。
-// 校验与 ConfigStore::muteRules 解析共用本函数；fingerprint 值归一为小写
-// （store 指纹为小写 sha1 hex，规则必须同形才能命中）。
 
 bool isLowerHexNormalized(std::string& s, size_t len) {
   if (s.size() != len) return false;
@@ -368,7 +349,6 @@ bool muteRuleFromJson(const alert_core::JsonValue& v, alert_core::MuteRule& out,
     err_msg = "must be an object";
     return false;
   }
-  // 第一遍：match_by（value 的形状校验依赖它；JSON 字段顺序不保证）
   const JsonValue* mb = objGet(v, "match_by");
   if (mb == nullptr || mb->type() != JsonValue::Type::String) {
     err_field = "match_by";
@@ -387,7 +367,6 @@ bool muteRuleFromJson(const alert_core::JsonValue& v, alert_core::MuteRule& out,
     err_msg = "must be one of type|source|fingerprint";
     return false;
   }
-  // 第二遍：value / expires_at / 未知字段
   for (const auto& kv : v.objectItems()) {
     const JsonValue& val = kv.second;
     if (kv.first == "match_by") {
@@ -469,7 +448,6 @@ void validateMuteRulesSection(const alert_core::JsonValue& arr, FieldErrors& err
   }
 }
 
-// 从 DOM 解析 admin 域强类型视图（调用方已校验形状；这里宽容缺省）。
 AdminDomainConfig parseAdminView(const alert_core::JsonValue& dom) {
   using alert_core::JsonValue;
   AdminDomainConfig out;
@@ -540,8 +518,6 @@ alert_core::JsonValue makeDefaultDom() {
   });
 }
 
-// 启动校验：schema_version/admin/alert_type_overrides 形状与取值。
-// 未知顶层键容忍（保留策略）；admin 内未知键容忍（忽略但保留）。
 bool validateLoadedDom(const alert_core::JsonValue& dom, FieldErrors& errs) {
   using alert_core::JsonValue;
   if (dom.type() != JsonValue::Type::Object) {
@@ -558,7 +534,6 @@ bool validateLoadedDom(const alert_core::JsonValue& dom, FieldErrors& errs) {
     addErr(errs, "admin", "missing or not an object");
     return false;
   }
-  // 启动校验 wifi_list 条目（形状 + 值域；引用目标缺失不视为错误——NVS 可能还没写）
   if (const JsonValue* wl = objGet(*admin, "wifi_list")) {
     if (wl->type() != JsonValue::Type::Array || wl->arrayItems().size() > kMaxWifiList) {
       addErr(errs, "admin.wifi_list", "invalid wifi_list");
@@ -583,7 +558,7 @@ bool validateLoadedDom(const alert_core::JsonValue& dom, FieldErrors& errs) {
                                           ? objGet(*admin, "wifi_list")->toString()
                                           : "[]", false);
     for (auto& e : sub) {
-      if (e.field == "admin.wifi_list") continue;  // 只读一致性检查不适用启动
+      if (e.field == "admin.wifi_list") continue;
       errs.push_back(e);
     }
   }
@@ -662,9 +637,7 @@ esp_err_t ConfigStore::init(const std::string& path) {
   admin_ = AdminDomainConfig{};
   valid_ = true;
 
-  // 上次替换中途断电：只剩 config.json.bak → 恢复（见 atomic_file.h）。
   if (fsutil::recoverFile(path_)) ADMIN_LOG_WARN("config.json restored from interrupted replace");
-  // 读文件
   std::string text;
   bool read_ok = false;
   if (FILE* f = fopen(path_.c_str(), "rb")) {
@@ -706,8 +679,6 @@ esp_err_t ConfigStore::init(const std::string& path) {
       valid_ = false;
     }
     if (!valid_) {
-      // 坏文件改名 config.json.corrupt（M13 F6），加载默认。.bak 保留给
-      // 原子替换的恢复路径，避免下次启动把坏文件当作中断替换恢复回来。
       const std::string bak = path_ + ".corrupt";
       remove(bak.c_str());
       if (rename(path_.c_str(), bak.c_str()) != 0) {
@@ -717,12 +688,10 @@ esp_err_t ConfigStore::init(const std::string& path) {
       }
     }
   } else if (!read_ok) {
-    // 文件存在但读取失败 → 视为损坏
     if (FILE* f = fopen(path_.c_str(), "rb")) {
       fclose(f);
       valid_ = false;
     }
-    // 文件不存在 → 新设备，默认配置（valid=true）
   }
 
   xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
@@ -777,7 +746,6 @@ bool ConfigStore::validateAndMerge(const std::string& body, alert_core::JsonValu
           ? objGet(*objGet(dom_, "admin"), "wifi_list")->toString()
           : "[]";
 
-  // 顶层白名单（M13：未知顶层字段拒绝）；文件内未知键保留不动
   for (const auto& kv : patch.objectItems()) {
     if (kv.first != "schema_version" && kv.first != "admin" &&
         kv.first != "alert_type_overrides" && kv.first != "mute_rules") {
@@ -803,7 +771,6 @@ bool ConfigStore::validateAndMerge(const std::string& body, alert_core::JsonValu
     return false;
   }
 
-  // 合并：出现的顶层 section 整体替换，未出现的保留
   merged = cloneDom(dom_);
   for (const auto& kv : patch.objectItems()) {
     objSet(merged, kv.first, cloneDom(kv.second));
@@ -850,7 +817,6 @@ std::vector<alert_core::MuteRule> ConfigStore::muteRules() const {
     for (const auto& item : mr->arrayItems()) {
       alert_core::MuteRule r;
       std::string f, m;
-      // DOM 已经过启动/PUT 校验；非法条目防御性跳过（不放大故障）
       if (muteRuleFromJson(item, r, f, m)) out.push_back(std::move(r));
     }
   }
@@ -890,7 +856,6 @@ bool ConfigStore::setWifiListInDom(
 }
 
 const char* ConfigStore::schemaJson() {
-  // GET /config/schema 静态响应（M13 §3 admin 域 v1 + overrides/mute_rules）。
   return R"JSON({
   "schema_version": 1,
   "description": "EEGO A4 device config v1 (data sources live in the dashboard bundle, not here). PUT replaces the top-level sections present in the body. Unknown top-level fields in the body are rejected; unknown fields inside stored sections are preserved. Secrets live only in NVS; this file carries *_ref references.",

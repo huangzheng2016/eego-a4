@@ -1,22 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 管理 HTTP API 服务器 —— 路由表、统一错误信封、Host/Origin 白名单、
-// Bearer/X-Ingest-Key 认证、请求体预算、限速、全部端点 handlers。
 //
-// 并发边界（M12 定稿，强制）：本文件一切 handler 运行在 httpd 任务上下文，
-// 只做解析/校验/限速/入队：
-//   * 配置持久化 / 恢复出厂 / 重启 / WiFi 落 NVS → AdminCommand → app_task；
-//   * 告警摄入 → NetStack 命令队列 → net_task（dashboard 出网测试见 dashboard_api）；
-//   * 告警读 → SnapshotPublisher 快照（未接线 → 503）；
-//   * 告警写（ack/clear）→ AlertActionSink（未接线 → 503）。
 //
-// 安全约定（M13 定稿）：
-//   * 统一错误信封 {"error":{"code","message","fields"?}}；
-//   * 401 同形不区分原因 + WWW-Authenticate: Bearer；
-//   * Host/Origin 白名单（本机 IP/主机名），其余 403（抗 DNS rebinding）；
-//   * 无任何 Access-Control-Allow-* 头（无 CORS）；非 JSON → 415；
-//   * 一切未知路径（含 /api/v1/firmware/*）→ 404 JSON（首版无远程 OTA）；
-//   * secrets 边界：响应/日志不出现 WiFi 密码、管理密码、token/key 全文
-//     （ingest key 仅轮换响应完整显示一次）。
 
 #include "admin/admin.h"
 #include "admin/device_log.h"
@@ -65,24 +49,19 @@
 #include "sd_card.h"
 
 namespace eego::admin {
-
 namespace {
-
 // ---------------------------------------------------------------------------
-// 服务器状态
 // ---------------------------------------------------------------------------
 httpd_handle_t g_server = nullptr;
 AdminConfig g_cfg;
 
 constexpr size_t kBodyBudgetLogin = 1024;
-constexpr size_t kBodyBudgetConfig = 4 * 1024;   // M13：config ≤4KB
-constexpr size_t kBodyBudgetAlerts = 64 * 1024;  // 资源预算（M13 T6）：低于批量
-                                                 // 理论上限 512KB，见任务报告
+constexpr size_t kBodyBudgetConfig = 4 * 1024;
+constexpr size_t kBodyBudgetAlerts = 64 * 1024;
 constexpr size_t kBodyBudgetSmall = 8 * 1024;
 constexpr size_t kBodyBudgetConfirm = 512;
 
 // ---------------------------------------------------------------------------
-// 响应工具
 // ---------------------------------------------------------------------------
 const char* statusText(int status) {
   switch (status) {
@@ -162,7 +141,6 @@ esp_err_t sendJson(httpd_req_t* req, int status, const std::string& body) {
   return sendBody(req, status, "application/json; charset=utf-8", body);
 }
 
-// 统一错误信封（M13 定稿）。retry_after_s > 0 时带 Retry-After 头。
 esp_err_t sendError(httpd_req_t* req, int status, const char* code, const std::string& message,
                     const FieldErrors* fields = nullptr, uint32_t retry_after_s = 0) {
   using alert_core::JsonValue;
@@ -188,7 +166,6 @@ esp_err_t sendError(httpd_req_t* req, int status, const char* code, const std::s
 }
 
 // ---------------------------------------------------------------------------
-// 请求工具
 // ---------------------------------------------------------------------------
 std::string clientIp(httpd_req_t* req) {
   char buf[48] = "0.0.0.0";
@@ -209,8 +186,6 @@ std::string clientIp(httpd_req_t* req) {
   return buf;
 }
 
-// 请求是否经设备热点（本端地址 192.168.4.1）到达：恢复热点期间手机连的是它，
-// 无外网，加载器拉不到 GitHub Pages 上的管理应用。
 bool viaSetupHotspot(httpd_req_t* req) {
   const int fd = httpd_req_to_sockfd(req);
   if (fd < 0) return false;
@@ -238,8 +213,6 @@ bool headerValue(httpd_req_t* req, const char* name, std::string& out) {
   return true;
 }
 
-// Host/Origin 白名单（M13 T2：抗 DNS rebinding）。本机 IP 集合：
-// STA 当前 IP、AP 固定 192.168.4.1、localhost、配置的主机名（+.local）。
 void collectLocalHosts(std::vector<std::string>& out) {
   esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
   if (sta != nullptr) {
@@ -259,7 +232,6 @@ void collectLocalHosts(std::vector<std::string>& out) {
   }
 }
 
-// 去掉 host 头的端口后缀并转小写比较。
 bool hostAllowed(const std::string& host_port) {
   std::string host = host_port;
   const size_t colon = host.find(':');
@@ -291,7 +263,6 @@ bool hostOriginOk(httpd_req_t* req) {
   return true;
 }
 
-// 读取请求体（预算内）。返回 0=ok；-1=已回 413；-2=已回 400。
 int readBodyBudget(httpd_req_t* req, size_t budget, std::string& out) {
   char cl_buf[24];
   if (httpd_req_get_hdr_value_str(req, "Content-Length", cl_buf, sizeof(cl_buf)) == ESP_OK) {
@@ -319,8 +290,6 @@ int readBodyBudget(httpd_req_t* req, size_t budget, std::string& out) {
   return 0;
 }
 
-// POST/PUT/DELETE 强制 JSON Content-Type（M13：触发 preflight 即拒 → 415）。
-// 前缀必须是 "application/json" 且后随结束/分号/空白——拒绝 "application/jsonx"。
 bool contentTypeJsonOk(httpd_req_t* req) {
   std::string ct;
   if (!headerValue(req, "Content-Type", ct)) return false;
@@ -328,7 +297,6 @@ bool contentTypeJsonOk(httpd_req_t* req) {
   return ct.size() == 16 || ct[16] == ';' || ct[16] == ' ' || ct[16] == '\t';
 }
 
-// 解析 JSON body；失败回 400 invalid_request。
 bool parseJsonBody(httpd_req_t* req, const std::string& body, alert_core::JsonValue& out) {
   alert_core::JsonParseError perr;
   if (!alert_core::jsonParse(body, out, perr)) {
@@ -341,7 +309,6 @@ bool parseJsonBody(httpd_req_t* req, const std::string& body, alert_core::JsonVa
 }
 
 // ---------------------------------------------------------------------------
-// 认证（401 同形不区分原因；X-Ingest-Key 越权 → 403）
 // ---------------------------------------------------------------------------
 bool bearerToken(httpd_req_t* req, std::string& token) {
   std::string auth;
@@ -358,8 +325,6 @@ bool ingestKeyPresented(httpd_req_t* req) {
 
 std::atomic<int64_t> g_last_authenticated_ms{0};
 
-// Bearer 端点统一认证。失败时已回 401/403。activity=false：被动轮询（GET /status），
-// 不计入「有人在用」（电池交互期不因 web 端开着就永不休眠；保持唤醒用显式 API）。
 bool requireBearer(httpd_req_t* req, std::string& token_out, bool activity = true) {
   if (ingestKeyPresented(req)) {
     sendError(req, 403, errc::kForbidden, "ingest key cannot access this resource");
@@ -373,13 +338,11 @@ bool requireBearer(httpd_req_t* req, std::string& token_out, bool activity = tru
   token_out = std::move(token);
   if (activity) {
     g_last_authenticated_ms.store(esp_timer_get_time() / 1000, std::memory_order_relaxed);
-    // 恢复热点期间有人在操作：10 分钟窗口按空闲重新计时，不在使用中途关闭。
     ProvisionPortal::instance().notePortalActivity();
   }
   return true;
 }
 
-// 告警摄入端点（M13 T10）：仅 X-Ingest-Key；Bearer 出现 → 403/401。
 bool requireIngestKey(httpd_req_t* req) {
   std::string key;
   if (!headerValue(req, "X-Ingest-Key", key) || key.empty()) {
@@ -402,7 +365,6 @@ bool requireIngestKey(httpd_req_t* req) {
   return true;
 }
 
-// 固定窗口限速统一出口（429 + Retry-After）。
 bool rateLimit(httpd_req_t* req, const std::string& key, uint32_t window_s, uint32_t limit) {
   uint32_t retry = 0;
   if (AuthManager::instance().consumeBudget(key, window_s, limit, retry)) return true;
@@ -411,17 +373,14 @@ bool rateLimit(httpd_req_t* req, const std::string& key, uint32_t window_s, uint
   return false;
 }
 
-// JsonValue 只提供 const 访问器；值语义类型，const_cast 安全。
 alert_core::JsonValue::Object& mutableItems(alert_core::JsonValue& obj) {
   return const_cast<alert_core::JsonValue::Object&>(obj.objectItems());
 }
 
-// 便捷字段错误构造
 FieldErrors fieldErr(const std::string& field, const std::string& msg) {
   return FieldErrors{{field, msg}};
 }
 
-// 从 JSON body 取字符串字段（缺失/类型错 → false）。
 bool jsonStringField(const alert_core::JsonValue& obj, const char* key, std::string& out) {
   const alert_core::JsonValue* v = obj.find(key);
   if (v == nullptr || v->type() != alert_core::JsonValue::Type::String) return false;
@@ -429,7 +388,6 @@ bool jsonStringField(const alert_core::JsonValue& obj, const char* key, std::str
   return true;
 }
 
-// 入队 AdminCommand 统一出口（503/500 映射）。
 bool runCommand(httpd_req_t* req, const AdminCommand& cmd, AdminResult& res) {
   if (!enqueueAdminCommand(cmd, res, 10000)) {
     sendError(req, 503, errc::kUnavailable, "command queue unavailable");
@@ -453,11 +411,8 @@ int64_t lastAuthenticatedRequestMs() {
 }  // namespace eego::admin
 
 namespace eego::admin {
-
 namespace {
-
 // ---------------------------------------------------------------------------
-// 认证端点
 // ---------------------------------------------------------------------------
 esp_err_t h_login(httpd_req_t* req) {
   const std::string ip = clientIp(req);
@@ -482,7 +437,6 @@ esp_err_t h_login(httpd_req_t* req) {
     return sendError(req, 400, errc::kInvalidRequest, "password (string) required");
   }
 
-  // 未配网（无管理密码）→ 与错密码同形 401，不泄露设备状态（M13 T3）
   if (!AuthManager::instance().hasPassword() ||
       !AuthManager::instance().verifyPassword(password)) {
     AuthManager::instance().noteLoginFailure(ip);
@@ -495,8 +449,6 @@ esp_err_t h_login(httpd_req_t* req) {
     return sendError(req, 500, errc::kInternal, "session creation failed");
   }
   ADMIN_LOG_INFO("login ok: ip=%s", ip.c_str());
-  // 电池供电时登录 = 有人要配置：按设置的时长保持唤醒，免得编辑到一半设备深睡。
-  // 已在保持唤醒中则不缩短。
   {
     const PowerSnapshot power = powerSnapshot();
     if (power.valid && !power.mains) {
@@ -549,7 +501,6 @@ esp_err_t h_change_password(httpd_req_t* req) {
     return sendError(req, 400, errc::kInvalidRequest,
                      "old_password and new_password (string) required");
   }
-  // 旧密码验证与登录同桶限速（防持令牌者在线爆破管理密码，review P2-1）
   {
     const std::string ip = clientIp(req);
     uint32_t retry = 0;
@@ -580,11 +531,10 @@ esp_err_t h_change_password(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-// 告警摄入（X-Ingest-Key，M13 T10；httpPushIngest → net_task）
 // ---------------------------------------------------------------------------
 esp_err_t h_alerts_ingest(httpd_req_t* req) {
   if (!requireIngestKey(req)) return ESP_OK;
-  if (!rateLimit(req, "alerts", 60, 30)) return ESP_OK;  // 每 key 30 次/分钟
+  if (!rateLimit(req, "alerts", 60, 30)) return ESP_OK;
   if (!contentTypeJsonOk(req)) {
     return sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
   }
@@ -622,7 +572,6 @@ esp_err_t h_alerts_ingest(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-// 告警读取/动作（快照源 + 动作 sink；未接线 → 503）
 // ---------------------------------------------------------------------------
 std::shared_ptr<const alert_core::AlertSnapshot> acquireSnapshot(bool& wired) {
   const auto& src = internal::snapshotSource();
@@ -638,9 +587,6 @@ esp_err_t h_alerts_list(httpd_req_t* req) {
     return sendError(req, 503, errc::kUnavailable, "alert snapshot source not wired");
   }
   using alert_core::JsonValue;
-  // 查询参数（容忍缺省/非法值 → 默认）。M11 契约：state/severity/type/source/
-  // muted/since/limit。muted 默认排除（与总览/徽标/默认列表一致），
-  // muted=true 才包含静音记录（可查，不丢数据）。
   char q[128] = {};
   std::string state, severity, type, source;
   bool include_muted = false;
@@ -690,9 +636,7 @@ esp_err_t h_alerts_list(httpd_req_t* req) {
                       .toString());
 }
 
-// 路径段提取：/alerts/<segment>/... 或 /alerts/<segment>（segment 非空且不含 '/'）。
 bool alertIdFromPath(const char* path, std::string& id, const char** rest) {
-  // path 以 "alerts/" 开头（已由 dispatch 剥离 /api/v1/ 前缀）
   if (strncmp(path, "alerts/", 7) != 0) return false;
   const char* seg = path + 7;
   const char* slash = strchr(seg, '/');
@@ -772,7 +716,6 @@ esp_err_t h_alert_get(httpd_req_t* req, const std::string& id) {
 }
 
 // ---------------------------------------------------------------------------
-// 状态 / 类型 / 日志
 // ---------------------------------------------------------------------------
 alert_core::JsonValue keepAwakeJson() {
   using alert_core::JsonValue;
@@ -822,7 +765,6 @@ esp_err_t h_status(httpd_req_t* req) {
                         {"mode", JsonValue::makeString(mode)},
                     }));
 
-  // network（net_task 快照优先；未运行回退 WifiManager 直读）
   net::NetStatusSnapshot ns;
   const bool ns_ok = net::NetStack::instance().queryStatus(ns);
   JsonValue::Object netobj;
@@ -849,7 +791,6 @@ esp_err_t h_status(httpd_req_t* req) {
                         JsonValue::makeInt(static_cast<int>(net::WifiManager::instance().state())));
   }
   {
-    // 信号分档（≥-60 很好 / -60..-70 良好 / -70..-80 一般 / <-80 很弱；未连接 none）
     const int rssi = ns_ok ? ns.wifi.rssi : net::WifiManager::instance().rssi();
     const net::WifiSignal q = net::wifiSignalQuality(rssi);
     netobj.emplace_back("signal", JsonValue::makeString(net::wifiSignalName(q)));
@@ -861,8 +802,6 @@ esp_err_t h_status(httpd_req_t* req) {
   netobj.emplace_back("ap_active", JsonValue::makeBool(ProvisionPortal::instance().apActive()));
   root.emplace_back("network", JsonValue::makeObject(std::move(netobj)));
 
-  // 统一时间源（M21）：net_task 快照优先；未运行回退系统时间可信度下限。
-  // valid=false 时 now 可能为 0 —— 客户端不得把 0 当作有效告警时间。
   JsonValue::Object timeobj;
   if (ns_ok) {
     timeobj.emplace_back("valid", JsonValue::makeBool(ns.time.valid));
@@ -895,7 +834,6 @@ esp_err_t h_status(httpd_req_t* req) {
                         {"config_valid", JsonValue::makeBool(ConfigStore::instance().valid())},
                     }));
 
-  // alerts（快照源；未接线 → available:false）
   bool wired = false;
   auto snap = acquireSnapshot(wired);
   JsonValue::Object alobj;
@@ -909,7 +847,6 @@ esp_err_t h_status(httpd_req_t* req) {
   }
   root.emplace_back("alerts", JsonValue::makeObject(std::move(alobj)));
 
-  // 会话/掩码信息（管理便利，不含任何秘密值）
   root.emplace_back("security",
                     JsonValue::makeObject({
                         {"sessions",
@@ -921,7 +858,6 @@ esp_err_t h_status(httpd_req_t* req) {
                     }));
 
   root.emplace_back("screen", screenJson());
-  // 保持唤醒 + 电源/休眠状态（app_task 定期发布的快照；设备是否会很快休眠一目了然）
   root.emplace_back("keep_awake", keepAwakeJson());
   const PowerSnapshot power = powerSnapshot();
   if (power.valid) {
@@ -949,10 +885,8 @@ esp_err_t h_status(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-// 保持唤醒（配置模式）：POST /device/keep-awake {"minutes":N}（0 = 取消，≤240）
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-// 当前屏：POST /device/screen {"index":n} 或 {"step":±1}（循环）
 // ---------------------------------------------------------------------------
 alert_core::JsonValue screenJson() {
   using alert_core::JsonValue;
@@ -1007,7 +941,6 @@ esp_err_t h_screen_post(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-// 浏览器校时：POST /device/time {"unix_ms":<int>,"source":"browser"}
 // ---------------------------------------------------------------------------
 std::mutex g_time_mutex;
 TimeSetter g_time_setter;
@@ -1115,7 +1048,6 @@ esp_err_t h_type_put(httpd_req_t* req, const std::string& id) {
   }
 
   using alert_core::JsonValue;
-  // 校验并构造新 override（空对象 = 删除覆盖，恢复内置）
   JsonValue::Object ov;
   for (const auto& kv : patch.objectItems()) {
     if (kv.first == "severity") {
@@ -1153,7 +1085,6 @@ esp_err_t h_type_put(httpd_req_t* req, const std::string& id) {
     }
   }
 
-  // 读改写 alert_type_overrides → AdminCommand 在 app_task 上下文持久化+应用
   JsonValue dom = ConfigStore::instance().rawDom();
   JsonValue::Object* overrides = nullptr;
   for (auto& kv : mutableItems(dom)) {
@@ -1244,11 +1175,8 @@ esp_err_t h_logs(httpd_req_t* req) {
 }  // namespace eego::admin
 
 namespace eego::admin {
-
 namespace {
-
 // ---------------------------------------------------------------------------
-// 配置端点
 // ---------------------------------------------------------------------------
 esp_err_t h_config_get(httpd_req_t* req) {
   return sendJson(req, 200, ConfigStore::instance().maskedDom().toString());
@@ -1515,7 +1443,7 @@ esp_err_t h_wifi_add(httpd_req_t* req) {
       !jsonStringField(root, "ssid", ssid)) {
     return sendError(req, 400, errc::kInvalidRequest, "ssid (string) required");
   }
-  jsonStringField(root, "password", password);  // 开放网络可空
+  jsonStringField(root, "password", password);
   FieldErrors errs;
   if (ssid.empty() || ssid.size() > 32) {
     errs.push_back({"ssid", "must be 1..32 bytes"});
@@ -1536,7 +1464,6 @@ esp_err_t h_wifi_add(httpd_req_t* req) {
   if (!runCommand(req, cmd, res)) return ESP_OK;
 
   ADMIN_LOG_INFO("wifi account saved via api: ssid=%s", ssid.c_str());
-  // 201 返回最新 wifi_list（掩码 DOM 中的 admin.wifi_list）
   alert_core::JsonValue dom = ConfigStore::instance().maskedDom();
   const alert_core::JsonValue* wl = nullptr;
   if (const alert_core::JsonValue* admin = dom.find("admin")) wl = admin->find("wifi_list");
@@ -1570,8 +1497,6 @@ esp_err_t h_wifi_remove(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// GET/PUT /config/wifi：完整网络列表（顺序 = 连接优先级）+ 当前连接。
-// 绝不返回密码：只给 ssid / has_password / pass_ref。
 std::string wifiListJson() {
   using alert_core::JsonValue;
   std::vector<net::WifiAccount> accounts;
@@ -1643,9 +1568,6 @@ std::string wifiListJson() {
 
 esp_err_t h_wifi_list_get(httpd_req_t* req) { return sendJson(req, 200, wifiListJson()); }
 
-// PUT body：{"networks":[{"ssid":"a","password":"********"},{"ssid":"b","password":"..."},
-//   {"ssid":"c2","previous_ssid":"c"}]}。password 缺省或 "********" = 保留
-// （previous_ssid 缺省时按 ssid 查找）；"" = 开放网络。
 esp_err_t h_wifi_list_put(httpd_req_t* req) {
   using alert_core::JsonValue;
   if (!contentTypeJsonOk(req)) {
@@ -1688,7 +1610,6 @@ esp_err_t h_wifi_list_put(httpd_req_t* req) {
     jsonStringField(item, "previous_ssid", entry.previous_ssid);
     entries->push_back(std::move(entry));
   }
-  // 预校验（含"保留密码"引用存在性），app_task 执行时对最新 NVS 再校验一次。
   {
     std::vector<net::WifiAccount> current, merged;
     net::CredentialStore::loadWifiAccounts(current);
@@ -1713,7 +1634,6 @@ esp_err_t h_wifi_list_put(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-// sources/credentials（write-only；固定 source 命名空间，不返回秘密值）
 // ---------------------------------------------------------------------------
 esp_err_t h_source_credentials_get(httpd_req_t* req) {
   std::vector<net::SourceCredentialMetadata> credentials;
@@ -1795,7 +1715,6 @@ esp_err_t h_source_credentials_write(httpd_req_t* req, bool remove) {
 }
 
 // ---------------------------------------------------------------------------
-// 系统端点（reboot / factory-reset 双确认守卫；ingest-key 轮换仅显示一次）
 // ---------------------------------------------------------------------------
 esp_err_t h_reboot(httpd_req_t* req) {
   if (!contentTypeJsonOk(req)) {
@@ -1813,7 +1732,7 @@ esp_err_t h_reboot(httpd_req_t* req) {
   }
   AdminCommand cmd;
   cmd.type = AdminCommandType::Reboot;
-  cmd.delay_ms = 2000;  // M13：202 后 ≥2s 重启
+  cmd.delay_ms = 2000;
   AdminResult res;
   if (!runCommand(req, cmd, res)) return ESP_OK;
   ADMIN_LOG_WARN("reboot scheduled via api");
@@ -1839,8 +1758,6 @@ esp_err_t h_factory_reset(httpd_req_t* req) {
     FieldErrors errs = fieldErr("confirm", "must be \"RESET\"");
     return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
   }
-  // 双确认：会话之外再验一次管理密码（防会话劫持后被远程 wipe，M13 F8）；
-  // 与登录同桶限速（review P2-1）
   {
     const std::string ip = clientIp(req);
     uint32_t retry = 0;
@@ -1869,7 +1786,6 @@ esp_err_t h_ingest_rotate(httpd_req_t* req) {
     return sendError(req, 500, errc::kInternal, "ingest key rotation failed");
   }
   ADMIN_LOG_WARN("ingest key rotated; previous key revoked");
-  // M13：仅本次完整返回；之后任何响应只含前 4 位掩码
   return sendJson(req, 200,
                   alert_core::JsonValue::makeObject({
                                             {"ingest_key", alert_core::JsonValue::makeString(key)},
@@ -1890,7 +1806,6 @@ esp_err_t redirectToWifiDiag(httpd_req_t* req) {
 }
 
 esp_err_t h_root_page(httpd_req_t* req) {
-  // 恢复热点上的手机没有外网：直接给离线 WiFi 页（可添加网络），不给加载器。
   if (ProvisionPortal::instance().isApFallbackActive() && viaSetupHotspot(req)) {
     return redirectToWifiDiag(req);
   }
@@ -1905,11 +1820,8 @@ esp_err_t h_loader_js(httpd_req_t* req) {
 }  // namespace eego::admin
 
 namespace eego::admin {
-
 namespace {
-
 // ---------------------------------------------------------------------------
-// 显示快照（GET /api/v1/display/snapshot.bmp）
 // ---------------------------------------------------------------------------
 std::mutex g_snapshot_mutex;
 DisplaySnapshotProvider g_snapshot_provider;
@@ -1951,10 +1863,6 @@ esp_err_t h_display_snapshot(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-// 慢请求异步化：出网测试/抓取（≤12s）与渲染预览（≤15s，要等 app_task 刷屏）若在
-// httpd 任务里同步等待，期间其它请求（页面、状态轮询）全部排队，网页表现为卡死。
-// 这类请求交给单独的工作任务处理（httpd_req_async_handler_begin 接管连接），
-// httpd 任务立即返回继续服务其它连接。工作任务串行处理，队列满时 503。
 // ---------------------------------------------------------------------------
 struct AsyncJob {
   httpd_req_t* req;
@@ -1987,7 +1895,7 @@ esp_err_t handleDashboardMaybeAsync(httpd_req_t* req, const std::string& path) {
         xTaskCreate(&asyncWorker, "admin_async", 8192, nullptr, 5, nullptr) != pdPASS) {
       if (g_async_queue != nullptr) vQueueDelete(g_async_queue);
       g_async_queue = nullptr;
-      return internal::handleDashboardApi(req, path.c_str());  // 退化为同步处理
+      return internal::handleDashboardApi(req, path.c_str());
     }
   }
   AsyncJob job{};
@@ -2003,10 +1911,8 @@ esp_err_t handleDashboardMaybeAsync(httpd_req_t* req, const std::string& path) {
 }
 
 // ---------------------------------------------------------------------------
-// 路由分发（/api/v1/*；M13 定稿路由表；其余一切 → 404 JSON，含 /firmware/*）
 // ---------------------------------------------------------------------------
 esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
-  // Host/Origin 白名单（M13 T2：抗 DNS rebinding；无 CORS 头）
   if (!hostOriginOk(req)) {
     ADMIN_LOG_WARN("host/origin rejected");
     return sendError(req, 403, errc::kForbidden, "forbidden");
@@ -2014,23 +1920,17 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
 
   const auto m = req->method;
 
-  // POST /auth/login（公开 + 登录限速）
   if (m == HTTP_POST && strcmp(path, "auth/login") == 0) {
     return h_login(req);
   }
 
-  // POST /alerts（X-Ingest-Key，M13 T10 最小权限）
   if (m == HTTP_POST && strcmp(path, "alerts") == 0) {
     return h_alerts_ingest(req);
   }
 
-  // ---- 以下全部 Bearer ----
   std::string token;
   auto bearer = [&]() { return requireBearer(req, token); };
 
-  // DP5：完整 dashboard 配置中心。沿用 Host/Origin + Bearer；GET、写操作、
-  // 出网测试分别限速，禁止 X-Ingest-Key 越权访问。限速分类与 handler 必须
-  // 使用同一规范路径，防止重复/尾斜杠变体落入普通写操作桶。
   if (strcmp(path, "dashboard") == 0 || strncmp(path, "dashboard/", 10) == 0) {
     if (!bearer()) return ESP_OK;
     const std::string canonical_path = internal::canonicalDashboardApiPath(path);
@@ -2051,17 +1951,16 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
   }
 
   if (m == HTTP_GET) {
-    // 被动轮询（状态/诊断）单独计数，不挤占页面加载的 GET 预算。
     const bool poll = strcmp(path, "status") == 0 || strcmp(path, "wifi/diag") == 0;
     if (!rateLimit(req, (poll ? "poll:" : "get:") + clientIp(req), 60, poll ? 120 : 300)) {
       return ESP_OK;
     }
     if (strcmp(path, "status") == 0) {
-      if (!requireBearer(req, token, false)) return ESP_OK;  // 被动轮询：不计活动
+      if (!requireBearer(req, token, false)) return ESP_OK;
       return h_status(req);
     }
     if (strcmp(path, "wifi/diag") == 0) {
-      if (!requireBearer(req, token, false)) return ESP_OK;  // 诊断页 5s 轮询：不计活动
+      if (!requireBearer(req, token, false)) return ESP_OK;
       return sendJson(req, 200, wifi_diag::diagJson());
     }
     if (strcmp(path, "device/keep-awake") == 0) {
@@ -2082,7 +1981,6 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     }
     if (strcmp(path, "system/device-log") == 0) {
       if (!bearer()) return ESP_OK;
-      // 纯文本，默认最近 16 KiB（?bytes= 最多 32 KiB）。
       size_t bytes = 16 * 1024;
       char q[32] = {};
       char v[12] = {};
@@ -2291,13 +2189,11 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
   return sendError(req, 404, errc::kNotFound, "resource not found");
 }
 
-// 通配 handler：静态页（免认证零数据）+ API 命名空间 + 404
 esp_err_t wildcardHandler(httpd_req_t* req) {
   const char* uri = req->uri;
   if (req->method == HTTP_GET) {
     if (strcmp(uri, "/") == 0 || strncmp(uri, "/?", 2) == 0) return h_root_page(req);
     if (strcmp(uri, "/loader.js") == 0) return h_loader_js(req);
-    // 离线 WiFi 诊断页（零数据静态资源；数据走 Bearer 的 /api/v1/wifi/diag）。
     if (strcmp(uri, "/wifi-diag") == 0) {
       return sendStatic(req, "text/html; charset=utf-8", wifi_diag::kHtml, "default-src 'self'");
     }
@@ -2314,25 +2210,20 @@ esp_err_t wildcardHandler(httpd_req_t* req) {
     if (query != std::string::npos) path.resize(query);
     return apiDispatch(req, path.c_str());
   }
-  // 恢复热点 + DNS 劫持：手机的联网检测（generate_204、hotspot-detect.html 等）
-  // 落到这里，302 到离线 WiFi 页以弹出 captive portal。
   if (req->method == HTTP_GET && ProvisionPortal::instance().isApFallbackActive() &&
       viaSetupHotspot(req)) {
     return redirectToWifiDiag(req);
   }
-  // 含 /api/v1/firmware/* 在内的一切未知路径 → 404 JSON（M13 T7：首版无远程 OTA）
   return sendError(req, 404, errc::kNotFound, "resource not found");
 }
 
 }  // namespace
 
 // ===========================================================================
-// 服务器生命周期（app_task 按设备模式启停；幂等）
 // ===========================================================================
 
 esp_err_t startAdminApi(const AdminConfig& cfg) {
   if (g_server != nullptr) return ESP_ERR_INVALID_STATE;
-  // 80 端口互斥（防御性检查；模式判定本就在 app_task 上下文）
   if (ProvisionPortal::instance().isOpen()) return ESP_ERR_INVALID_STATE;
 
   // AdminLog / AuthManager / ConfigStore / DashboardStore are initialized
@@ -2340,7 +2231,6 @@ esp_err_t startAdminApi(const AdminConfig& cfg) {
   g_cfg = cfg;
   internal::setRegistry(cfg.registry);
 
-  // 应用 admin 域运行参数
   const AdminDomainConfig admin = ConfigStore::instance().admin();
   AuthManager::instance().setSessionTtl(admin.session_ttl_s);
   AuthManager::instance().setLockThreshold(admin.login_lock_threshold);
@@ -2348,11 +2238,10 @@ esp_err_t startAdminApi(const AdminConfig& cfg) {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = cfg.port;
   config.max_uri_handlers = 12;
-  config.stack_size = 8192;       // M12 任务表：httpd 8KB
-  config.max_open_sockets = 7;    // lwIP 预算（httpd 内部另占 3；CONFIG_LWIP_MAX_SOCKETS=16）
-  config.recv_wait_timeout = 5;   // 慢速 POST 5s 断开（M13 T6）
+  config.stack_size = 8192;
+  config.max_open_sockets = 7;
+  config.recv_wait_timeout = 5;
   config.lru_purge_enable = true;
-  // keep-alive：弱信号下每个请求重新握手要多花 1 个以上 RTT；空闲连接由 LRU 回收。
   config.keep_alive_enable = true;
   config.keep_alive_idle = 5;
   config.keep_alive_interval = 5;

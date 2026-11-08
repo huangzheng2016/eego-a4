@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 电池模式决策（契约见 battery_policy.h）。
 #include "battery_policy.h"
 
 #include <algorithm>
 #include <cstring>
 
 namespace panel::battery {
-
 namespace {
-
 constexpr int64_t kDayS = 86400;
 
 int64_t localOf(uint64_t unix_s, int tz_offset_min) {
@@ -51,15 +48,13 @@ uint64_t mix(uint64_t h, T value) {
 
 }  // namespace
 
-// ── 时间对齐 ────────────────────────────────────────────────────────────────
-
 uint64_t alignedBoundaryAfter(uint64_t unix_s, int tz_offset_min, uint32_t period_min) {
   const int64_t period = static_cast<int64_t>(period_min == 0 ? 1 : period_min) * 60;
   const int64_t local = localOf(unix_s, tz_offset_min);
   const int64_t day_start = floorDiv(local, kDayS) * kDayS;
   const int64_t into_day = local - day_start;
   int64_t next = day_start + (into_day / period + 1) * period;
-  if (next > day_start + kDayS) next = day_start + kDayS;  // 每天零点重新对齐
+  if (next > day_start + kDayS) next = day_start + kDayS;
   return static_cast<uint64_t>(next - static_cast<int64_t>(tz_offset_min) * 60);
 }
 
@@ -104,8 +99,6 @@ bool inNightWindow(uint64_t unix_s, int tz_offset_min, const NightWindow& window
   }
   return true;
 }
-
-// ── 唤醒计划 ────────────────────────────────────────────────────────────────
 
 uint32_t effectiveIntervalMin(uint32_t base_min, bool battery_known, uint8_t battery_pct,
                               uint32_t consecutive_failures) {
@@ -152,20 +145,16 @@ uint64_t refreshDeadline(uint64_t last_refresh_unix, uint32_t max_stale_min, int
                          uint32_t interval_min, const NightWindow& night) {
   if (last_refresh_unix < kMinValidUnix) return 0;
   const uint64_t due = last_refresh_unix + static_cast<uint64_t>(max_stale_min) * 60;
-  // 第一个 ≥ due 的唤醒边界（due 恰在边界上即该边界）。
   uint64_t wake = alignedBoundaryAfter(due - 1, tz_offset_min, interval_min);
   uint64_t end = 0;
   if (inNightWindow(wake, tz_offset_min, night, &end)) wake = end;
   return wake;
 }
 
-// ── 刷屏决策 ────────────────────────────────────────────────────────────────
-
 bool frameStale(const FrameRecord& rec, uint64_t now_unix, uint32_t max_stale_min) {
   if (max_stale_min == 0) return true;
   if (now_unix < kMinValidUnix || rec.refresh_unix < kMinValidUnix) return false;
-  if (now_unix < rec.refresh_unix) return false;  // 墙钟回拨：不据此强刷
-  // 容差同唤醒：提前几十秒醒来时，本应到期的强刷仍在本次完成。
+  if (now_unix < rec.refresh_unix) return false;
   return now_unix + kEarlyWakeToleranceS - rec.refresh_unix >=
          static_cast<uint64_t>(max_stale_min) * 60;
 }
@@ -215,8 +204,6 @@ uint8_t batteryDisplayBucket(uint8_t raw_pct, int prev_bucket) {
   return static_cast<uint8_t>((raw / kBatteryBucketPct) * kBatteryBucketPct);
 }
 
-// ── 帧哈希与压缩存储 ────────────────────────────────────────────────────────
-
 uint64_t fnv1a64(const uint8_t* data, size_t size, uint64_t seed) {
   uint64_t h = seed;
   for (size_t i = 0; i < size; ++i) {
@@ -250,7 +237,6 @@ size_t packbitsEncodeTo(const uint8_t* data, size_t size, uint8_t* out, size_t c
       i += run;
       continue;
     }
-    // 字面段：直到出现 ≥2 的重复或满 128 字节（首字节必不与下一字节相同）。
     const size_t start = i;
     size_t len = 0;
     do {
@@ -306,7 +292,7 @@ size_t encodeFrameFileTo(const uint8_t* frame, size_t size, uint64_t hash, uint8
   header.reserve(kFrameHeaderSize);
   putU32(header, kFrameMagic);
   putU16(header, kFrameVersion);
-  putU16(header, 0);  // flags（保留）
+  putU16(header, 0);
   putU32(header, static_cast<uint32_t>(size));
   putU32(header, static_cast<uint32_t>(payload_size));
   putU64(header, hash);
@@ -335,10 +321,7 @@ bool decodeFrameFile(const uint8_t* file, size_t file_size, uint8_t* out, size_t
   return true;
 }
 
-// ── 跨深睡状态 ──────────────────────────────────────────────────────────────
-
 namespace {
-
 uint32_t rtcChecksum(const RtcState& s) {
   uint64_t h = 1469598103934665603ULL;
   h = mix(h, s.magic);
@@ -384,7 +367,7 @@ bool rtcValid(const RtcState& state) {
 bool mainsPowered(uint8_t power_mode, bool charging, uint16_t battery_mv) {
   if (power_mode == 1) return true;
   if (power_mode == 2) return false;
-  if (battery_mv == 0) return true;  // 无电池读数（台式/未装电池）
+  if (battery_mv == 0) return true;
   return charging;
 }
 
@@ -436,7 +419,6 @@ bool MainsDetector::dropDetected(uint16_t filtered) const {
 }
 
 bool MainsDetector::update(uint8_t power_mode, const PowerSample& s, int64_t now_ms) {
-  // 证据在任何模式下都跟踪：切回 auto 时立即可用。
   const bool host_dropped = usb_host_prev_ && !s.usb_host;
   usb_host_prev_ = s.usb_host;
   if (s.charging) {
@@ -444,7 +426,7 @@ bool MainsDetector::update(uint8_t power_mode, const PowerSample& s, int64_t now
     charge_off_since_ms_ = -1;
   } else if (charging_) {
     if (host_dropped) {
-      charging_ = false;  // 从电脑上拔下：不等去抖
+      charging_ = false;
     } else {
       if (charge_off_since_ms_ < 0) charge_off_since_ms_ = now_ms;
       if (now_ms - charge_off_since_ms_ >= kChargeOffDebounceMs) charging_ = false;
@@ -482,7 +464,6 @@ bool MainsDetector::update(uint8_t power_mode, const PowerSample& s, int64_t now
     armed_ = !s.usb_host;
     latched_ = false;
     history_count_ = 0;
-    // 接着电脑充电时报 usb_host（「充电中」由电量行显示，避免重复）。
     decide(true, s.usb_host ? PowerReason::UsbHost : PowerReason::Charging);
     return mains_;
   }
@@ -500,7 +481,6 @@ bool MainsDetector::update(uint8_t power_mode, const PowerSample& s, int64_t now
   }
   if (armed_) {
     if (!latched_) {
-      // 刚停充：电压仍在满电区才锁存（充电头供电、电池已满），否则是拔电。
       if (filtered < kHoldEnterMv) {
         armed_ = false;
         decide(false, PowerReason::BelowHold);
@@ -516,7 +496,7 @@ bool MainsDetector::update(uint8_t power_mode, const PowerSample& s, int64_t now
     } else if (filtered < kHoldExitMv) {
       release = PowerReason::BelowHold;
     } else if (now_ms < settle_until_ms_) {
-      history_count_ = 0;  // 停充后的电压回落不算拔电
+      history_count_ = 0;
     } else {
       if (fresh) pushHistory(read_ms, filtered);
       if (dropDetected(filtered)) release = PowerReason::VoltageDrop;
@@ -531,7 +511,6 @@ bool MainsDetector::update(uint8_t power_mode, const PowerSample& s, int64_t now
     decide(false, release);
     return mains_;
   }
-  // 保留最近一次「为什么判为电池」的原因（电压下降/偏低），否则为 battery。
   if (mains_ || (reason_ != PowerReason::VoltageDrop && reason_ != PowerReason::BelowHold)) {
     reason_ = PowerReason::Battery;
   }
