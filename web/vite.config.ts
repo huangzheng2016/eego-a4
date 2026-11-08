@@ -3,7 +3,7 @@ import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 
 // The production build is loaded cross-origin by the device's loader page
-// (see loader/index.html), so emit stable, unhashed file names and a single
+// (firmware loader_page.cpp), so emit stable, unhashed file names and a single
 // JS chunk. `base: './'` keeps any asset references relative to app.js.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');

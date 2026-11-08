@@ -1,7 +1,7 @@
 // Writes dist/version.json for the device loader (/loader.js), which reads
 // `version` | `build` | `hash` and appends it as ?v= to assets/app.{js,css}.
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,9 +41,6 @@ const info = {
   assets: { js: files[0], css: files[1] },
 };
 writeFileSync(join(dist, 'version.json'), JSON.stringify(info, null, 2) + '\n');
-// Reference loader page (the device serves its own copy at "/").
-mkdirSync(join(dist, 'loader'), { recursive: true });
-for (const f of ['index.html', 'loader.js']) copyFileSync(join(root, 'loader', f), join(dist, 'loader', f));
 // GitHub Pages: skip Jekyll processing.
 writeFileSync(join(dist, '.nojekyll'), '');
 console.log(`postbuild: version.json hash=${digest} build=${info.build}`);
