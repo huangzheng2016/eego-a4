@@ -225,9 +225,15 @@ void WifiManager::setPowerSave(bool enable) {
   if (initialized_ && started_) applyPowerSave();
 }
 
+static int g_ps_applied = -1;  // last power-save mode applied (-1 unknown)
+
 void WifiManager::applyPowerSave() {
+  // The driver rejects config changes mid-association ("sta is connecting, cannot set
+  // config"); the mode is applied again once the state settles.
+  if (state_ == WifiState::Connecting) return;
   const bool ps = ps_enabled_ && state_ == WifiState::Connected;
-  esp_wifi_set_ps(ps ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
+  if (g_ps_applied == (ps ? 1 : 0)) return;
+  if (esp_wifi_set_ps(ps ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE) == ESP_OK) g_ps_applied = ps ? 1 : 0;
 }
 
 void WifiManager::checkTxPower(const char* when) {
@@ -349,6 +355,7 @@ WifiState WifiManager::connect(const WifiAccount& acc, uint32_t timeout_ms, cons
   last_reason_ = 0;
 
   esp_wifi_set_ps(WIFI_PS_NONE);
+  g_ps_applied = 0;
 
   wifi_config_t cfg = {};
   memcpy(cfg.sta.ssid, acc.ssid.data(), std::min(acc.ssid.size(), sizeof(cfg.sta.ssid)));

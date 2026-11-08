@@ -558,8 +558,26 @@ extern "C" void app_main(void) {
   {
     const std::vector<alert_core::MuteRule> mute_rules = config.muteRules();
     std::string mute_err;
-    if (!eego::net::NetStack::instance().setMuteRules(mute_rules, mute_err)) {
-      ESP_LOGW(TAG, "mute rules restore failed: %s", mute_err.c_str());
+    if (!mute_rules.empty() &&
+        !eego::net::NetStack::instance().setMuteRules(mute_rules, mute_err)) {
+      // net_task is often busy joining WiFi at boot; keep retrying in the background.
+      ESP_LOGW(TAG, "mute rules restore deferred: %s", mute_err.c_str());
+      auto* pending = new std::vector<alert_core::MuteRule>(mute_rules);
+      xTaskCreate(
+          [](void* arg) {
+            auto* rules = static_cast<std::vector<alert_core::MuteRule>*>(arg);
+            std::string err;
+            bool ok = false;
+            for (int i = 0; i < 24 && !ok; i++) {
+              vTaskDelay(pdMS_TO_TICKS(5000));
+              ok = eego::net::NetStack::instance().setMuteRules(*rules, err);
+            }
+            if (ok) ESP_LOGI(TAG, "mute rules restored (%u)", static_cast<unsigned>(rules->size()));
+            else ESP_LOGE(TAG, "mute rules restore failed: %s", err.c_str());
+            delete rules;
+            vTaskDelete(nullptr);
+          },
+          "mute_restore", 4096, pending, 2, nullptr);
     }
   }
 

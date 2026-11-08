@@ -511,7 +511,13 @@ void BleManager::startAdvertising() {
   if (rc == 0) {
     advertising_ = true;
   } else if (rc != BLE_HS_EALREADY) {
-    ESP_LOGW(kTag, "advertise start rc=%d", rc);
+    // ENOMEM/EBUSY here usually means a connection is being set up; retried next service().
+    static int64_t last_warn_ms = 0;
+    const int64_t now = nowMs();
+    if (now - last_warn_ms > 60000) {
+      last_warn_ms = now;
+      ESP_LOGW(kTag, "advertise start rc=%d (retrying)", rc);
+    }
   }
 }
 

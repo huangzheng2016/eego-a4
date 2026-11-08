@@ -88,7 +88,7 @@ void AdminLog::log(LogLevel lv, const char* fmt, ...) {
   va_end(ap);
   e.msg[sizeof(e.msg) - 1] = '\0';
 
-  esp_log_write(toEsp(lv), TAG, "%s", e.msg);
+  ESP_LOG_LEVEL(toEsp(lv), TAG, "%s", e.msg);
 
   xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex_), portMAX_DELAY);
   e.seq = next_seq_++;

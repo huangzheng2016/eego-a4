@@ -15,7 +15,7 @@ const char* TAG = "diag";
 
 constexpr uint32_t kQueueLen = 8;
 constexpr uint32_t kCmdMaxLen = 1024;
-constexpr uint32_t kTaskStackBytes = 3072;
+constexpr uint32_t kTaskStackBytes = 4096;
 constexpr UBaseType_t kTaskPriority = 3;
 
 QueueHandle_t g_queue = nullptr;

@@ -124,3 +124,8 @@ CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
 CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 CONFIG_HEAP_POISONING_LIGHT=y
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+
+# System task stacks: the stack-end watchpoint and heap poisoning add a little per call;
+# measured headroom was ipc0 336 B and IDLE ~740 B at the defaults.
+CONFIG_ESP_IPC_TASK_STACK_SIZE=2048
+CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=2048

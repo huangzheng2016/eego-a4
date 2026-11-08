@@ -7,6 +7,7 @@
 #include <cstring>
 #include <vector>
 
+#include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
@@ -136,13 +137,27 @@ void logHeap(void*) {
            static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+  // Full table at 5 min and then every 30 min (stack headroom of every task, for tuning).
+  static uint32_t calls = 0;
+  const bool full = ++calls == 5 || calls % 30 == 0;
+  std::string line;
   for (const TaskStatus_t& t : taskSnapshot()) {
     const uint32_t free_bytes = t.usStackHighWaterMark;  // ESP-IDF reports bytes
     if (free_bytes < kLowStackBytes) {
       ESP_LOGW(kTag, "stack low: task %s has %u bytes left", t.pcTaskName,
                static_cast<unsigned>(free_bytes));
     }
+    if (full) {
+      char item[40];
+      std::snprintf(item, sizeof(item), " %s=%u", t.pcTaskName, static_cast<unsigned>(free_bytes));
+      line += item;
+      if (line.size() > 160) {
+        ESP_LOGI(kTag, "stack free:%s", line.c_str());
+        line.clear();
+      }
+    }
   }
+  if (!line.empty()) ESP_LOGI(kTag, "stack free:%s", line.c_str());
 }
 
 }  // namespace
@@ -262,7 +277,22 @@ esp_err_t clearCrash() {
 void logBootReport() {
   const esp_reset_reason_t r = esp_reset_reason();
   ESP_LOGI(kTag, "reset reason: %s", resetReasonName(r));
-  const std::string crash = crashJson();
+  std::string crash = crashJson();
+  // A dump from a different build cannot be decoded with this firmware's ELF: drop it so
+  // it is not mistaken for a crash of the running firmware.
+  const size_t at = crash.find("\"elf_sha256\":\"");
+  if (at != std::string::npos) {
+    char current[16] = {};
+    esp_app_get_elf_sha256(current, sizeof(current));
+    const std::string dumped = crash.substr(at + 14, crash.find('"', at + 14) - (at + 14));
+    const size_t n = std::min(dumped.size(), std::strlen(current));
+    if (n == 0 || dumped.compare(0, n, current, n) != 0) {
+      ESP_LOGW(kTag, "discarding core dump from another firmware build (%s, running %s)",
+               dumped.c_str(), current);
+      clearCrash();
+      crash = crashJson();
+    }
+  }
   if (crash.find("\"crashed\":true") != std::string::npos) {
     ESP_LOGE(kTag, "last crash: %s", crash.c_str());
     ESP_LOGE(kTag, "decode: xtensa-esp32s3-elf-addr2line -pfiaC -e eego-a4-alert-panel.elf <pc> <backtrace...>");
