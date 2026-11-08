@@ -130,11 +130,13 @@ func pair(ctx context.Context, args []string) error {
 	return nil
 }
 
+var errNotPaired = errors.New("no paired device; run: eego-link pair")
+
 func connectSaved(ctx context.Context) (*blelink.Conn, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, errors.New("no paired device; run: eego-link pair")
+			return nil, errNotPaired
 		}
 		return nil, err
 	}
@@ -171,6 +173,9 @@ func run(ctx context.Context, args []string) error {
 	backoff := 2 * time.Second
 	for ctx.Err() == nil {
 		conn, err := connectSaved(ctx)
+		if errors.Is(err, errNotPaired) {
+			return err
+		}
 		if err != nil {
 			log.Printf("%v; retrying in %s", err, backoff)
 			select {
