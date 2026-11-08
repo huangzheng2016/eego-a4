@@ -13,5 +13,13 @@ cmake_minimum_required(VERSION 3.16.0)
 # 第三方库组件目录（lodepng 等自带独立 CMakeLists 的库）
 set(EXTRA_COMPONENT_DIRS "components/third_party")
 
+# 配置只以 sdkconfig.defaults 为准：它比已生成的 sdkconfig 新时，删掉旧的让 IDF 重新生成，
+# 否则改过的默认值（内存策略、蓝牙、coredump 等）不会生效。
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig" AND
+   "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults" IS_NEWER_THAN "${CMAKE_CURRENT_LIST_DIR}/sdkconfig")
+  message(STATUS "sdkconfig.defaults changed: regenerating sdkconfig")
+  file(REMOVE "${CMAKE_CURRENT_LIST_DIR}/sdkconfig")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(eego-a4-alert-panel)

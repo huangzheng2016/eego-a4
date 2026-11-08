@@ -579,6 +579,7 @@ int BleManager::onConnEvent(struct ble_gap_event* event, void* arg) {
       }
       const uint16_t conn = event->connect.conn_handle;
       self->conn_handle_ = conn;
+      self->conn_fast_ = true;
       self->link_ = LinkState::Connected;
       self->last_tunnel_ms_ = nowMs();
       ble_gap_set_data_len(conn, 251, 2120);
@@ -751,8 +752,21 @@ void BleManager::sendControl(uint16_t conn, const uint8_t frame[4]) {
   ble_gatts_notify_custom(conn, g_tx_handle, om);
 }
 
+void BleManager::setConnSpeed(uint16_t conn, bool fast) {
+  if (conn == 0xffff || conn_fast_.exchange(fast) == fast) return;
+  // 传输时 15–30 ms；空闲 3 s 后 90–120 ms，减少与 WiFi 抢射频（弱信号下 DHCP 更容易成功）。
+  ble_gap_upd_params params = {};
+  params.itvl_min = BLE_GAP_CONN_ITVL_MS(fast ? 15 : 90);
+  params.itvl_max = BLE_GAP_CONN_ITVL_MS(fast ? 30 : 120);
+  params.latency = 0;
+  params.supervision_timeout = BLE_GAP_SUPERVISION_TIMEOUT_MS(fast ? 4000 : 6000);
+  const int rc = ble_gap_update_params(conn, &params);
+  ESP_LOGI(kTag, "conn params -> %s (rc=%d)", fast ? "fast" : "idle", rc);
+}
+
 void BleManager::handleRx(uint16_t conn, const uint8_t* data, size_t len) {
   last_tunnel_ms_ = nowMs();
+  setConnSpeed(conn, true);
   tunnel::FrameHeader header;
   if (!tunnel::parseHeader(data, len, header)) return;
   tunnel::Result result;
@@ -1035,6 +1049,9 @@ void BleManager::service(bool mains) {
   if (!scanning_.load() && observerDueLocked(now)) startObserverWindowLocked();
   if (admin_allowed_.load()) {
     if (!ble_gap_adv_active() && conn_handle_.load() == 0xffff) startAdvertising();
+    if (link_.load() == LinkState::Authenticated && now - last_tunnel_ms_.load() > 3000) {
+      setConnSpeed(conn_handle_.load(), false);
+    }
   } else {
     if (ble_gap_adv_active()) ble_gap_adv_stop();
     advertising_ = false;

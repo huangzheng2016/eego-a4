@@ -542,7 +542,7 @@ extern "C" void app_main(void) {
       ESP_LOGI(TAG, "alerts.db boot compaction skipped on battery wake");
     } else if (alertDb.deadLines() > 0) {
       // 压缩已是逐条流式写 + 分块回读校验（不整份复制），但仍需几十 KB 内部
-      // RAM（CONFIG_SPIRAM_USE_CAPS_ALLOC：malloc 只走内部堆）。堆紧张时跳过，
+      // RAM（≤4 KiB 的 malloc 先走内部堆）。堆紧张时跳过，
       // 交给 net_task 按策略稍后压缩。另以标记文件防"压缩中崩溃 → 重启 → 再压缩
       // → 再崩溃"的循环：上次启动压缩未走完（标记仍在）则本次跳过并清标记。
       const std::string marker = alertDb.path() + ".compacting";

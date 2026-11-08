@@ -9,6 +9,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "sdkconfig.h"
@@ -106,6 +107,23 @@ void appendHex(std::string& out, uint32_t v) {
   out += b;
 }
 
+// 分配失败：记下大小、请求的内存类型和当时的余量（不分配内存，只格式化到静态缓冲）。
+void onAllocFailed(size_t size, uint32_t caps, const char* function) {
+  ESP_LOGE(kTag, "alloc failed: %u bytes caps=0x%lx in %s; internal free=%u largest=%u, psram free=%u",
+           static_cast<unsigned>(size), static_cast<unsigned long>(caps), function ? function : "?",
+           static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+           static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+           static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+}
+
+void logHeap(void*) {
+  ESP_LOGI(kTag, "heap: internal free=%u min=%u largest=%u; psram free=%u",
+           static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+           static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+           static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+           static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+}
+
 }  // namespace
 
 void install() {
@@ -117,6 +135,16 @@ void install() {
     return;
   }
   g_prev = esp_log_set_vprintf(&hook);
+  heap_caps_register_failed_alloc_callback(&onAllocFailed);
+  // WiFi 驱动在弱信号下每 100 ms 打一行 "m f null"，会冲掉有用的日志；连接状态由 net.wifi 记录。
+  esp_log_level_set("wifi", ESP_LOG_ERROR);
+  // 每分钟记一次内存水位，崩溃前的趋势可在「设备调试日志」里看到。
+  const esp_timer_create_args_t args = {.callback = &logHeap, .arg = nullptr,
+                                        .dispatch_method = ESP_TIMER_TASK, .name = "devlog_heap",
+                                        .skip_unhandled_events = true};
+  esp_timer_handle_t timer = nullptr;
+  if (esp_timer_create(&args, &timer) == ESP_OK) esp_timer_start_periodic(timer, 60ULL * 1000 * 1000);
+  logHeap(nullptr);
 }
 
 std::string tail(size_t max_bytes) {

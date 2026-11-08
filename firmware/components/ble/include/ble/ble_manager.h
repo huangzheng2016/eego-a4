@@ -126,6 +126,7 @@ class BleManager {
 
   // 主机任务上下文
   void startAdvertising();
+  void setConnSpeed(uint16_t conn, bool fast);
   void handleRx(uint16_t conn, const uint8_t* data, size_t len);
   bool notifyFrame(uint16_t conn, const uint8_t* frame, size_t len, int64_t deadline_ms);
   void sendControl(uint16_t conn, const uint8_t frame[4]);
@@ -173,6 +174,7 @@ class BleManager {
   int64_t pair_fail_window_ms_ = 0;
   uint32_t pair_fail_count_ = 0;
   std::atomic<int64_t> last_tunnel_ms_{0};
+  std::atomic<bool> conn_fast_{true};  // 连接参数：传输中快、空闲时慢（让射频给 WiFi）
   std::atomic<bool> link_up_notified_{false};
   uint32_t bonds_ = 0;
 
