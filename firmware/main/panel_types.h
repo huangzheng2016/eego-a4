@@ -17,6 +17,7 @@ enum class Page : uint8_t {
   Settings,
   Help,
   Provision,
+  BlePair,  // 蓝牙配对码（配对期间临时接管屏幕）
 };
 
 constexpr Page homePage(bool dashboard_loaded) {
@@ -83,16 +84,17 @@ enum class ConfirmKind : uint8_t {
   NetworkRecovery,
   WifiReset,
   FactoryReset,
-  BleProvision,
   BleUnbind,
   DashboardAction,
   Shutdown,  // Power 长按布防，再按一次 Power 关机
+  Sleep,     // 外接电源时 Power 短按布防，再按一次 Power 休眠
 };
 
 constexpr bool requiresPhysicalConfirm(ConfirmKind kind) {
   return kind == ConfirmKind::NetworkRecovery || kind == ConfirmKind::WifiReset ||
-         kind == ConfirmKind::FactoryReset || kind == ConfirmKind::BleProvision ||
-         kind == ConfirmKind::BleUnbind || kind == ConfirmKind::Shutdown;
+         kind == ConfirmKind::FactoryReset ||
+         kind == ConfirmKind::BleUnbind || kind == ConfirmKind::Shutdown ||
+         kind == ConfirmKind::Sleep;
 }
 
 // 电池模式阶段机（README「电池模式」）。

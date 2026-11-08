@@ -20,7 +20,7 @@ struct Capabilities {
   bool frontlight_chip = false;
   bool battery = false;
   bool bluetooth = false;
-  bool ble_provisioning = false;
+  bool ble_admin = false;
   bool ble_observer = false;
   bool display = false;
   bool sd = false;

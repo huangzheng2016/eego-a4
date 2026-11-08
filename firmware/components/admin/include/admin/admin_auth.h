@@ -38,7 +38,7 @@ class AuthManager {
   static bool passwordPolicyOk(const std::string& password);
 
   // ---- Bearer 会话 ----
-  std::string createSession();                  // 43 字符 token；满 3 个 LRU 驱逐
+  std::string createSession();                  // 43 字符 token；满 4 个 LRU 驱逐
   bool verifyToken(const std::string& token);   // 存在且未过期（滑动 last_used）
   void revokeSession(const std::string& token);
   void revokeAllSessions();

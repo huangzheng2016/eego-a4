@@ -392,6 +392,10 @@ TEST(wifi_list, power_save_and_dhcp_grace) {
   CHECK(!wifiModemSleepWanted(false, true, true));   // keep-awake on battery
   CHECK(!wifiModemSleepWanted(false, false, false));  // battery fetch burst
   CHECK(wifiModemSleepWanted(false, false, true));
+  CHECK(!wifiModemSleepWanted(false, false, true, true));  // admin UI in use
+  CHECK(!wifiAdminActive(100000, 0));                       // never used
+  CHECK(wifiAdminActive(100000, 100000 - kWifiAdminActiveMs + 1));
+  CHECK(!wifiAdminActive(100000, 100000 - kWifiAdminActiveMs));
   CHECK(wifiConnectDeadlineMs(1000, 15000, -1) == 16000);
   // Associated after 12 s but DHCP is slow: wait until 30 s after association.
   CHECK(wifiConnectDeadlineMs(1000, 15000, 13000) == 13000 + kWifiDhcpGraceMs);

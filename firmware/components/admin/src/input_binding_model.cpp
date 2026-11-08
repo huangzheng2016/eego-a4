@@ -13,7 +13,7 @@ using alert_core::JsonValue;
 using eego::dashboard::ActionKind;
 using eego::dashboard::Dashboard;
 
-// Builtins (device-side semantics, see firmware/README.md「设备操作」):
+// Builtins (device-side semantics, see README.md「设备操作」):
 //   page_previous/page_next   dashboard: previous/next screen; lists
 //                             (settings, alert detail): previous/next item
 //   focus_previous/focus_next dashboard: previous/next panel focus;
@@ -23,9 +23,11 @@ using eego::dashboard::Dashboard;
 //   refresh   refresh dashboard sources (current screen)
 //   keep_awake  keep-awake toggle: start (keep_awake_min) / extend when less than half
 //               is left / otherwise cancel (no idle batching, no auto deep sleep)
-constexpr std::array<const char*, 10> kBuiltins = {
+//   activate  press the focused item (settings row, soft key, dashboard focus)
+constexpr std::array<const char*, 11> kBuiltins = {
     "page_previous", "page_next", "focus_previous", "focus_next", "home",
     "settings",      "status",    "help",           "refresh",    "keep_awake",
+    "activate",
 };
 constexpr std::array<const char*, 7> kLocalPages = {
     "dashboard", "onboarding", "detail", "status", "settings", "help", "*",
@@ -195,8 +197,9 @@ bool inputBuiltinAllowed(std::string_view name) {
 
 const std::vector<InputBinding>& defaultInputBindings() {
   // Up/Down short = previous/next screen (or item in a list), long = panel
-  // focus; front long = Settings, front double = Status, Up+Down together = keep awake. Power short/long
-  // (select/back) and front short (home) are fixed and not bindable.
+  // focus; front long = Settings, front double = Status, Up+Down together = keep awake.
+  // Power short (select the focused item, sleep when nothing is focused), Power long
+  // (shut down) and front short (home) are fixed and not bindable.
   static const std::vector<InputBinding> defaults = {
       builtin(InputTrigger::UpShort, "page_previous"),
       builtin(InputTrigger::DownShort, "page_next"),

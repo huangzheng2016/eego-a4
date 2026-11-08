@@ -20,6 +20,8 @@
 // （M13 T8）；门户 HTTP 无任何认证（首启还没有密码），配网成功即设密。
 
 #include <cstdint>
+#include <atomic>
+#include <mutex>
 #include <string>
 
 #include "esp_err.h"
@@ -59,6 +61,16 @@ class ProvisionPortal {
   ProvState provState() const { return prov_state_; }
   const std::string& provReason() const { return prov_reason_; }
   const std::string& provIp() const { return prov_ip_; }
+  // 跨任务（app_task 绘制配网页）读取：失败原因码（-1 = 无/超时）与成功 IP 的拷贝。
+  int provReasonCode() const { return prov_reason_code_.load(); }
+  std::string provIpCopy() const {
+    std::lock_guard<std::mutex> lock(prov_mutex_);
+    return prov_ip_;
+  }
+  std::string provSsidCopy() const {
+    std::lock_guard<std::mutex> lock(prov_mutex_);
+    return prov_ssid_;
+  }
 
   // 内部：STA 事件处理（配网期间注册；与 WifiManager 并存互不干扰）
   static void wifiEventHandler(void* arg, esp_event_base_t base, int32_t id, void* data);
@@ -74,10 +86,14 @@ class ProvisionPortal {
   std::string prov_wifi_pass_;   // 配网期间暂存，成功/关闭即清除，绝不落日志/SD
   std::string prov_admin_pass_;  // 仅在配网成功路径使用，绝不落日志/SD
   int64_t connect_start_us_ = 0;
+  std::atomic<int> prov_reason_code_{-1};
+  mutable std::mutex prov_mutex_;  // 保护 prov_ip_/prov_ssid_ 的跨任务拷贝
+  void* connect_timer_ = nullptr;  // esp_timer_handle_t：试连超时（不依赖手机轮询）
 
   void checkConnectTimeout();
   void onConnectSucceeded(const std::string& ip);
-  void onConnectFailed(const char* reason);
+  void onConnectFailed(const char* reason, int code = -1);
+  void armConnectTimer();
 
  private:
   ProvisionPortal() = default;

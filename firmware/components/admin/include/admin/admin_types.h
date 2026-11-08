@@ -29,6 +29,8 @@ enum class AdminEventType : uint8_t {
   ApFallbackOpened,       // 兜底 AP 已开启（管理 API 仍要认证）
   ApFallbackClosed,       // 兜底 AP 已关闭
   ProvisionSucceeded,     // 配网成功，NVS 已写入，设备即将重启
+  ProvisionConnecting,    // 门户开始试连所选网络（屏幕显示「正在连接」）
+  ProvisionFailed,        // 门户试连失败（原因码见 ProvisionPortal::provReasonCode）
 };
 
 struct AdminEvent {

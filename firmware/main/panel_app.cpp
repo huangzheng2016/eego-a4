@@ -10,6 +10,7 @@
 #include <ctime>
 
 #include "admin/admin.h"
+#include "admin/admin_auth.h"
 #include "admin/device_screen.h"
 #include "admin/keep_awake.h"
 #include "admin/provision_portal.h"
@@ -28,6 +29,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "net_stack/net_stack.h"
+#include "net_stack/wifi_list.h"
 #include "pcf8563_rtc.h"
 #include "time_source.h"
 
@@ -48,7 +50,6 @@ using eego::settings::PowerMode;
 constexpr uint32_t kNetBitWifi = 1u << 0;
 constexpr uint32_t kRenderThrottleMs = 250;
 constexpr int64_t kClockCheckMs = 1000;          // 状态栏分钟变化检查周期（仅分钟变化才重绘）
-constexpr int64_t kBleProvRenderMs = 10000;      // BLE 配网倒计时最快 10s 重绘一次
 constexpr int64_t kDoublePressSyncMs = 1000;     // 绑定修订号复查周期
 constexpr uint32_t kNetIdleProbeMs = 100;        // 单次 waitIdle 探测超时（入队 + 等待各 ≤100ms）
 constexpr int64_t kNetIdleFirstIntervalMs = 1000;
@@ -83,11 +84,15 @@ struct AdminMail {
 };
 
 // AdminEventType 数值（admin/admin_types.h；以 int 传递避免头依赖扩散）
+constexpr char kWifiDiagUrl[] = "http://192.168.4.1/wifi-diag";
+
 constexpr int kEvPortalOpened = 0;
 constexpr int kEvPortalClosed = 1;
 constexpr int kEvApFallbackOpened = 2;
 constexpr int kEvApFallbackClosed = 3;
 constexpr int kEvProvisionSucceeded = 4;
+constexpr int kEvProvisionConnecting = 5;
+constexpr int kEvProvisionFailed = 6;
 
 }  // namespace
 
@@ -347,14 +352,24 @@ void PanelApp::drainAdminMailbox() {
         enterProvision();
         break;
       case kEvPortalClosed:
-        if (page_ == Page::Provision) leaveProvision();
+        if (page_ == Page::Provision) {
+          leaveProvision();
+          // 首次配网窗口超时：提示如何重新打开（无管理密码时设置 → 开启设置热点即重开门户）。
+          if (mail.reason == 0) showBanner(tr(Str::ProvClosed), 10000);
+        }
+        break;
+      case kEvProvisionConnecting:
+      case kEvProvisionFailed:
+        if (page_ == Page::Provision) markDirty();
         break;
       case kEvApFallbackOpened:
         netStatusCacheMs_ = 0;
-        showBanner(tr(Str::ApFallback), 5000);
+        // 整个热点窗口都显示怎么连（状态行横幅；关闭事件会清掉）。
+        showBanner(tr(Str::RecoveryApStarted), 600000);
         break;
       case kEvApFallbackClosed:
         netStatusCacheMs_ = 0;
+        showBanner(tr(Str::SetupHotspotClosed), 4000);
         markDirty();
         break;
       case kEvProvisionSucceeded:
@@ -385,6 +400,10 @@ void PanelApp::service() {
   drainNetBits();
   serviceApFallback(now);
   serviceKeepAwake(now);
+  if (!mains_ &&
+      eego::net::wifiAdminActive(now, admin::lastAuthenticatedRequestMs()) != adminActivePs_) {
+    applyWifiPowerSave();  // 管理端开始/停止使用：切换 modem sleep
+  }
 
   // 外部告警快照（无锁 acquire）：只有告警详情/状态页直接展示 store 内容；
   // dashboard 告警面板由 DashboardRuntime::service 自行跟踪快照代际。
@@ -461,27 +480,23 @@ void PanelApp::service() {
       pageContext() != doublePressContext_) {
     syncDoublePress(false);
   }
-  if (!fastWake_) eego::ble::BleManager::instance().service(mains_);
-  const eego::ble::Status ble_status = eego::ble::BleManager::instance().status();
-  if (ble_status.role != eego::ble::Role::Provisioning) {
-    clearBlePop();
-    if (bleProvisionWasActive_) {
-      bleProvisionWasActive_ = false;
-      showBanner(ble_status.provisioning == eego::ble::ProvisionState::Succeeded
-                     ? tr(Str::BleProvSuccess)
-                     : tr(Str::BleProvFailed),
-                 5000);
+  if (!fastWake_) {
+    const int64_t last_admin = admin::lastAuthenticatedRequestMs();
+    if (eego::net::wifiAdminActive(now, last_admin)) {
+      eego::ble::BleManager::instance().deferObserverUntil(last_admin +
+                                                           eego::net::kWifiAdminActiveMs);
+      NetStack::instance().wifi().deferRoamUntil(last_admin + eego::net::kWifiAdminActiveMs);
     }
+    // 蓝牙管理广播：常供电时常开；电池模式只在按键唤醒的交互期（首次配网页同样）。
+    eego::ble::BleManager::instance().setAdminAllowed(
+        settings_.ble_admin_enabled && !sleepPending_ &&
+        (mains_ || battPhase_ == BattPhase::Interactive || page_ == Page::Provision));
+    eego::ble::BleManager::instance().service(mains_);
   }
+  serviceBlePairing(now);
 
   if (now - lastScheduleCheckMs_ > 1000) {
     lastScheduleCheckMs_ = now;
-    // BLE 配网倒计时（设置页 PoP 行）：最快 10s 重绘一次，避免每秒刷屏
-    if (ble_status.role == eego::ble::Role::Provisioning && page_ == Page::Settings &&
-        now - lastBleProvRenderMs_ >= kBleProvRenderMs) {
-      lastBleProvRenderMs_ = now;
-      markDirty();
-    }
     // 常供电的夜间暂停：窗口内深睡到窗口结束（配网/BLE 配网期间推迟）。电池模式
     // 由唤醒计划处理（交互期超时后的深睡计划会落到窗口结束，定时唤醒同理）。
     if (battPhase_ == BattPhase::Mains && !sleepPending_ &&
@@ -583,8 +598,8 @@ void PanelApp::noteInteraction(int64_t now) {
 }
 
 bool PanelApp::displayAllowed(int64_t now) {
-  // 配网（门户页 / BLE 配网倒计时）期间用户正在操作手机：始终即时刷新。
-  if (page_ == Page::Provision || eego::ble::BleManager::instance().provisioningActive()) {
+  // 配网门户页 / 蓝牙配对码页：用户正在操作手机或电脑，始终即时刷新。
+  if (page_ == Page::Provision || page_ == Page::BlePair) {
     return true;
   }
   if (!refreshPolicy_.idle(now)) {
@@ -751,10 +766,17 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
       clearConfirm();
     }
     if (ev.id == eego::ButtonId::Power) {
-      if (page_ == Page::Settings) {
-        // 设置页始终有高亮行：Power 仍是「选择」（触控失准时也能进入触摸校准）。
-        activeInputControl_ = focusedControl();
+      // Power 短按 = 「选择」：有焦点（设置行、软键、仪表盘焦点框）就执行焦点项，
+      // 仅在没有焦点时休眠。外接电源下休眠需再按一次确认（深睡后管理页不可达）。
+      // 引导页是「主页」：只有用户移动过软键焦点才视为有焦点，否则仍是休眠键。
+      const std::string focused =
+          page_ == Page::Onboarding && !softFocusMoved_ ? std::string() : focusedControl();
+      if (!focused.empty() && page_ != Page::Provision) {
+        activeInputControl_ = focused;
         activateFocused();
+      } else if (mains_ && page_ != Page::Provision) {
+        activeInputControl_ = "trigger:power";
+        armConfirm(ConfirmKind::Sleep);
       } else {
         sleepByPowerKey(now_us / 1000);
       }
@@ -1003,6 +1025,12 @@ void PanelApp::executeBuiltin(const std::string& name, int64_t now_us) {
     gotoPage(Page::Status);
   } else if (name == "keep_awake") {
     toggleKeepAwake();
+  } else if (name == "activate") {
+    const std::string focused = focusedControl();
+    if (!focused.empty()) {
+      activeInputControl_ = focused;
+      activateFocused();
+    }
   } else if (name == "refresh") {
     if (inputBusy()) {
       showBanner(tr(Str::Busy), 2000);
@@ -1053,6 +1081,7 @@ std::string PanelApp::pageContext() const {
     case Page::Help: return "help";
     case Page::Dashboard: return dashboard_.pageContext();
     case Page::Provision: return "provision";
+    case Page::BlePair: return "ble_pair";
   }
   return {};
 }
@@ -1184,6 +1213,54 @@ void PanelApp::movePage(int delta) {
   }
 }
 
+// 蓝牙配对：出现配对码时临时接管屏幕；配对结束（成功/失败/超时）回到原页并提示。
+void PanelApp::serviceBlePairing(int64_t now) {
+  const eego::ble::Status ble = eego::ble::BleManager::instance().status();
+  if (ble.pairing_passkey_valid) {
+    if (page_ != Page::BlePair) {
+      blePairReturn_ = page_;
+      gotoPage(Page::BlePair);
+    }
+    if (blePairShownKey_ != ble.pairing_passkey + 1) {
+      blePairShownKey_ = ble.pairing_passkey + 1;
+      markDirty(true);
+    }
+    noteInteraction(now);
+  } else if (page_ == Page::BlePair) {
+    leaveBlePair();
+    showBanner(tr(ble.link == eego::ble::LinkState::Authenticated ? Str::BleLinked
+                                                                   : Str::BlePairFailed),
+               4000);
+  } else {
+    blePairShownKey_ = 0;
+  }
+  if (ble.link != bleLinkSeen_) {
+    const bool wasLinked = bleLinkSeen_ == eego::ble::LinkState::Authenticated;
+    const bool linked = ble.link == eego::ble::LinkState::Authenticated;
+    bleLinkSeen_ = ble.link;
+    if (wasLinked != linked) {
+      if (linked) noteInteraction(now);
+      markDirty();  // 状态栏「蓝牙」胶囊
+    }
+  }
+}
+
+void PanelApp::leaveBlePair() {
+  blePairShownKey_ = 0;
+  if (blePairReturn_ == Page::Provision) {
+    // 门户页不能经 gotoPage 进入（会清掉配网状态）；直接恢复。
+    page_ = Page::Provision;
+    ++pageEpoch_;
+    markDirty(true);
+    return;
+  }
+  const Page target = blePairReturn_ == Page::BlePair ||
+                              (blePairReturn_ == Page::Dashboard && !dashboard_.available())
+                          ? home()
+                          : blePairReturn_;
+  gotoPage(target);
+}
+
 void PanelApp::gotoPage(Page p) {
   if (page_ == p || (p == Page::Dashboard && !dashboard_.available())) return;
   page_ = p;
@@ -1191,6 +1268,7 @@ void PanelApp::gotoPage(Page p) {
   navigation_.cancel();
   // 详情页默认聚焦「确认」软键；其余页从第一个软键/行开始。
   focus_ = 0;
+  softFocusMoved_ = false;
   statusPage_ = 0;
   provisionSucceeded_ = false;
   clearConfirm();
@@ -1217,6 +1295,10 @@ void PanelApp::back() {
     case Page::Status:
     case Page::Settings:
       gotoPage(home());
+      break;
+    case Page::BlePair:
+      // 只离开配对码页；配对本身继续，直到对端完成或超时。
+      leaveBlePair();
       break;
     case Page::Dashboard:
       // 先退 dashboard 内部返回栈（跳转动作），否则回到默认页第一屏。
@@ -1252,6 +1334,7 @@ void PanelApp::moveFocus(int delta) {
     case Page::Status:
     case Page::Help:
       focus_ = wrappedIndex(focus_, delta, softKeyCount());
+      softFocusMoved_ = true;
       markDirty();
       break;
     default:
@@ -1390,6 +1473,7 @@ bool PanelApp::settingAdjustable(SettingId id) {
     case SettingId::BatteryInteractive:
     case SettingId::SleepPlan:
     case SettingId::Diagnostics:
+    case SettingId::Bluetooth:
     case SettingId::BleObserver:
       return true;
     default:
@@ -1508,6 +1592,13 @@ bool PanelApp::adjustSettingRow(SettingId id, int dir, bool coarse, bool wrap) {
     }
     case SettingId::Diagnostics:
       next.diagnostics_enabled = !settings_.diagnostics_enabled;
+      break;
+    case SettingId::Bluetooth:
+      if (!eego::ble::BleManager::compiled()) {
+        showBanner(tr(Str::Unavailable), 3000);
+        return true;
+      }
+      next.ble_admin_enabled = !settings_.ble_admin_enabled;
       break;
     case SettingId::BleObserver:
       if (!eego::ble::BleManager::instance().status().compiled) {
@@ -1844,18 +1935,6 @@ void PanelApp::activateSettingRow(SettingId id) {
     }
     case SettingId::RecoveryAp: armConfirm(ConfirmKind::NetworkRecovery); break;
     case SettingId::WifiReset: armConfirm(ConfirmKind::WifiReset); break;
-    case SettingId::Bluetooth:
-      if (eego::ble::BleManager::instance().provisioningActive()) {
-        eego::ble::BleManager::instance().cancelProvisioning();
-        clearBlePop();
-        bleProvisionWasActive_ = false;
-        showBanner(tr(Str::BleProvFailed), 3000);
-      } else if (!eego::ble::BleManager::instance().status().compiled) {
-        showBanner(tr(Str::Unavailable), 3000);
-      } else {
-        armConfirm(ConfirmKind::BleProvision);
-      }
-      break;
     case SettingId::PollNow: doPollNow(); break;
     case SettingId::EpdNow:
       markDirty(true);
@@ -1918,66 +1997,30 @@ void PanelApp::activateSettingRow(SettingId id) {
 }
 
 void PanelApp::doOpenRecovery() {
+  admin::ProvisionPortal& portal = admin::ProvisionPortal::instance();
   esp_err_t err = ESP_OK;
-  if (!admin::ProvisionPortal::instance().apActive()) {
-    err = admin::ProvisionPortal::instance().openApFallback();
+  if (!portal.apActive()) {
+    // 尚无管理密码（首次配网窗口超时后）：重新打开配网门户——恢复热点上只有需要
+    // 登录的诊断页，没有密码就无从配置。
+    err = admin::AuthManager::instance().hasPassword() ? portal.openApFallback() : portal.open();
   }
-  if (err != ESP_OK &&
-      !(err == ESP_ERR_INVALID_STATE && admin::ProvisionPortal::instance().apActive())) {
-    showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), esp_err_to_name(err));
+  if (err != ESP_OK && !(err == ESP_ERR_INVALID_STATE && portal.apActive())) {
+    ESP_LOGW(TAG, "setup hotspot failed: %s", esp_err_to_name(err));
+    showBanner(tr(Str::SetupHotspotFailed), 4000);
     return;
   }
   noteInteraction(nowMs());  // 电池交互期：恢复热点开启期间不会深睡
-  showBanner(tr(Str::RecoveryApStarted), 7000);
-  markDirty(true);
-}
-
-void PanelApp::clearBlePop() {
-  if (blePop_.empty()) return;
-  volatile uint8_t* data = reinterpret_cast<volatile uint8_t*>(blePop_.data());
-  for (size_t i = 0; i < blePop_.size(); i++) data[i] = 0;
-  blePop_.clear();
-  markDirty();
-}
-
-void PanelApp::doStartBleProvision() {
-  if (admin::ProvisionPortal::instance().apActive()) {
-    showBanner(tr(Str::Unavailable), 3000);
-    return;
-  }
-  char pop[9];
-  std::snprintf(pop, sizeof(pop), "%08lu",
-                static_cast<unsigned long>(esp_random() % 100000000UL));
-  blePop_ = pop;
-  volatile uint8_t* data = reinterpret_cast<volatile uint8_t*>(pop);
-  for (size_t i = 0; i < sizeof(pop); i++) data[i] = 0;
-  const esp_err_t err = eego::ble::BleManager::instance().startProvisioningFromLocal(blePop_);
-  if (err != ESP_OK) {
-    clearBlePop();
-    showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), esp_err_to_name(err));
-    return;
-  }
-  bleProvisionWasActive_ = true;
-  if (page_ == Page::Settings) {
-    const std::vector<SettingId> rows = visibleSettings();
-    for (size_t i = 0; i < rows.size(); ++i) {
-      if (rows[i] == SettingId::Bluetooth) focus_ = i;
-    }
-  }
-  lastBleProvRenderMs_ = nowMs();
-  noteInteraction(nowMs());
-  showBanner(tr(Str::BleProvStarted), 7000);
+  if (portal.isApFallbackActive()) showBanner(tr(Str::RecoveryApStarted), 600000);
   markDirty(true);
 }
 
 void PanelApp::doClearBleBonds() {
-  bleProvisionWasActive_ = false;
   const esp_err_t err = eego::ble::BleManager::instance().clearBonds();
   if (err == ESP_OK) {
-    clearBlePop();
     showBanner(tr(Str::BleUnbindDone), 4000);
   } else {
-    showBannerFmt(4000, "%s: %s", tr(Str::ActionFailed), esp_err_to_name(err));
+    ESP_LOGW(TAG, "BLE clear bonds failed: %s", esp_err_to_name(err));
+    showBanner(tr(Str::ActionFailed), 4000);
   }
   markDirty(true);
 }
@@ -1987,8 +2030,12 @@ void PanelApp::doWifiReset() {
   cmd.type = admin::AdminCommandType::WifiReset;
   admin::AdminResult result;
   admin::defaultCommandHandler(cmd, result, nullptr);
-  if (result.ok) showBanner(tr(Str::WifiResetDone), 7000);
-  else showBannerFmt(5000, "%s: %s", tr(Str::ActionFailed), result.err.c_str());
+  if (result.ok) {
+    showBanner(tr(Str::WifiResetDone), 600000);
+  } else {
+    ESP_LOGW(TAG, "wifi reset failed: %s", result.err.c_str());
+    showBanner(tr(Str::ActionFailed), 5000);
+  }
   markDirty(true);
 }
 
@@ -2002,7 +2049,8 @@ void PanelApp::doFactoryReset() {
     eego::FrontlightManager::instance().off();
     showBanner(tr(Str::FactoryResetDone), 3000);
   } else {
-    showBannerFmt(5000, "%s: %s", tr(Str::ActionFailed), result.err.c_str());
+    ESP_LOGW(TAG, "factory reset failed: %s", result.err.c_str());
+    showBanner(tr(Str::ActionFailed), 5000);
   }
   markDirty(true);
 }
@@ -2117,9 +2165,12 @@ void PanelApp::executeArmedConfirm() {
     case ConfirmKind::NetworkRecovery: doOpenRecovery(); break;
     case ConfirmKind::WifiReset: doWifiReset(); break;
     case ConfirmKind::FactoryReset: doFactoryReset(); break;
-    case ConfirmKind::BleProvision: doStartBleProvision(); break;
     case ConfirmKind::BleUnbind: doClearBleBonds(); break;
     case ConfirmKind::Shutdown: shutdownNow(); break;
+    case ConfirmKind::Sleep:
+      clearConfirm();
+      sleepByPowerKey(nowMs());
+      return;
     default: break;
   }
   clearConfirm();
@@ -2147,6 +2198,7 @@ void PanelApp::armConfirm(ConfirmKind kind) {
   confirm_ = kind;
   confirmState_.arm(target, esp_timer_get_time());
   showBanner(kind == ConfirmKind::Shutdown       ? tr(Str::ConfirmShutdown)
+             : kind == ConfirmKind::Sleep      ? tr(Str::ConfirmSleep)
              : requiresPhysicalConfirm(kind) ? tr(Str::ConfirmPhysicalPress)
                                              : tr(Str::ConfirmPress),
              static_cast<uint32_t>(kConfirmWindowUs / 1000));
@@ -2278,8 +2330,9 @@ void PanelApp::onModeChange(bool mains) {
 
 void PanelApp::applyWifiPowerSave() {
   const int64_t now = nowMs();
+  adminActivePs_ = eego::net::wifiAdminActive(now, admin::lastAuthenticatedRequestMs());
   NetStack::instance().wifi().setPowerSave(eego::net::wifiModemSleepWanted(
-      mains_, keepAwakeUntil(now) != 0, battPhase_ == BattPhase::Interactive));
+      mains_, keepAwakeUntil(now) != 0, battPhase_ == BattPhase::Interactive, adminActivePs_));
 }
 
 void PanelApp::enterInteractive(int64_t now) {
@@ -2411,8 +2464,8 @@ void PanelApp::serviceSleep(int64_t now) {
     return;
   }
   if (admin::ProvisionPortal::instance().apActive() ||
-      eego::ble::BleManager::instance().provisioningActive()) {
-    ESP_LOGW(TAG, "recovery/provisioning active, sleep postponed");
+      eego::ble::BleManager::instance().sleepBlocked()) {
+    ESP_LOGW(TAG, "recovery AP / BLE pairing active, sleep postponed");
     if (!fastWake_) manualSleep_ = false;
     sleepPending_ = false;
     sleepIdleWait_.active = false;
@@ -2489,7 +2542,7 @@ void PanelApp::sleepNow() {
 
 void PanelApp::sleepByPowerKey(int64_t now) {
   if (admin::ProvisionPortal::instance().apActive() ||
-      eego::ble::BleManager::instance().provisioningActive()) {
+      eego::ble::BleManager::instance().sleepBlocked()) {
     showBanner(tr(Str::SleepBlocked), 3000);
     return;
   }
@@ -3193,10 +3246,42 @@ void PanelApp::render(int64_t now) {
     case Page::Provision: {
       ProvisionModel m;
       m.succeeded = provisionSucceeded_;
-      snprintf(m.windowText, sizeof(m.windowText), tr(Str::ProvWindowFmt),
-               static_cast<unsigned>(admin::ProvisionPortal::instance().windowRemainingMs() /
-                                     1000));
+      const admin::ProvisionPortal& portal = admin::ProvisionPortal::instance();
+      snprintf(m.windowText, sizeof(m.windowText), "%s", tr(Str::ProvIdleClose));
+      const std::string ssid = portal.provSsidCopy();
+      switch (portal.provState()) {
+        case admin::ProvisionPortal::ProvState::Connecting:
+          snprintf(m.statusText, sizeof(m.statusText), tr(Str::ProvConnectingFmt), ssid.c_str());
+          break;
+        case admin::ProvisionPortal::ProvState::Fail: {
+          const int code = portal.provReasonCode();
+          snprintf(m.statusText, sizeof(m.statusText), tr(Str::ProvFailedFmt),
+                   code < 0 ? tr(Str::ProvTimeout)
+                            : eego::net::wifiReasonShort(static_cast<uint8_t>(code),
+                                                         currentLang() == Lang::En));
+          break;
+        }
+        case admin::ProvisionPortal::ProvState::Ok: {
+          const std::string ip = portal.provIpCopy();
+          if (!ip.empty()) {
+            snprintf(m.statusText, sizeof(m.statusText), tr(Str::ProvNextFmt), ssid.c_str(),
+                     ip.c_str());
+          }
+          break;
+        }
+        default: break;
+      }
       drawProvision(c, m);
+      break;
+    }
+    case Page::BlePair: {
+      const eego::ble::Status ble = eego::ble::BleManager::instance().status();
+      BlePairModel m;
+      snprintf(m.passkey, sizeof(m.passkey), "%06lu",
+               static_cast<unsigned long>(ble.pairing_passkey % 1000000u));
+      snprintf(m.deviceName, sizeof(m.deviceName), "%s", ble.device_name.c_str());
+      m.remainingS = ble.pairing_remaining_s;
+      drawBlePair(c, m);
       break;
     }
     case Page::Dashboard:
@@ -3242,6 +3327,7 @@ void PanelApp::buildStatusBar(StatusBarModel& m) {
   m.mains = mains_;
   m.portalOpen = admin::ProvisionPortal::instance().isOpen();
   m.apFallback = admin::ProvisionPortal::instance().isApFallbackActive();
+  m.bleLinked = bleLinkSeen_ == eego::ble::LinkState::Authenticated;
   // 已静音告警数（store 语义：快照内 muted 记录计数，与 S0/列表过滤一致）
   m.mutedCount = 0;
   if (snapshot_ != nullptr) {
@@ -3298,8 +3384,10 @@ void PanelApp::buildOnboarding(OnboardingModel& m) {
     m.network = buf;
   } else if (ap) {
     m.apMode = true;
-    m.url = admin::ProvisionPortal::kApUrl;
-    snprintf(buf, sizeof(buf), "%s · %s", tr(Str::ApFallback), admin::ProvisionPortal::kApSsid);
+    // 恢复热点（已有管理密码）上没有外网：去离线 WiFi 页添加网络；首次配网门户在根路径。
+    m.url = admin::ProvisionPortal::instance().isApFallbackActive() ? kWifiDiagUrl
+                                                                     : admin::ProvisionPortal::kApUrl;
+    snprintf(buf, sizeof(buf), "%s · %s", tr(Str::SetupHotspot), admin::ProvisionPortal::kApSsid);
     m.network = buf;
   } else if (ns.wifi.state == 4 || (ns.wifi.ssid.empty() && ns.wifi.state != 1)) {
     m.network = tr(Str::OnbNoWifi);
@@ -3477,8 +3565,6 @@ void PanelApp::buildStatus(KvModel& m) {
         value = tr(Str::WifiConnecting);
       } else if (n.failures > 0) {
         value = eego::net::wifiReasonShort(n.last_reason, en);
-        snprintf(buf, sizeof(buf), " (%u)", static_cast<unsigned>(n.last_reason));
-        value += buf;
       } else {
         value = wifiStateText(static_cast<int>(eego::net::WifiState::Connected));
       }
@@ -3489,14 +3575,16 @@ void PanelApp::buildStatus(KvModel& m) {
     }
   }
   if (admin::ProvisionPortal::instance().apActive()) {
-    addBig(Str::ApFallback, admin::ProvisionPortal::kApSsid);  // 地址见下一行诊断页
-    addBig(Str::WifiDiag, "192.168.4.1/wifi-diag");
+    addBig(Str::SetupHotspot, admin::ProvisionPortal::kApSsid);  // 地址见下一行诊断页
+    addBig(Str::WifiDiag, admin::ProvisionPortal::instance().isApFallbackActive()
+                              ? kWifiDiagUrl
+                              : admin::ProvisionPortal::kApUrl);
   }
   if (ns.time.valid) {
     if (ns.time.sntp_synced) {
       char sync_at[40];
       formatTs(ns.time.last_sync_at, sync_at, sizeof(sync_at));
-      snprintf(buf, sizeof(buf), "SNTP · %s", sync_at);
+      snprintf(buf, sizeof(buf), "%s · %s", tr(Str::TimeNetwork), sync_at);
     } else {
       snprintf(buf, sizeof(buf), "%s", tr(Str::TimeRtc));
     }
@@ -3679,10 +3767,7 @@ void PanelApp::buildS4(S4Model& m) {
         label = Str::SetRecoveryAp;
         isAction = true;
         if (admin::ProvisionPortal::instance().apActive()) {
-          snprintf(buf, sizeof(buf), "%us",
-                   static_cast<unsigned>(
-                       admin::ProvisionPortal::instance().windowRemainingMs() / 1000));
-          value = buf;
+          value = tr(Str::On);  // 无操作 10 分钟自动关闭；不画会过期的倒计时
         } else {
           value = tr(Str::Off);
         }
@@ -3695,14 +3780,16 @@ void PanelApp::buildS4(S4Model& m) {
         label = Str::SetBluetooth;
         if (!ble_runtime.compiled) {
           value = tr(Str::Unavailable);
-        } else if (ble_runtime.role == eego::ble::Role::Provisioning) {
-          snprintf(buf, sizeof(buf), "%s  %us", blePop_.c_str(),
-                   static_cast<unsigned>(ble_runtime.provisioning_remaining_s));
-          value = buf;
-          isAction = true;
-        } else {
+        } else if (!settings_.ble_admin_enabled) {
           value = tr(Str::Off);
-          isAction = true;
+        } else if (ble_runtime.link == eego::ble::LinkState::Authenticated) {
+          value = tr(Str::BleStateLinked);
+        } else if (ble_runtime.link == eego::ble::LinkState::Pairing) {
+          value = tr(Str::BleStatePairing);
+        } else if (ble_runtime.advertising) {
+          value = tr(Str::BleStateAdvertising);
+        } else {
+          value = tr(Str::BleStateIdle);
         }
         break;
       case SettingId::Language:
@@ -3898,7 +3985,7 @@ void PanelApp::buildS4(S4Model& m) {
         label = Str::SetBleObserver;
         if (!ble_runtime.compiled) {
           value = tr(Str::Unavailable);
-        } else if (ble_runtime.role == eego::ble::Role::Observer) {
+        } else if (ble_runtime.scanning) {
           snprintf(buf, sizeof(buf), "%s %us", tr(Str::On),
                    static_cast<unsigned>(ble_runtime.observer_remaining_s));
           value = buf;

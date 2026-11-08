@@ -382,11 +382,6 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
     }
 
     case AdminCommandType::WifiReset: {
-      if (ble::BleManager::instance().provisioningActive()) {
-        res.ok = false;
-        res.err = "close BLE provisioning before WiFi reset";
-        return;
-      }
       ADMIN_LOG_WARN("wifi-only reset executing");
       if (net::CredentialStore::clearWifiAccounts() != ESP_OK) {
         res.ok = false;

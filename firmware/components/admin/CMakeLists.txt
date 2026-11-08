@@ -37,6 +37,7 @@ idf_component_register(
         "src/source_credential_usage.cpp"
         "src/keep_awake.cpp"
         "src/device_screen.cpp"
+        "src/ble_bridge.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
         alert_core
@@ -47,6 +48,7 @@ idf_component_register(
         net_stack
         eego_hal
         esp_http_server
+        esp_http_client
         esp_wifi
         esp_event
         esp_netif

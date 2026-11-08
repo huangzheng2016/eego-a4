@@ -60,6 +60,7 @@
 #include "refresh_policy.h"
 #include "ui_text.h"
 #include "admin/input_binding_model.h"
+#include "ble/ble_manager.h"
 #include "admin/render_preview.h"
 #include "input_confirm.h"
 #include "input_navigation.h"
@@ -244,9 +245,9 @@ class PanelApp {
   void refreshMuteRuleCount();
   void doPollNow();
   void doOpenRecovery();
-  void doStartBleProvision();
   void doClearBleBonds();
-  void clearBlePop();
+  void serviceBlePairing(int64_t now);
+  void leaveBlePair();
   void doWifiReset();
   void doFactoryReset();
   void resetInputBindings();
@@ -355,6 +356,8 @@ class PanelApp {
   Page page_ = Page::Onboarding;
   Page helpReturn_ = Page::Settings;
   size_t focus_ = 0;
+  bool softFocusMoved_ = false;
+  bool adminActivePs_ = false;  // 上次应用省电时管理端是否在用（变化时重新应用）  // 软键焦点被 ↑/↓ 移动过（引导页 Power 由休眠变为选择）
   size_t statusPage_ = 0;
   size_t statusRows_ = 0;  // 上次构建的状态页总行数（分页用）
   // 告警详情：来源面板（空 = 全部告警）、当前条目身份与下标（条目消失时按下标就近）。
@@ -387,8 +390,9 @@ class PanelApp {
   bool inputEventStale(int64_t timestampUs, int64_t nowUs) const;
   std::string banner_;
   int64_t bannerDeadlineMs_ = 0;
-  std::string blePop_;
-  bool bleProvisionWasActive_ = false;
+  Page blePairReturn_ = Page::Dashboard;
+  eego::ble::LinkState bleLinkSeen_ = eego::ble::LinkState::None;
+  uint32_t blePairShownKey_ = 0;
 
   // 快照（无锁读；renderedSeq_ 跟踪已渲染代际）
   std::shared_ptr<const alert_core::AlertSnapshot> snapshot_;
@@ -433,7 +437,6 @@ class PanelApp {
   // 渲染触发缓存
   int64_t renderedClockKey_ = -2;   // 已渲染状态栏的分钟键（-1 = 时间不可用）
   int64_t lastClockCheckMs_ = 0;
-  int64_t lastBleProvRenderMs_ = 0;
   bool dashboardWasAvailable_ = false;
   std::string onboardingKey_;       // 引导页显示内容签名（地址/WiFi 变化即重绘）
   int64_t lastOnboardingCheckMs_ = 0;

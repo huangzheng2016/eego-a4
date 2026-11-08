@@ -508,8 +508,9 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
   // 计数（灰字）。放不下时先省略静音，再截断状态标签，最后省略状态。
   const int16_t mx0 = static_cast<int16_t>(leftEnd + 16);
   const int16_t mx1 = static_cast<int16_t>(rx - 12);
-  const char* portal = m.portalOpen ? tr(Str::PortalOpen)
-                                    : (m.apFallback ? tr(Str::ApFallback) : nullptr);
+  const char* portal = m.portalOpen || m.apFallback ? tr(Str::SetupHotspotOn)
+                       : m.bleLinked                ? tr(Str::BleLinkedPill)
+                                                    : nullptr;
   char mute[24] = "";
   if (m.mutedCount > 0) {
     snprintf(mute, sizeof(mute), "%s%u", tr(Str::Mute), static_cast<unsigned>(m.mutedCount));
@@ -850,10 +851,16 @@ void drawPoweredOff(PortraitCanvas& c) {
 
 void drawProvision(PortraitCanvas& c, const ProvisionModel& m) {
   if (m.succeeded) {
-    textCentered(c, geom::kInnerX, geom::kInnerW,
-                 centerY(geom::kBodyTop, static_cast<int16_t>(geom::kContentBottom - geom::kBodyTop),
-                         style::kTitle.scale),
-                 tr(Str::ProvDone), style::kTitle);
+    const int16_t y = centerY(geom::kBodyTop,
+                              static_cast<int16_t>(geom::kContentBottom - geom::kBodyTop),
+                              style::kTitle.scale);
+    textCentered(c, geom::kInnerX, geom::kInnerW, y, tr(Str::ProvDone), style::kTitle);
+    if (m.statusText[0] != '\0') {
+      const int16_t lh = lineHeight(style::kBody.scale);
+      drawTextWrapped(c, geom::kInnerX,
+                      static_cast<int16_t>(y + lineHeight(style::kTitle.scale) + 24),
+                      geom::kInnerW, m.statusText, style::kBody.scale, lh, 3, style::kBody.gray);
+    }
     return;
   }
   drawPageTitle(c, Str::ProvTitle);
@@ -869,9 +876,42 @@ void drawProvision(PortraitCanvas& c, const ProvisionModel& m) {
                                       style::kBody.scale, lh, 2, style::kBody.gray);
     y = static_cast<int16_t>(y + std::max<int16_t>(n, 1) * lh + 16);
   }
-  TextStyle win = style::kBodyStrong;
-  win.gray = 6;
+  if (m.statusText[0] != '\0') {
+    const int16_t n = drawTextWrapped(c, geom::kInnerX, static_cast<int16_t>(y + 8),
+                                      geom::kInnerW, m.statusText, style::kBodyStrong.scale, lh,
+                                      3, style::kBodyStrong.gray);
+    y = static_cast<int16_t>(y + 8 + std::max<int16_t>(n, 1) * lh + 16);
+  }
+  TextStyle win = style::kCaption;
   textFit(c, geom::kInnerX, static_cast<int16_t>(y + 8), geom::kInnerW, m.windowText, win);
+}
+
+void drawBlePair(PortraitCanvas& c, const BlePairModel& m) {
+  drawPageTitle(c, Str::BlePairTitle);
+  c.drawLine(geom::kInnerX, static_cast<int16_t>(geom::kBodyTop - 2),
+             static_cast<int16_t>(geom::kInnerRight - 1), static_cast<int16_t>(geom::kBodyTop - 2),
+             0);
+  const int16_t lh = lineHeight(style::kBody.scale);
+  int16_t y = static_cast<int16_t>(geom::kBodyTop + 24);
+  const int16_t n = drawTextWrapped(c, geom::kInnerX, y, geom::kInnerW, tr(Str::BlePairHint),
+                                    style::kBody.scale, lh, 3, style::kBody.gray);
+  y = static_cast<int16_t>(y + std::max<int16_t>(n, 1) * lh + 40);
+
+  // 配对码：按内容宽度取最大整数倍字号（上限 8x）。
+  TextStyle code{8, true, 0};
+  while (code.scale > 2 && styleW(m.passkey, code) > geom::kInnerW) {
+    code.scale = static_cast<int16_t>(code.scale - 1);
+  }
+  textCentered(c, geom::kInnerX, geom::kInnerW, y, m.passkey, code);
+  y = static_cast<int16_t>(y + fontH(code.scale) + 40);
+
+  if (m.deviceName[0] != '\0') {
+    textCentered(c, geom::kInnerX, geom::kInnerW, y, m.deviceName, style::kBodyMuted);
+    y = static_cast<int16_t>(y + lh + 8);
+  }
+  char line[64];
+  snprintf(line, sizeof(line), tr(Str::BlePairExpiresFmt), static_cast<unsigned>(m.remainingS));
+  textCentered(c, geom::kInnerX, geom::kInnerW, y, line, style::kCaption);
 }
 
 }  // namespace panel

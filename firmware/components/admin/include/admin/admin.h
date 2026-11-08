@@ -25,9 +25,10 @@
 //   // AP 兜底：admin::ProvisionPortal::instance().openApFallback();
 //
 // 首版边界（M13 T7 定稿）：本组件不提供任何 /firmware/* 或远程 OTA 端点，
-// 一切未知路径 404；固件刷写只走 USB（RECOVERY.md 工作流）。
+// 一切未知路径 404；固件刷写只走 USB（见仓库 README「刷写」）。
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 #include "admin/admin_auth.h"
@@ -57,6 +58,15 @@ bool adminApiRunning();
 int64_t lastAuthenticatedRequestMs();
 
 // ---- 依赖注入（M18 组合根；M20 提供 net_stack 实现后告警读写全通）----
+// POST /device/time（浏览器校时）：组合根注入实际写系统时间/RTC 的函数，策略见
+// admin/time_policy.h。未注入时端点返回 503。
+struct TimeSetResult {
+  bool applied = false;
+  int64_t drift_s = 0;
+  bool sntp_synced = false;
+};
+using TimeSetter = std::function<TimeSetResult(int64_t unix_ms)>;
+void setTimeSetter(TimeSetter setter);
 void setAlertSnapshotSource(AlertSnapshotSource src);
 void setAlertActionSink(AlertActionSink sink);
 void setAdminEventCallback(AdminEventCallback cb, void* ctx);

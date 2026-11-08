@@ -167,18 +167,18 @@ esp_err_t p_scan(httpd_req_t* req) {
   ProvisionPortal& p = ProvisionPortal::instance();
   p.notePortalActivity();
   // /scan 限速 1 次/5 秒（M13 限流预算）
-  uint32_t retry = 0;
-  if (!AuthManager::instance().consumeBudget("scan", 5, 1, retry)) {
-    httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_set_status(req, "429 Too Many Requests");
-    httpd_resp_send(req, "{\"error\":\"too many requests\"}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-
-  // 经 WifiManager 扫描（与 net_task 的连接串行化；正在连接时返回上一轮扫描结果）。
+  // 每次扫描都让 AP 离开信道 2–3 秒（手机会卡顿/掉线）：10 秒内的结果直接复用
+  // （开门户时刚扫过一次）；超出 1 次/5 秒预算也返回缓存，而不是 429。
   // 结果已同名合并（保留最强）并按信号降序，隐藏 SSID 已剔除。
-  net::WifiManager::instance().scanNow();
-  const net::WifiDiagSnapshot diag = net::WifiManager::instance().diagnostics();
+  net::WifiDiagSnapshot diag = net::WifiManager::instance().diagnostics();
+  const int64_t now_ms = esp_timer_get_time() / 1000;
+  const bool fresh = diag.scan_ms >= 0 && now_ms - diag.scan_ms < 10000 && !diag.scan.empty();
+  uint32_t retry = 0;
+  if (!fresh && AuthManager::instance().consumeBudget("scan", 5, 1, retry)) {
+    // 经 WifiManager 扫描（与 net_task 的连接串行化；正在连接时返回上一轮扫描结果）。
+    net::WifiManager::instance().scanNow();
+    diag = net::WifiManager::instance().diagnostics();
+  }
   using alert_core::JsonValue;
   JsonValue::Array arr;
   for (const net::WifiScanEntry& e : diag.scan) {
@@ -270,14 +270,18 @@ esp_err_t p_connect(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // 暂存配网参数（成功回调在 sys_evt 上下文使用）
-  p.prov_ssid_ = ssid;
+  // 暂存配网参数（成功回调在 sys_evt 上下文使用）。Connecting 状态在断开旧连接
+  // 之后才置位：否则上一次尝试残留的断开事件会被当成本次结果（立即「失败」）。
+  {
+    std::lock_guard<std::mutex> lock(p.prov_mutex_);
+    p.prov_ssid_ = ssid;
+    p.prov_ip_.clear();
+  }
   p.prov_wifi_pass_ = pass;
   p.prov_admin_pass_ = admin_pass;
   p.prov_reason_.clear();
-  p.prov_ip_.clear();
-  p.prov_state_ = ProvisionPortal::ProvState::Connecting;
-  p.connect_start_us_ = esp_timer_get_time();
+  p.prov_reason_code_.store(-1);
+  p.prov_state_ = ProvisionPortal::ProvState::Idle;
 
   wifi_config_t sta_cfg = {};
   strncpy(reinterpret_cast<char*>(sta_cfg.sta.ssid), ssid.c_str(),
@@ -291,12 +295,40 @@ esp_err_t p_connect(httpd_req_t* req) {
   sta_cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
   sta_cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
   sta_cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+  sta_cfg.sta.failure_retry_cnt = 2;  // 与 WifiManager 一致：单次弱信号丢帧不判失败
+  // 单射频：STA 连上路由器后 AP 会被迫跟到路由器信道，手机随之掉线、看不到结果。
+  // 先把 AP 切到目标网络所在信道（手机在同一信道上重新关联，通常无感）。
+  uint8_t target_channel = 0;
+  {
+    const net::WifiDiagSnapshot diag = net::WifiManager::instance().diagnostics();
+    int best_rssi = -128;
+    for (const net::WifiScanEntry& e : diag.scan) {
+      if (e.ssid == ssid && e.rssi > best_rssi) {
+        best_rssi = e.rssi;
+        target_channel = e.channel;
+      }
+    }
+  }
+  if (target_channel >= 1 && target_channel <= 13) {
+    wifi_config_t ap_cfg = {};
+    if (esp_wifi_get_config(WIFI_IF_AP, &ap_cfg) == ESP_OK &&
+        ap_cfg.ap.channel != target_channel) {
+      ap_cfg.ap.channel = target_channel;
+      esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+      ADMIN_LOG_INFO("portal: AP moved to ch %u (target network)",
+                     static_cast<unsigned>(target_channel));
+    }
+  }
   // 试连期间暂停 net_task 自动重连（否则会用已存网络覆盖 STA 配置）；失败/超时/关闭释放。
   net::NetStack::instance().setWifiProvisioningHold(true);
   esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
   esp_wifi_disconnect();
+  p.connect_start_us_ = esp_timer_get_time();
+  p.prov_state_ = ProvisionPortal::ProvState::Connecting;
+  p.armConnectTimer();
   esp_wifi_connect();
   ADMIN_LOG_INFO("portal: connecting to %s", ssid.c_str());
+  emitAdminEvent({AdminEventType::ProvisionConnecting, "", 0});
 
   httpd_resp_set_type(req, "application/json; charset=utf-8");
   httpd_resp_send(req, "{\"state\":\"connecting\"}", HTTPD_RESP_USE_STRLEN);
@@ -508,8 +540,8 @@ uint32_t ProvisionPortal::windowRemainingMs() const {
 }
 
 void ProvisionPortal::notePortalActivity() {
-  // 门户窗口：任何门户请求重置 10 分钟空闲计时（M13 T8）
-  if (portal_running_) startWindowTimer(true);
+  // 门户/恢复热点窗口：任何门户请求或已认证的管理请求重置 10 分钟空闲计时。
+  if (portal_running_ || fallback_running_) startWindowTimer(true);
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +630,7 @@ void ProvisionPortal::close(const char* reason) {
   if (!portal_running_) return;
   portal_running_ = false;
   stopWindowTimer();
+  if (connect_timer_ != nullptr) esp_timer_stop(static_cast<esp_timer_handle_t>(connect_timer_));
   if (g_portal_server != nullptr) {
     httpd_stop(g_portal_server);
     g_portal_server = nullptr;
@@ -629,8 +662,11 @@ esp_err_t ProvisionPortal::openApFallback() {
     return err;
   }
   fallback_running_ = true;
-  startWindowTimer(false);  // 固定 10 分钟窗口，无活动重置（M13 F2）
-  ADMIN_LOG_WARN("ap fallback opened (window 10min, ssid=%s)", kApSsid);
+  // DNS 劫持：手机连上热点即弹出 captive 页（管理 httpd 把 / 与联网检测 302 到
+  // /wifi-diag，离线即可添加网络）。窗口 10 分钟，管理端有操作时重新计时。
+  startDnsHijack();
+  startWindowTimer(false);
+  ADMIN_LOG_WARN("ap fallback opened (window 10min idle, ssid=%s)", kApSsid);
   emitAdminEvent({AdminEventType::ApFallbackOpened, "", kWindowMs / 1000});
   return ESP_OK;
 }
@@ -639,6 +675,7 @@ void ProvisionPortal::closeApFallback(const char* reason) {
   if (!fallback_running_) return;
   fallback_running_ = false;
   stopWindowTimer();
+  stopDnsHijack();
   stopAp();
   ble::BleManager::instance().endRecoveryAp();
   ADMIN_LOG_WARN("ap fallback closed (%s)", reason != nullptr ? reason : "");
@@ -656,16 +693,38 @@ void ProvisionPortal::checkConnectTimeout() {
   }
 }
 
-void ProvisionPortal::onConnectFailed(const char* reason) {
+void ProvisionPortal::armConnectTimer() {
+  if (connect_timer_ == nullptr) {
+    const esp_timer_create_args_t args = {
+        .callback = [](void*) { ProvisionPortal::instance().checkConnectTimeout(); },
+        .name = "prov_connect"};
+    if (esp_timer_create(&args, reinterpret_cast<esp_timer_handle_t*>(&connect_timer_)) !=
+        ESP_OK) {
+      connect_timer_ = nullptr;
+      return;
+    }
+  }
+  esp_timer_stop(static_cast<esp_timer_handle_t>(connect_timer_));
+  // 略晚于超时阈值触发，checkConnectTimeout 里的比较一定成立。
+  esp_timer_start_once(static_cast<esp_timer_handle_t>(connect_timer_),
+                       kConnectTimeoutUs + 200000);
+}
+
+void ProvisionPortal::onConnectFailed(const char* reason, int code) {
   net::NetStack::instance().setWifiProvisioningHold(false);
+  prov_reason_code_.store(code);
   prov_state_ = ProvState::Fail;
   prov_reason_ = reason != nullptr ? reason : "连接失败";
   ADMIN_LOG_WARN("portal: connect failed (%s)", prov_reason_.c_str());
+  emitAdminEvent({AdminEventType::ProvisionFailed, "", 0});
 }
 
 void ProvisionPortal::onConnectSucceeded(const std::string& ip) {
   // M13 F1：成功 → WiFi 凭据 + PBKDF2 hash + 生成 ingest key 写 NVS → 重启
-  prov_ip_ = ip;
+  {
+    std::lock_guard<std::mutex> lock(prov_mutex_);
+    prov_ip_ = ip;
+  }
   prov_state_ = ProvState::Ok;
   ADMIN_LOG_INFO("portal: connect ok ssid=%s ip=%s", prov_ssid_.c_str(), ip.c_str());
 
@@ -721,8 +780,9 @@ void ProvisionPortal::wifiEventHandler(void* arg, esp_event_base_t base, int32_t
 
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
     const auto* evt = static_cast<wifi_event_sta_disconnected_t*>(data);
-    if (self->prov_state_ == ProvState::Connecting) {
-      self->onConnectFailed(failReasonText(evt->reason));
+    // 8 = ASSOC_LEAVE：本机主动断开（切换网络时的残留事件），不是本次试连的结果。
+    if (self->prov_state_ == ProvState::Connecting && evt->reason != WIFI_REASON_ASSOC_LEAVE) {
+      self->onConnectFailed(failReasonText(evt->reason), evt->reason);
     }
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
     const auto* evt = static_cast<ip_event_got_ip_t*>(data);

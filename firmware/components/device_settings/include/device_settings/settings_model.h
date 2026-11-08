@@ -130,6 +130,7 @@ struct Settings {
   // 空闲节奏下随空闲刷新显示，电池模式每次定时唤醒至多前进一屏。
   uint32_t screen_rotate_min = 0;
   bool diagnostics_enabled = true;
+  bool ble_admin_enabled = true;
   bool ble_observer_enabled = false;
   uint32_t ble_observer_window_s = 10;
   uint32_t ble_observer_interval_s = 300;

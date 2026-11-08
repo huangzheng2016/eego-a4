@@ -21,6 +21,7 @@
 // 已关联但 DHCP 慢时把单次尝试截止延到关联后 30s；持续弱信号时在同名 BSSID 间
 // 简单漫游（wifi_list.h WifiRoamPolicy）。墨水屏刷新（面板高压）期间推迟扫描/关联。
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -130,6 +131,8 @@ class WifiManager {
   // 同名扫描 + 选更强 BSSID（≥8 dB）并切换。accounts 用于取当前 SSID 的密码。
   // 返回 true = 已切到新 BSSID；无更好目标/扫描失败返回 false（链路保持）。
   bool roam(const std::vector<WifiAccount>& accounts);
+  // 管理网页正在使用时推迟漫游扫描（扫描期间射频离开信道，网页请求会卡住）。
+  void deferRoamUntil(int64_t ms) { roam_defer_until_ms_.store(ms); }
 
   struct LinkInfo {
     WifiLinkSummary rssi;           // 近 10 分钟 RSSI min/avg/last
@@ -175,6 +178,7 @@ class WifiManager {
   // 链路统计/漫游（diag_mutex_ 保护）
   WifiLinkStats link_stats_;
   WifiRoamPolicy roam_policy_;
+  std::atomic<int64_t> roam_defer_until_ms_{0};
   volatile uint32_t beacon_timeouts_ = 0;
   uint32_t roams_ = 0;
   uint32_t roam_scans_ = 0;

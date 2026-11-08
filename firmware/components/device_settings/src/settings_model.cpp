@@ -400,6 +400,7 @@ JsonValue toJson(const Settings& s) {
       {"keep_awake_min", JsonValue::makeInt(s.keep_awake_min)},
       {"screen_rotate_min", JsonValue::makeInt(s.screen_rotate_min)},
       {"diagnostics_enabled", JsonValue::makeBool(s.diagnostics_enabled)},
+      {"ble_admin_enabled", JsonValue::makeBool(s.ble_admin_enabled)},
       {"ble_observer_enabled", JsonValue::makeBool(s.ble_observer_enabled)},
       {"ble_observer_window_s", JsonValue::makeInt(s.ble_observer_window_s)},
       {"ble_observer_interval_s", JsonValue::makeInt(s.ble_observer_interval_s)},
@@ -652,6 +653,8 @@ bool mergePatch(const Settings& current, const JsonValue& patch, Settings& out,
       readBool(value, key.c_str(), next.idle_critical_immediate, errors);
     } else if (key == "diagnostics_enabled") {
       readBool(value, key.c_str(), next.diagnostics_enabled, errors);
+    } else if (key == "ble_admin_enabled") {
+      readBool(value, key.c_str(), next.ble_admin_enabled, errors);
     } else if (key == "ble_observer_enabled") {
       readBool(value, key.c_str(), next.ble_observer_enabled, errors);
     } else if (key == "ble_observer_rules") {
@@ -695,7 +698,8 @@ uint32_t changedFields(const Settings& a, const Settings& b) {
   if (a.screen_rotate_min != b.screen_rotate_min) changed |= kChangedScreenRotate;
   if (a.timezone_offset_min != b.timezone_offset_min) changed |= kChangedTimezone;
   if (a.diagnostics_enabled != b.diagnostics_enabled) changed |= kChangedDiagnostics;
-  if (a.ble_observer_enabled != b.ble_observer_enabled ||
+  if (a.ble_admin_enabled != b.ble_admin_enabled ||
+      a.ble_observer_enabled != b.ble_observer_enabled ||
       a.ble_observer_window_s != b.ble_observer_window_s ||
       a.ble_observer_interval_s != b.ble_observer_interval_s ||
       a.ble_observer_dedup_ms != b.ble_observer_dedup_ms ||
@@ -800,6 +804,7 @@ const char* schemaJson() {
     "keep_awake_min": {"type":"int","enum":[10,30,60,120],"default":30,"note":"keep-awake (config mode) duration: no idle batching, no interactive/battery/night deep sleep; RAM only, ends automatically","group":"power"},
     "screen_rotate_min": {"type":"int","enum":[0,1,2,5,10,30],"default":0,"note":"dashboard carousel: after this many minutes without interaction, advance to the next screen at local wall-clock multiples (idle redraw cadence applies; battery mode advances at most once per wake); 0 = off","group":"display_refresh"},
     "diagnostics_enabled": {"type":"bool","default":true,"group":"diagnostics"},
+    "ble_admin_enabled": {"type":"bool","default":true,"capability":"ble_admin","note":"browser admin over Web Bluetooth; pairing shows a 6-digit code on screen; on battery only while awake","group":"ble"},
     "ble_observer_enabled": {"type":"bool","default":false,"capability":"ble_observer","group":"ble"},
     "ble_observer_window_s": {"type":"int","range":[2,60],"default":10,"group":"ble"},
     "ble_observer_interval_s": {"type":"int","range":[30,86400],"default":300,"note":"delay after the previous scan window; battery scans only once per wake window","group":"ble"},
@@ -812,8 +817,8 @@ const char* schemaJson() {
       "ttl_s":{"type":"int","range":[60,604800],"default":86400}
     }}
   },
-  "ble": {"roles":["wifi_prov","ble_scan"],"runtime_default":"off","provisioning_trigger":"local_physical_only","security":"wifi_prov_security_1_with_per_window_pop","deep_sleep_realtime":false,"scripting":false},
-  "deep_sleep": {"http_reachable":false,"ble_reachable":false,"note":"Recovery AP, BLE provisioning and observer wake windows pause automatic sleep; BLE is stopped before deep sleep."}
+  "ble": {"roles":["ble_admin","ble_scan"],"runtime_default":"ble_admin","security":"le_secure_connections_passkey_display","deep_sleep_realtime":false,"scripting":false},
+  "deep_sleep": {"http_reachable":false,"ble_reachable":false,"note":"Recovery AP, BLE pairing and observer wake windows pause automatic sleep; BLE is stopped before deep sleep."}
 })JSON";
 }
 

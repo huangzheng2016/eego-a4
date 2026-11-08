@@ -78,6 +78,7 @@ TEST(settings, json_round_trip) {
   s.idle_refresh_min = 15;
   s.idle_critical_immediate = false;
   s.diagnostics_enabled = false;
+  s.ble_admin_enabled = false;
   s.ble_observer_enabled = true;
   BleObserverRule rule;
   rule.id = "temp1";
@@ -339,4 +340,23 @@ TEST(settings, screen_rotate_minutes) {
   CHECK_EQ(changedFields(base, out), static_cast<uint32_t>(kChangedScreenRotate));
   CHECK(std::string(schemaJson()).find("screen_rotate_min") != std::string::npos);
   CHECK(toJson(out).toString().find("\"screen_rotate_min\":5") != std::string::npos);
+}
+
+TEST(settings, ble_admin_default_patch_and_change_mask) {
+  Settings defaults;
+  CHECK(defaults.ble_admin_enabled);
+  const JsonValue encoded = toJson(defaults);
+  const JsonValue* field = encoded.find("ble_admin_enabled");
+  REQUIRE(field != nullptr);
+  CHECK(field->boolValue(false));
+
+  Settings out;
+  FieldErrors errors;
+  CHECK(patchOk(defaults, R"({"ble_admin_enabled":false})", out, errors));
+  CHECK(!out.ble_admin_enabled);
+  CHECK((changedFields(defaults, out) & kChangedBle) != 0);
+
+  errors.clear();
+  CHECK(!patchOk(defaults, R"({"ble_admin_enabled":"yes"})", out, errors));
+  CHECK(!errors.empty());
 }

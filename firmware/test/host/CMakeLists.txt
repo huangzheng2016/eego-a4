@@ -58,6 +58,7 @@ set(FW_SOURCES
   ${C}/eego_hal/touch_calibration.cpp
   ${C}/admin/src/probe_mask.cpp
   ${C}/admin/src/input_binding_model.cpp
+  ${C}/ble/src/tunnel_frame.cpp
   ${FW_ROOT}/main/refresh_policy.cpp
   ${FW_ROOT}/main/battery_policy.cpp
   ${FW_ROOT}/main/input_confirm.cpp
@@ -74,6 +75,7 @@ target_include_directories(fw_under_test PUBLIC
   ${C}/device_settings/include
   ${C}/eego_hal/include
   ${C}/admin/include
+  ${C}/ble/include
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs
 )
 # Pure-logic main/ units (refresh_policy, battery_policy, input_confirm) are compiled without the rest of main/.
@@ -85,6 +87,7 @@ set(TEST_SUITES dashboard layout expression pipeline gesture settings probe_mask
     refresh_policy battery_policy confirm wifi_list)
 list(APPEND TEST_SUITES touch_cal)
 list(APPEND TEST_SUITES keep_awake power_source device_screen screen_rotate)
+list(APPEND TEST_SUITES ble_tunnel time_policy)
 add_executable(firmware_host_tests
   test_main.cpp
   test_dashboard.cpp
@@ -102,6 +105,8 @@ add_executable(firmware_host_tests
   test_touch_calibration.cpp
   test_wifi_list.cpp
   test_keep_awake.cpp
+  test_ble_tunnel.cpp
+  test_time_policy.cpp
 )
 target_include_directories(firmware_host_tests PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}

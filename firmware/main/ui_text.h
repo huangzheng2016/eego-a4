@@ -71,17 +71,17 @@ enum class Lang : uint8_t {
   X(PowerAlwaysBattery, "始终电池", "ALWAYS BATTERY") \
   X(PowerDetailFmt, "%s（%s）", "%s (%s)") \
   X(Charging, "充电中", "CHARGING") \
-  X(WifiDisconnected, "WiFi 未连接", "DISCONNECTED") \
-  X(WifiConnecting, "WiFi 连接中", "CONNECTING") \
-  X(WifiConnected, "WiFi 已连接", "CONNECTED") \
-  X(WifiFailed, "WiFi 连接失败", "FAILED") \
-  X(WifiOffline, "WiFi 离线", "OFFLINE") \
+  X(WifiDisconnected, "WiFi 未连接", "WIFI DISCONNECTED") \
+  X(WifiConnecting, "WiFi 连接中", "WIFI CONNECTING") \
+  X(WifiConnected, "WiFi 已连接", "WIFI CONNECTED") \
+  X(WifiFailed, "WiFi 连接失败", "WIFI FAILED") \
+  X(WifiOffline, "WiFi 离线", "WIFI OFFLINE") \
   X(WifiNotTried, "未尝试", "NOT TRIED") \
   X(WifiNotSeen, "未扫描到", "NOT SEEN") \
   X(WifiDiag, "WiFi 诊断", "WIFI DIAG") \
   X(LblSignal10m, "近10分钟", "LAST 10 MIN") \
   X(LblTip, "建议", "TIP") \
-  X(WifiWeakHint, "移近路由器/固定信道 1·6·11/20MHz", "MOVE CLOSER / CH 1·6·11 / 20MHZ") \
+  X(WifiWeakHint, "信号弱：把设备移近路由器", "WEAK SIGNAL: MOVE CLOSER TO THE ROUTER") \
   X(Sources, "数据源", "DATA SOURCES") \
   X(NoSources, "未配置数据源", "NO SOURCES") \
   X(NoDashboard, "未配置仪表盘", "NO DASHBOARD") \
@@ -104,20 +104,25 @@ enum class Lang : uint8_t {
   X(SysStatus, "系统", "SYSTEM") \
   X(TimeLabel, "时间", "TIME") \
   X(TimeRtc, "RTC", "RTC") \
+  X(TimeNetwork, "网络校时", "NETWORK TIME") \
   X(TimeUnavailable, "时间不可用", "NO CLOCK") \
   X(ConfigOk, "配置有效", "CONFIG OK") \
   X(ConfigBad, "配置无效", "CONFIG INVALID") \
   X(Uptime, "运行", "UPTIME") \
   X(Version, "版本", "VERSION") \
-  X(PortalOpen, "配网窗口开", "PORTAL OPEN") \
-  X(ApFallback, "兜底AP", "AP FALLBACK") \
+  X(PortalOpen, "设置热点已开", "SETUP HOTSPOT ON") \
+  X(ApFallback, "设置热点已开", "SETUP HOTSPOT ON") \
+  X(SetupHotspot, "设置热点", "SETUP HOTSPOT") \
+  X(SetupHotspotOn, "设置热点已开", "SETUP HOTSPOT ON") \
+  X(SetupHotspotClosed, "设置热点已关闭", "SETUP HOTSPOT CLOSED") \
+  X(SetupHotspotFailed, "设置热点无法开启，请稍后重试", "SETUP HOTSPOT FAILED; TRY AGAIN") \
   X(SetLanguage, "语言", "LANGUAGE") \
   X(SetPowerMode, "供电模式", "POWER MODE") \
   X(SetChargeSignal, "充电信号", "CHARGE SIGNAL") \
-  X(ChargeActiveHigh, "高有效", "ACTIVE HIGH") \
-  X(ChargeActiveLow, "低有效", "ACTIVE LOW") \
+  X(ChargeActiveHigh, "高电平=充电", "HIGH = CHARGING") \
+  X(ChargeActiveLow, "低电平=充电", "LOW = CHARGING") \
   X(SetBatteryRefresh, "电池唤醒间隔", "BATTERY WAKE EVERY") \
-  X(SetBatteryMaxStale, "最长不刷屏", "MAX UNCHANGED") \
+  X(SetBatteryMaxStale, "最长不刷新", "FORCE REFRESH AFTER") \
   X(SetBatteryInteractive, "按键唤醒后保持", "AWAKE AFTER KEY") \
   X(TimeoutSecFmt, "%u 秒无操作", "%uS NO INPUT") \
   X(BatStatusFmt, "电量 %u%% · 更新于 %02d:%02d · 最迟 %02d:%02d", "BAT %u%% · UPDATED %02d:%02d · BY %02d:%02d") \
@@ -135,12 +140,16 @@ enum class Lang : uint8_t {
   X(FrontlightMissing, "无前光", "NO FRONTLIGHT") \
   X(PollEveryFmt, "每 %u 秒", "EVERY %us") \
   X(ProvTitle, "首次配网", "SETUP") \
-  X(ProvStep1, "1. 手机连接 EEGO-A4-Setup", "1. Join EEGO-A4-Setup") \
-  X(ProvStep2, "2. 浏览器打开 192.168.4.1", "2. Open http://192.168.4.1") \
-  X(ProvStep3, "3. 选 WiFi 并设管理密码", "3. Pick WiFi + set password") \
-  X(ProvWindowFmt, "窗口剩余 %u 秒", "WINDOW %us LEFT") \
+  X(ProvStep1, "1. 手机连接 WiFi 热点 EEGO-A4-Setup", "1. JOIN WIFI EEGO-A4-Setup") \
+  X(ProvStep2, "2. 浏览器打开 http://192.168.4.1", "2. OPEN http://192.168.4.1") \
+  X(ProvStep3, "3. 选择 WiFi，设置管理密码", "3. PICK WIFI, SET ADMIN PASSWORD") \
+  X(ProvIdleClose, "10 分钟无操作自动关闭", "CLOSES AFTER 10 MIN IDLE") \
+  X(ProvConnectingFmt, "正在连接 %s…", "CONNECTING TO %s…") \
+  X(ProvFailedFmt, "连接失败：%s，请在手机上重试", "FAILED: %s. TRY AGAIN ON THE PHONE") \
+  X(ProvTimeout, "连接超时", "TIMEOUT") \
+  X(ProvNextFmt, "重启后：手机连回 %s，打开 http://%s/", "AFTER REBOOT: JOIN %s, OPEN http://%s/") \
   X(ProvDone, "配网成功，即将重启", "PROVISIONED, REBOOTING") \
-  X(ProvClosed, "配网窗口已关闭", "PORTAL CLOSED") \
+  X(ProvClosed, "设置热点已关闭 · 设置 → 开启设置热点", "SETUP HOTSPOT CLOSED · SETTINGS → SETUP HOTSPOT") \
   X(Busy, "忙，请稍后重试", "BUSY; TRY AGAIN") \
   X(Sleeping, "电池 · 休眠中", "ON BATTERY · ASLEEP") \
   X(WakeHint, "按电源键唤醒", "PRESS POWER TO WAKE") \
@@ -149,10 +158,10 @@ enum class Lang : uint8_t {
   X(OnbStep1, "1. 电脑或手机连接与本机相同的网络", "1. Join the same network as this device") \
   X(OnbStep2, "2. 打开上面的地址并登录管理后台", "2. Open the address above and sign in") \
   X(OnbStep3, "3. 选择模板或新建仪表盘，应用到设备", "3. Pick a template or build a dashboard, then apply") \
-  X(OnbApStep1, "1. 手机连接热点 EEGO-A4-Setup", "1. Join Wi-Fi EEGO-A4-Setup") \
-  X(OnbApStep2, "2. 打开上面的地址，选择 WiFi", "2. Open the address above and pick Wi-Fi") \
-  X(OnbApStep3, "3. 联网后用新地址配置仪表盘", "3. Then configure the dashboard at the new address") \
-  X(OnbNoWifi, "WiFi 未配置：设置 → 开启配网热点", "NO WIFI: SETTINGS → RECOVERY AP") \
+  X(OnbApStep1, "1. 手机连接 WiFi 热点 EEGO-A4-Setup", "1. JOIN WIFI EEGO-A4-Setup") \
+  X(OnbApStep2, "2. 打开上面的地址，添加 WiFi", "2. OPEN THE ADDRESS ABOVE, ADD WIFI") \
+  X(OnbApStep3, "3. 联网后用新地址配置仪表盘", "3. THEN SET UP THE DASHBOARD AT THE NEW ADDRESS") \
+  X(OnbNoWifi, "WiFi 未配置：设置 → 开启设置热点", "NO WIFI: SETTINGS → SETUP HOTSPOT") \
   X(OnbInvalidFmt, "仪表盘配置无效：%s", "DASHBOARD CONFIG INVALID: %s") \
   X(OnbKeys, "前置键：长按 设置 · 双击 状态", "FRONT KEY: HOLD = SETTINGS · DOUBLE = STATUS") \
   X(AgeNow, "刚刚", "NOW") \
@@ -160,30 +169,37 @@ enum class Lang : uint8_t {
   X(AgeHourFmt, "%u 小时前", "%uh ago") \
   X(AgeDayFmt, "%u 天前", "%ud ago") \
   X(SetNetwork, "网络设置", "NETWORK") \
-  X(SetRecoveryAp, "开启配网热点", "RECOVERY AP") \
-  X(SetWifiReset, "仅重置 WiFi", "WIFI-ONLY RESET") \
-  X(SetBluetooth, "BLE 配网", "BLE SETUP") \
+  X(SetRecoveryAp, "开启设置热点", "SETUP HOTSPOT") \
+  X(SetWifiReset, "仅重置 WiFi", "RESET WIFI ONLY") \
+  X(SetBluetooth, "蓝牙管理", "BLUETOOTH ADMIN") \
   X(SetBleObserver, "BLE 广播监听", "BLE SENSOR SCAN") \
-  X(SetBleUnbind, "清除 BLE 配对", "BLE CLEAR BONDS") \
-  X(BleProvStarted, "手机打开 BLE 配网，输入本机 PoP", "USE BLE APP; ENTER LOCAL POP") \
-  X(BleProvSuccess, "BLE 配网成功", "BLE PROVISIONING SUCCEEDED") \
-  X(BleProvFailed, "BLE 配网失败或已取消", "BLE PROVISIONING FAILED/CLOSED") \
-  X(BleUnbindDone, "BLE 配对已清除", "BLE BONDS CLEARED") \
+  X(SetBleUnbind, "清除蓝牙配对", "CLEAR BLUETOOTH PAIRINGS") \
+  X(BleStateIdle, "已开启", "ON") \
+  X(BleStateAdvertising, "等待连接", "WAITING") \
+  X(BleStatePairing, "配对中", "PAIRING") \
+  X(BleStateLinked, "已连接", "CONNECTED") \
+  X(BleLinkedPill, "蓝牙", "BLE") \
+  X(BlePairTitle, "蓝牙配对", "BLUETOOTH PAIRING") \
+  X(BlePairHint, "在电脑或手机的配对弹窗中输入下面的 6 位配对码", "ENTER THIS 6-DIGIT CODE IN THE PAIRING PROMPT ON YOUR COMPUTER OR PHONE") \
+  X(BlePairExpiresFmt, "%u 秒内有效", "VALID FOR %u S") \
+  X(BleLinked, "蓝牙已连接", "BLUETOOTH CONNECTED") \
+  X(BlePairFailed, "蓝牙配对未完成", "BLUETOOTH PAIRING NOT COMPLETED") \
+  X(BleUnbindDone, "蓝牙配对已清除", "BLUETOOTH PAIRINGS CLEARED") \
   X(SetTimezone, "时区（小时）", "TIMEZONE") \
   X(SetBrightness, "前光亮度", "BRIGHTNESS") \
   X(SetWarmth, "前光色温", "WARMTH") \
   X(SetDataRefresh, "数据刷新周期", "DATA REFRESH") \
-  X(SetEpdFull, "墨水屏全刷周期", "EPD FULL INTERVAL") \
-  X(SetEpdNow, "立即全屏刷新", "EPD FULL NOW") \
-  X(SetIdleAfter, "节电判定", "ECO AFTER") \
-  X(SetIdleRefresh, "节电刷新间隔", "ECO REFRESH") \
+  X(SetEpdFull, "墨水屏全刷周期", "FULL REFRESH EVERY") \
+  X(SetEpdNow, "立即全屏刷新", "FULL REFRESH NOW") \
+  X(SetIdleAfter, "节电判定", "POWER SAVE AFTER") \
+  X(SetIdleRefresh, "节电刷新间隔", "POWER SAVE REFRESH") \
   X(SetScreenRotate, "自动轮播", "AUTO ROTATE") \
   X(IdleAfterFmt, "%u 分钟无操作", "%uMIN NO INPUT") \
   X(SetSleepPlan, "夜间暂停", "NIGHT PAUSE") \
   X(SetNextWake, "下次唤醒时间", "NEXT WAKE") \
   X(SetLastWake, "唤醒方式", "LAST WAKE") \
   X(SetStorage, "SD 卡状态", "STORAGE") \
-  X(SetDiagnostics, "串口诊断", "SERIAL DIAGNOSTICS") \
+  X(SetDiagnostics, "串口日志", "SERIAL LOG") \
   X(SetRunDiagnostics, "硬件自检", "RUN DIAGNOSTICS") \
   X(SetSecurity, "管理密码", "SECURITY") \
   X(SetFactoryReset, "恢复出厂设置", "FACTORY RESET") \
@@ -194,13 +210,14 @@ enum class Lang : uint8_t {
   X(DeepSleepOffline, "暂停期间不联网、不更新", "NO NETWORK OR UPDATES WHILE PAUSED") \
   X(ConfirmPhysicalPress, "再按一次电源键确认", "PRESS POWER AGAIN TO CONFIRM") \
   X(ConfirmShutdown, "再按一次电源键关机", "PRESS POWER AGAIN TO SHUT DOWN") \
+  X(ConfirmSleep, "再按一次电源键休眠", "PRESS POWER AGAIN TO SLEEP") \
   X(PoweredOff, "已关机", "POWERED OFF") \
   X(PowerOnHint, "按电源键开机", "PRESS POWER TO TURN ON") \
   X(SleepBlocked, "配网进行中，暂不能休眠", "SETUP IN PROGRESS: CAN'T SLEEP") \
-  X(OnbAsleep, "休眠中 · 按任意键唤醒", "ASLEEP · PRESS ANY KEY") \
+  X(OnbAsleep, "休眠中 · 按电源键或 ↑/↓ 唤醒", "ASLEEP · PRESS POWER OR UP/DOWN") \
   X(OnbAsleepNote, "唤醒后才能打开管理地址", "WAKE THE DEVICE TO OPEN THE ADMIN PAGE") \
-  X(RecoveryApStarted, "恢复热点：EEGO-A4-Setup / 192.168.4.1", "AP: EEGO-A4-Setup / 192.168.4.1") \
-  X(WifiResetDone, "WiFi 已重置，恢复热点已开启", "WIFI RESET; RECOVERY AP OPEN") \
+  X(RecoveryApStarted, "热点 EEGO-A4-Setup · http://192.168.4.1/wifi-diag", "HOTSPOT EEGO-A4-Setup · http://192.168.4.1/wifi-diag") \
+  X(WifiResetDone, "WiFi 已重置 · 热点 EEGO-A4-Setup · 192.168.4.1/wifi-diag", "WIFI RESET · HOTSPOT EEGO-A4-Setup · 192.168.4.1/wifi-diag") \
   X(FactoryResetDone, "恢复完成，即将重启", "RESET COMPLETE; REBOOTING") \
   X(FullRefreshQueued, "已请求全屏刷新", "FULL REFRESH QUEUED") \
   X(WakeTimer, "定时器", "TIMER") \
@@ -236,8 +253,8 @@ enum class Lang : uint8_t {
   X(HelpScreen, "上/下一屏；列表中上/下一项", "PREV/NEXT SCREEN; ITEM IN LISTS") \
   X(HelpUpDownLong, "↑/↓ 长按", "UP/DOWN LONG") \
   X(HelpFocus, "选择面板（焦点框）", "SELECT PANEL (FOCUS)") \
-  X(HelpPower, "Power 短按 / 长按", "POWER SHORT / LONG") \
-  X(HelpActivateBack, "休眠 / 关机（再按确认）", "SLEEP / SHUT DOWN (PRESS AGAIN)") \
+  X(HelpPower, "电源键 短按 / 长按", "POWER SHORT / LONG") \
+  X(HelpActivateBack, "选择焦点项（无焦点时休眠） / 关机", "SELECT (SLEEP IF NOTHING FOCUSED) / SHUT DOWN") \
   X(HelpFrontHome, "前置键 短按", "FRONT SHORT") \
   X(HelpHome, "返回 / 回到仪表盘（固定）", "BACK / DASHBOARD (FIXED)") \
   X(HelpFrontGestures, "前置键 长按 / 双击", "FRONT LONG / DOUBLE") \

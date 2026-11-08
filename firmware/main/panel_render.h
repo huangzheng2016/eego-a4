@@ -132,6 +132,7 @@ struct StatusBarModel {
   bool mains = true;  // true=外接电源（状态栏电池旁画插头）false=电池
   bool portalOpen = false;
   bool apFallback = false;
+  bool bleLinked = false;  // 蓝牙管理链路已认证（状态栏「蓝牙」胶囊）
   size_t mutedCount = 0;  // 外部告警 store 静音记录数（快照内 muted 计数）
   char banner[96] = "";  // 操作结果/二次确认提示（空 = 无）
 };
@@ -187,8 +188,16 @@ struct S4Model {
   size_t pageCount = 1;
 };
 
+// 蓝牙配对码页：配对期间接管屏幕，6 位配对码按可用宽度取最大字号。
+struct BlePairModel {
+  char passkey[8] = "";      // "012345"
+  char deviceName[24] = "";  // EEGO-A4-XXXX
+  uint32_t remainingS = 0;
+};
+
 struct ProvisionModel {
-  char windowText[48] = "";  // 窗口剩余秒
+  char windowText[64] = "";   // 窗口说明（无操作自动关闭）
+  char statusText[128] = "";  // 正在连接 / 失败原因 / 成功后的下一步（空 = 不显示）
   bool succeeded = false;
 };
 
@@ -205,6 +214,7 @@ void drawStatus(eego::PortraitCanvas& c, const KvModel& m);
 void drawS4(eego::PortraitCanvas& c, const S4Model& m);
 void drawHelp(eego::PortraitCanvas& c, const KvModel& m);
 void drawProvision(eego::PortraitCanvas& c, const ProvisionModel& m);
+void drawBlePair(eego::PortraitCanvas& c, const BlePairModel& m);
 // 关机页：整屏白底，中部「已关机」+「按电源键开机」（墨水屏断电后保持这一帧）。
 void drawPoweredOff(eego::PortraitCanvas& c);
 

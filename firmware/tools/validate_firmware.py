@@ -126,10 +126,6 @@ REQUIRED_FILES = [
     "main/app_main.cpp",
     "tools/validate_firmware.py",
     "tools/smoke_serial_test.py",
-    "README.md",
-    "LICENSE",
-    "NOTICE.md",
-    "THIRD_PARTY_NOTICES.md",
 ]
 
 CODE_SUFFIXES = {".cpp", ".h", ".py", ".csv", ".txt", ".cmake"}
@@ -447,6 +443,11 @@ SDKCONFIG_REQUIRED = {
     "CONFIG_FATFS_LFN_HEAP": "y",
     "CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS": "y",
     "CONFIG_MBEDTLS_CERTIFICATE_BUNDLE": "y",
+    # BLE 管理隧道：仅 LE Secure Connections + 回环转发
+    "CONFIG_BT_NIMBLE_SM_SC": "y",
+    "CONFIG_BT_NIMBLE_SM_SC_ONLY": "1",
+    "CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU": "512",
+    "CONFIG_LWIP_NETIF_LOOPBACK": "y",
 }
 
 

@@ -50,6 +50,9 @@
 #include "esp_http_server.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include "lwip/inet.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
@@ -205,6 +208,28 @@ std::string clientIp(httpd_req_t* req) {
   return buf;
 }
 
+// 请求是否经设备热点（本端地址 192.168.4.1）到达：恢复热点期间手机连的是它，
+// 无外网，加载器拉不到 GitHub Pages 上的管理应用。
+bool viaSetupHotspot(httpd_req_t* req) {
+  const int fd = httpd_req_to_sockfd(req);
+  if (fd < 0) return false;
+  struct sockaddr_storage ss;
+  socklen_t sl = sizeof(ss);
+  if (getsockname(fd, reinterpret_cast<struct sockaddr*>(&ss), &sl) != 0) return false;
+  char buf[48] = "";
+  if (ss.ss_family == AF_INET) {
+    inet_ntop(AF_INET, &reinterpret_cast<struct sockaddr_in*>(&ss)->sin_addr, buf, sizeof(buf));
+  } else if (ss.ss_family == AF_INET6) {
+    inet_ntop(AF_INET6, &reinterpret_cast<struct sockaddr_in6*>(&ss)->sin6_addr, buf,
+              sizeof(buf));
+  }
+  const size_t n = strlen(buf);
+  constexpr char kAp[] = "192.168.4.1";
+  constexpr size_t kApLen = sizeof(kAp) - 1;
+  return n >= kApLen && strcasecmp(buf + n - kApLen, kAp) == 0 &&
+         (n == kApLen || buf[n - kApLen - 1] == ':');
+}
+
 bool headerValue(httpd_req_t* req, const char* name, std::string& out) {
   char buf[256];
   if (httpd_req_get_hdr_value_str(req, name, buf, sizeof(buf)) != ESP_OK) return false;
@@ -347,6 +372,8 @@ bool requireBearer(httpd_req_t* req, std::string& token_out, bool activity = tru
   token_out = std::move(token);
   if (activity) {
     g_last_authenticated_ms.store(esp_timer_get_time() / 1000, std::memory_order_relaxed);
+    // 恢复热点期间有人在操作：10 分钟窗口按空闲重新计时，不在使用中途关闭。
+    ProvisionPortal::instance().notePortalActivity();
   }
   return true;
 }
@@ -467,6 +494,19 @@ esp_err_t h_login(httpd_req_t* req) {
     return sendError(req, 500, errc::kInternal, "session creation failed");
   }
   ADMIN_LOG_INFO("login ok: ip=%s", ip.c_str());
+  // 电池供电时登录 = 有人要配置：按设置的时长保持唤醒，免得编辑到一半设备深睡。
+  // 已在保持唤醒中则不缩短。
+  {
+    const PowerSnapshot power = powerSnapshot();
+    if (power.valid && !power.mains) {
+      const uint32_t minutes =
+          settings::DeviceSettings::instance().snapshot().values.keep_awake_min;
+      const int64_t now_ms = esp_timer_get_time() / 1000;
+      if (keepAwakeUntilMs() < keep_awake::deadlineMs(now_ms, minutes)) {
+        setKeepAwakeMinutes(minutes);
+      }
+    }
+  }
   using alert_core::JsonValue;
   return sendJson(req, 200,
                   JsonValue::makeObject({
@@ -965,6 +1005,45 @@ esp_err_t h_screen_post(httpd_req_t* req) {
                             }).toString());
 }
 
+// ---------------------------------------------------------------------------
+// 浏览器校时：POST /device/time {"unix_ms":<int>,"source":"browser"}
+// ---------------------------------------------------------------------------
+std::mutex g_time_mutex;
+TimeSetter g_time_setter;
+
+esp_err_t h_device_time(httpd_req_t* req) {
+  using alert_core::JsonValue;
+  if (!contentTypeJsonOk(req)) {
+    return sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
+  }
+  std::string body;
+  if (readBodyBudget(req, kBodyBudgetConfirm, body) != 0) return ESP_OK;
+  JsonValue root;
+  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  const JsonValue* unix_ms = root.find("unix_ms");
+  // 2020-01-01 .. 2100-01-01
+  if (unix_ms == nullptr || unix_ms->type() != JsonValue::Type::Int ||
+      unix_ms->intValue() < 1577836800000LL || unix_ms->intValue() > 4102444800000LL) {
+    FieldErrors errs = fieldErr("unix_ms", "must be a Unix time in milliseconds");
+    return sendError(req, 400, errc::kValidationFailed, "validation failed", &errs);
+  }
+  TimeSetter setter;
+  {
+    std::lock_guard<std::mutex> lock(g_time_mutex);
+    setter = g_time_setter;
+  }
+  if (!setter) return sendError(req, 503, errc::kUnavailable, "time setting unavailable");
+  const TimeSetResult result = setter(unix_ms->intValue());
+  if (result.applied) {
+    ADMIN_LOG_INFO("time set from browser (drift %llds)", static_cast<long long>(result.drift_s));
+  }
+  return sendJson(req, 200, JsonValue::makeObject({
+                                {"applied", JsonValue::makeBool(result.applied)},
+                                {"drift_s", JsonValue::makeInt(result.drift_s)},
+                                {"sntp_synced", JsonValue::makeBool(result.sntp_synced)},
+                            }).toString());
+}
+
 esp_err_t h_keep_awake_get(httpd_req_t* req) {
   return sendJson(req, 200, keepAwakeJson().toString());
 }
@@ -1245,13 +1324,14 @@ esp_err_t h_settings_get(httpd_req_t* req) {
       {"recovery_window_remaining_s",
        JsonValue::makeInt(ProvisionPortal::instance().windowRemainingMs() / 1000)},
       {"auto_sleep_suspended",
-       JsonValue::makeBool(ProvisionPortal::instance().apActive() || ble_state.stack_active)},
+       JsonValue::makeBool(ProvisionPortal::instance().apActive() || ble_state.scanning ||
+                           ble_state.pairing_passkey_valid)},
   });
   const JsonValue capabilities = JsonValue::makeObject({
       {"frontlight", JsonValue::makeBool(cap.frontlight)},
       {"battery", JsonValue::makeBool(cap.battery)},
       {"bluetooth", JsonValue::makeBool(cap.bluetooth)},
-      {"ble_provisioning", JsonValue::makeBool(cap.ble_provisioning)},
+      {"ble_admin", JsonValue::makeBool(cap.ble_admin)},
       {"ble_observer", JsonValue::makeBool(cap.ble_observer)},
       {"display", JsonValue::makeBool(cap.display)},
       {"sd", JsonValue::makeBool(cap.sd)},
@@ -1261,8 +1341,16 @@ esp_err_t h_settings_get(httpd_req_t* req) {
       {"compiled", JsonValue::makeBool(ble_state.compiled)},
       {"stack_active", JsonValue::makeBool(ble_state.stack_active)},
       {"role", JsonValue::makeString(ble::roleName(ble_state.role))},
-      {"provisioning_state", JsonValue::makeString(ble::provisionStateName(ble_state.provisioning))},
-      {"provisioning_remaining_s", JsonValue::makeInt(ble_state.provisioning_remaining_s)},
+      {"admin_enabled", JsonValue::makeBool(snap.values.ble_admin_enabled)},
+      {"admin_allowed", JsonValue::makeBool(ble_state.admin_allowed)},
+      {"advertising", JsonValue::makeBool(ble_state.advertising)},
+      {"link", JsonValue::makeString(ble::linkStateName(ble_state.link))},
+      {"pairing_locked", JsonValue::makeBool(ble_state.pairing_locked)},
+      {"bonds", JsonValue::makeInt(ble_state.bonds)},
+      {"att_mtu", JsonValue::makeInt(ble_state.att_mtu)},
+      {"device_name", JsonValue::makeString(ble_state.device_name)},
+      {"tunnel_messages", JsonValue::makeInt(ble_state.tunnel_messages)},
+      {"tunnel_errors", JsonValue::makeInt(ble_state.tunnel_errors)},
       {"observer_enabled", JsonValue::makeBool(snap.values.ble_observer_enabled)},
       {"observer_remaining_s", JsonValue::makeInt(ble_state.observer_remaining_s)},
       {"recovery_ap_active", JsonValue::makeBool(ble_state.recovery_ap_active)},
@@ -1792,7 +1880,19 @@ esp_err_t h_ingest_rotate(httpd_req_t* req) {
 // GET / and /loader.js: zero-data loader for the externally hosted React app.
 // The page CSP allows scripts/styles from EEGO_WEB_APP_ORIGIN only.
 // ---------------------------------------------------------------------------
+esp_err_t redirectToWifiDiag(httpd_req_t* req) {
+  httpd_resp_set_status(req, "302 Found");
+  httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/wifi-diag");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_send(req, "", 0);
+  return ESP_OK;
+}
+
 esp_err_t h_root_page(httpd_req_t* req) {
+  // 恢复热点上的手机没有外网：直接给离线 WiFi 页（可添加网络），不给加载器。
+  if (ProvisionPortal::instance().isApFallbackActive() && viaSetupHotspot(req)) {
+    return redirectToWifiDiag(req);
+  }
   return sendStatic(req, "text/html; charset=utf-8", pages::kLoaderHtml, pages::kLoaderCsp);
 }
 esp_err_t h_loader_js(httpd_req_t* req) {
@@ -1850,6 +1950,58 @@ esp_err_t h_display_snapshot(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
+// 慢请求异步化：出网测试/抓取（≤12s）与渲染预览（≤15s，要等 app_task 刷屏）若在
+// httpd 任务里同步等待，期间其它请求（页面、状态轮询）全部排队，网页表现为卡死。
+// 这类请求交给单独的工作任务处理（httpd_req_async_handler_begin 接管连接），
+// httpd 任务立即返回继续服务其它连接。工作任务串行处理，队列满时 503。
+// ---------------------------------------------------------------------------
+struct AsyncJob {
+  httpd_req_t* req;
+  char path[64];
+};
+QueueHandle_t g_async_queue = nullptr;
+
+void asyncWorker(void*) {
+  AsyncJob job;
+  for (;;) {
+    if (xQueueReceive(g_async_queue, &job, portMAX_DELAY) != pdTRUE) continue;
+    internal::handleDashboardApi(job.req, job.path);
+    httpd_req_async_handler_complete(job.req);
+  }
+}
+
+bool asyncDashboardPath(const char* path) {
+  return strcmp(path, "dashboard/sources/test") == 0 ||
+         strcmp(path, "dashboard/sources/probe") == 0 ||
+         strcmp(path, "dashboard/render-preview") == 0;
+}
+
+esp_err_t handleDashboardMaybeAsync(httpd_req_t* req, const std::string& path) {
+  if (!asyncDashboardPath(path.c_str()) || path.size() >= sizeof(AsyncJob::path)) {
+    return internal::handleDashboardApi(req, path.c_str());
+  }
+  if (g_async_queue == nullptr) {
+    g_async_queue = xQueueCreate(4, sizeof(AsyncJob));
+    if (g_async_queue == nullptr ||
+        xTaskCreate(&asyncWorker, "admin_async", 8192, nullptr, 5, nullptr) != pdPASS) {
+      if (g_async_queue != nullptr) vQueueDelete(g_async_queue);
+      g_async_queue = nullptr;
+      return internal::handleDashboardApi(req, path.c_str());  // 退化为同步处理
+    }
+  }
+  AsyncJob job{};
+  strncpy(job.path, path.c_str(), sizeof(job.path) - 1);
+  if (httpd_req_async_handler_begin(req, &job.req) != ESP_OK) {
+    return internal::handleDashboardApi(req, path.c_str());
+  }
+  if (xQueueSend(g_async_queue, &job, 0) != pdTRUE) {
+    sendError(job.req, 503, errc::kUnavailable, "device busy, try again");
+    httpd_req_async_handler_complete(job.req);
+  }
+  return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
 // 路由分发（/api/v1/*；M13 定稿路由表；其余一切 → 404 JSON，含 /firmware/*）
 // ---------------------------------------------------------------------------
 esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
@@ -1882,7 +2034,7 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     if (!bearer()) return ESP_OK;
     const std::string canonical_path = internal::canonicalDashboardApiPath(path);
     if (m == HTTP_GET) {
-      if (!rateLimit(req, "get:" + clientIp(req), 60, 60)) return ESP_OK;
+      if (!rateLimit(req, "get:" + clientIp(req), 60, 300)) return ESP_OK;
     } else if (m == HTTP_POST && strcmp(canonical_path.c_str(), "dashboard/sources/test") == 0) {
       if (!rateLimit(req, "dashboard-test:" + token.substr(0, 8), 60, 5)) return ESP_OK;
     } else if (m == HTTP_POST && strcmp(canonical_path.c_str(), "dashboard/sources/probe") == 0) {
@@ -1894,11 +2046,15 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     } else if (!rateLimit(req, "dashboard-write:" + token.substr(0, 8), 60, 30)) {
       return ESP_OK;
     }
-    return internal::handleDashboardApi(req, canonical_path.c_str());
+    return handleDashboardMaybeAsync(req, canonical_path);
   }
 
   if (m == HTTP_GET) {
-    if (!rateLimit(req, "get:" + clientIp(req), 60, 60)) return ESP_OK;  // GET 60/min/IP
+    // 被动轮询（状态/诊断）单独计数，不挤占页面加载的 GET 预算。
+    const bool poll = strcmp(path, "status") == 0 || strcmp(path, "wifi/diag") == 0;
+    if (!rateLimit(req, (poll ? "poll:" : "get:") + clientIp(req), 60, poll ? 120 : 300)) {
+      return ESP_OK;
+    }
     if (strcmp(path, "status") == 0) {
       if (!requireBearer(req, token, false)) return ESP_OK;  // 被动轮询：不计活动
       return h_status(req);
@@ -2039,6 +2195,11 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
       if (!rateLimit(req, "keep-awake:" + token.substr(0, 8), 60, 30)) return ESP_OK;
       return h_keep_awake_post(req);
     }
+    if (strcmp(path, "device/time") == 0) {
+      if (!bearer()) return ESP_OK;
+      if (!rateLimit(req, "time:" + token.substr(0, 8), 60, 6)) return ESP_OK;
+      return h_device_time(req);
+    }
     if (strcmp(path, "device/screen") == 0) {
       if (!bearer()) return ESP_OK;
       if (!rateLimit(req, "screen:" + token.substr(0, 8), 60, 60)) return ESP_OK;
@@ -2126,6 +2287,12 @@ esp_err_t wildcardHandler(httpd_req_t* req) {
     if (query != std::string::npos) path.resize(query);
     return apiDispatch(req, path.c_str());
   }
+  // 恢复热点 + DNS 劫持：手机的联网检测（generate_204、hotspot-detect.html 等）
+  // 落到这里，302 到离线 WiFi 页以弹出 captive portal。
+  if (req->method == HTTP_GET && ProvisionPortal::instance().isApFallbackActive() &&
+      viaSetupHotspot(req)) {
+    return redirectToWifiDiag(req);
+  }
   // 含 /api/v1/firmware/* 在内的一切未知路径 → 404 JSON（M13 T7：首版无远程 OTA）
   return sendError(req, 404, errc::kNotFound, "resource not found");
 }
@@ -2155,10 +2322,14 @@ esp_err_t startAdminApi(const AdminConfig& cfg) {
   config.server_port = cfg.port;
   config.max_uri_handlers = 12;
   config.stack_size = 8192;       // M12 任务表：httpd 8KB
-  config.max_open_sockets = 5;    // lwIP 预算（M13 T6；httpd 内部另占 3）
+  config.max_open_sockets = 7;    // lwIP 预算（httpd 内部另占 3；CONFIG_LWIP_MAX_SOCKETS=16）
   config.recv_wait_timeout = 5;   // 慢速 POST 5s 断开（M13 T6）
   config.lru_purge_enable = true;
-  config.keep_alive_enable = false;  // 无 keep-alive（M13 传输约定）
+  // keep-alive：弱信号下每个请求重新握手要多花 1 个以上 RTT；空闲连接由 LRU 回收。
+  config.keep_alive_enable = true;
+  config.keep_alive_idle = 5;
+  config.keep_alive_interval = 5;
+  config.keep_alive_count = 3;
   config.uri_match_fn = httpd_uri_match_wildcard;
 
   esp_err_t err = httpd_start(&g_server, &config);
@@ -2181,6 +2352,11 @@ esp_err_t startAdminApi(const AdminConfig& cfg) {
 }
 
 bool adminApiRunning() { return g_server != nullptr; }
+
+void setTimeSetter(TimeSetter setter) {
+  std::lock_guard<std::mutex> lock(g_time_mutex);
+  g_time_setter = std::move(setter);
+}
 
 void setDisplaySnapshotProvider(DisplaySnapshotProvider provider) {
   std::lock_guard<std::mutex> lock(g_snapshot_mutex);

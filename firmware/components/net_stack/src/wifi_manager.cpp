@@ -651,6 +651,7 @@ bool WifiManager::serviceLink(int64_t now_ms) {
 }
 
 bool WifiManager::roam(const std::vector<WifiAccount>& accounts) {
+  if (nowMs() < roam_defer_until_ms_.load()) return false;  // 不计入限速，下次到期再评估
   RadioLock radio(radio_mutex_, 0);
   if (!radio.held || state_ != WifiState::Connected) return false;
   {

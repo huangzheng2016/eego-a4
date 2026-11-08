@@ -271,8 +271,15 @@ int pickRoamTarget(const uint8_t current_bssid[6], int current_rssi,
 
 // MIN_MODEM 只用于电池交互窗口；常供电或保持唤醒一律 PS_NONE（弱信号下 modem
 // sleep 的 DTIM 唤醒延迟与漏 beacon 会显著放大丢包与时延）。
-constexpr bool wifiModemSleepWanted(bool mains, bool keep_awake, bool battery_interactive) {
-  return !mains && !keep_awake && battery_interactive;
+// 管理端正在使用（最近一次已认证请求在 kWifiAdminActiveMs 内）时同样 PS_NONE：
+// modem sleep 让每个入站包等 DTIM 信标，网页每个请求慢 0.5–1 秒。
+constexpr int64_t kWifiAdminActiveMs = 30000;
+constexpr bool wifiModemSleepWanted(bool mains, bool keep_awake, bool battery_interactive,
+                                    bool admin_active = false) {
+  return !mains && !keep_awake && !admin_active && battery_interactive;
+}
+constexpr bool wifiAdminActive(int64_t now_ms, int64_t last_admin_ms) {
+  return last_admin_ms > 0 && now_ms - last_admin_ms < kWifiAdminActiveMs;
 }
 
 // 已关联但 DHCP 慢（弱信号丢包）：单次尝试的截止至少延到关联后 kWifiDhcpGraceMs。
