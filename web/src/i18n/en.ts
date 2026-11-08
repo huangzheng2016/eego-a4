@@ -551,6 +551,8 @@ export const en: Record<keyof typeof zh, string> = {
   "sys.logs": "Logs",
   "sys.crash_title": "Last reboot was a crash in task {task}",
   "sys.device_log": "Device debug log",
+  "sys.task": "Task",
+  "sys.stack_free": "Free stack (bytes)",
   "sys.reboot": "Reboot device",
   "sys.rebooting": "Rebooting…",
   "sys.reset": "Factory reset",

@@ -11,6 +11,7 @@ idf_component_register(
     "src/sha1.cpp"
     "src/ulid.cpp"
     "src/time_util.cpp"
+    "src/json_writer.cpp"
     "src/types.cpp"
     "src/type_registry.cpp"
     "src/store.cpp"

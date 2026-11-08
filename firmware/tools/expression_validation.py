@@ -7,7 +7,10 @@ from __future__ import annotations
 from native_numeric import parse_finite_strtod
 
 MAX_NODES = 128
-MAX_DEPTH = 24
+# Matches dashboard_core/src/expression.cpp: kMaxDepth counts parentheses, ?:, unary
+# operators and call arguments; kMaxHeight bounds the parsed tree (evaluation recursion).
+MAX_DEPTH = 6
+MAX_HEIGHT = 24
 MAX_ARGUMENTS = 8
 MAX_CODEPOINTS = 512
 FUNCTIONS = {"abs", "min", "max", "clamp", "floor", "ceil", "round", "sqrt", "pow",
@@ -32,11 +35,23 @@ class Parser:
     def fail(self, message):
         if not self.error:
             self.error = f"{message} at expression byte {self.position}"
-        return False
+        return None
+
+    # Parse functions return the subtree height (>= 1) or None on failure.
+    def interior(self, *child_heights, count=True):
+        if count and not self.node():
+            return None
+        height = max(child_heights, default=0) + 1
+        if height > MAX_HEIGHT:
+            return self.fail("expression nesting exceeds limit")
+        return height
 
     def node(self):
         self.nodes += 1
-        return self.nodes <= MAX_NODES or self.fail("expression exceeds node limit")
+        return self.nodes <= MAX_NODES or self.fail("expression exceeds node limit") is not None
+
+    def leaf(self):
+        return 1 if self.node() else None
 
     def skip_whitespace(self):
         while self.position < len(self.expression) and self.expression[self.position] in " \t\r\n":
@@ -51,43 +66,54 @@ class Parser:
 
     def parse(self):
         if not self.expression:
-            return self.fail("expression is empty")
+            self.fail("expression is empty")
+            return False
         if len(self.expression) > MAX_CODEPOINTS:
-            return self.fail("expression exceeds code-point limit")
-        if not self.parse_conditional(0):
+            self.fail("expression exceeds code-point limit")
+            return False
+        if self.parse_conditional(0) is None:
             return False
         self.skip_whitespace()
         if self.position != len(self.expression):
-            return self.fail("unexpected token")
+            self.fail("unexpected token")
+            return False
         return True
 
     def parse_conditional(self, depth):
         if depth > MAX_DEPTH:
             return self.fail("expression nesting exceeds limit")
-        if not self.parse_or(depth):
-            return False
+        condition = self.parse_or(depth)
+        if condition is None:
+            return None
         if not self.match("?"):
-            return True
-        if not self.parse_conditional(depth + 1):
-            return False
+            return condition
+        then = self.parse_conditional(depth + 1)
+        if then is None:
+            return None
         if not self.match(":"):
             return self.fail("expected ':' in conditional expression")
-        if not self.parse_conditional(depth + 1):
-            return False
-        return self.node()
+        otherwise = self.parse_conditional(depth + 1)
+        if otherwise is None:
+            return None
+        return self.interior(condition, then, otherwise)
 
     def parse_binary(self, depth, next_parser, operators):
-        if not next_parser(depth):
-            return False
+        left = next_parser(depth)
+        if left is None:
+            return None
         while True:
             self.skip_whitespace()
             operation = next((candidate for candidate in operators
                               if self.expression.startswith(candidate, self.position)), "")
             if not operation:
-                return True
+                return left
             self.position += len(operation)
-            if not next_parser(depth) or not self.node():
-                return False
+            right = next_parser(depth)
+            if right is None:
+                return None
+            left = self.interior(left, right)
+            if left is None:
+                return None
 
     def parse_or(self, depth):
         return self.parse_binary(depth, self.parse_and, ("||",))
@@ -113,9 +139,10 @@ class Parser:
         self.skip_whitespace()
         if self.position < len(self.expression) and self.expression[self.position] in "!+-":
             self.position += 1
-            if not self.parse_unary(depth + 1):
-                return False
-            return self.node()
+            operand = self.parse_unary(depth + 1)
+            if operand is None:
+                return None
+            return self.interior(operand)
         return self.parse_primary(depth)
 
     def parse_number(self):
@@ -144,7 +171,7 @@ class Parser:
         accepted, _ = parse_finite_strtod(self.expression[start:self.position])
         if not accepted:
             return self.fail("numeric literal out of range")
-        return self.node()
+        return self.leaf()
 
     def parse_string(self):
         quote = self.expression[self.position]
@@ -154,7 +181,7 @@ class Parser:
             char = self.expression[self.position]
             self.position += 1
             if char == quote:
-                return self.node()
+                return self.leaf()
             if ord(char) < 0x20:
                 return self.fail("control character in string literal")
             if char == "\\":
@@ -182,9 +209,10 @@ class Parser:
             return self.parse_string()
         if char == "(":
             self.position += 1
-            if not self.parse_conditional(depth + 1):
-                return False
-            return self.match(")") or self.fail("expected ')'")
+            inner = self.parse_conditional(depth + 1)
+            if inner is None:
+                return None
+            return inner if self.match(")") else self.fail("expected ')'")
         if not _identifier_start(char):
             return self.fail("expected operand")
         start = self.position
@@ -199,26 +227,26 @@ class Parser:
             if name not in FUNCTIONS:
                 return self.fail("unknown function")
             self.position += 1
+            # The call node is counted before its arguments, like the device parser.
             if not self.node():
-                return False
+                return None
             self.skip_whitespace()
-            arguments = 0
+            heights = []
             if self.position < len(self.expression) and self.expression[self.position] == ")":
                 self.position += 1
-                return True
+                return self.interior(count=False)
             while True:
-                if not self.parse_conditional(depth + 1):
-                    return False
-                arguments += 1
-                if arguments > MAX_ARGUMENTS:
+                argument = self.parse_conditional(depth + 1)
+                if argument is None:
+                    return None
+                heights.append(argument)
+                if len(heights) > MAX_ARGUMENTS:
                     return self.fail("too many function arguments")
                 if self.match(")"):
-                    return True
+                    return self.interior(*heights, count=False)
                 if not self.match(","):
                     return self.fail("expected ',' or ')' in function call")
-        if name in ("true", "false", "null"):
-            return self.node()
-        return self.node()
+        return self.leaf()
 
 
 def validate_expression_syntax(expression):

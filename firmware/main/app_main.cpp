@@ -10,6 +10,7 @@
 #include "eego_hal.h"
 #include "eego_ui.h"
 
+#include <vector>
 #include <cstdio>
 #include <cstring>
 #include <strings.h>  // strcasecmp
@@ -279,15 +280,16 @@ void tryLoadUiFont() {
   }
   if (eego::FontManager::instance().loadUiFontEmbedded()) return;
   if (!eego::SdCard::instance().ready()) return;
-  eego::SdCard::DirEntry entries[16];
-  const int n = eego::SdCard::instance().listDir("/", entries, 16);
+  // 16 x 264 B: on the heap, not the caller's stack.
+  std::vector<eego::SdCard::DirEntry> entries(16);
+  const int n = eego::SdCard::instance().listDir("/", entries.data(), 16);
   for (int i = 0; i < n; i++) {
     if (entries[i].isDir) continue;
     const char* dot = strrchr(entries[i].name, '.');
     if (!dot) continue;
     if (strcasecmp(dot, ".eefont") != 0 && strcasecmp(dot, ".bin") != 0) continue;
     char path[258];  // '/' + name(255) + NUL
-    snprintf(path, sizeof(path), "/%s", entries[i].name);
+    snprintf(path, sizeof(path), "/%.255s", entries[i].name);
     if (eego::FontManager::instance().loadUiFont(path)) {
       ESP_LOGI(TAG, "UI font loaded: %s", path);
       return;

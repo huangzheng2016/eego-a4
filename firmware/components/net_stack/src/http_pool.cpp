@@ -210,7 +210,7 @@ struct HttpPool::Impl {
         s->scheme == "https" ? HTTP_TRANSPORT_OVER_SSL : HTTP_TRANSPORT_OVER_TCP;
     if (s->scheme == "https" && s->tls_verify) cfg.crt_bundle_attach = esp_crt_bundle_attach;
     cfg.timeout_ms = 20000;
-    cfg.buffer_size = 4096;
+    cfg.buffer_size = 2048;
     cfg.buffer_size_tx = 2048;
     cfg.keep_alive_enable = true;
     cfg.event_handler = &Impl::httpEventHandler;

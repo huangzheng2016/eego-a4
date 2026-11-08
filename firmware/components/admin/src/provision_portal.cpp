@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 #include "admin/provision_portal.h"
+#include "alert_core/json_writer.h"
+
+#include "admin/admin_commands.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +19,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
@@ -37,6 +41,7 @@ httpd_handle_t g_portal_server = nullptr;
 int g_dns_sock = -1;
 TaskHandle_t g_dns_task = nullptr;
 volatile bool g_dns_running = false;
+SemaphoreHandle_t g_dns_exited = nullptr;  // given by dnsTask right before it deletes itself
 
 const char* failReasonText(uint8_t reason) { return net::wifiReasonText(reason); }
 
@@ -83,10 +88,14 @@ void dnsTask(void* arg) {
            reinterpret_cast<struct sockaddr*>(&src), src_len);
   }
   ADMIN_LOG_INFO("dns hijack stopped");
+  if (g_dns_exited != nullptr) xSemaphoreGive(g_dns_exited);
   vTaskDelete(nullptr);
 }
 
 void startDnsHijack() {
+  if (g_dns_task != nullptr) return;  // already running
+  if (g_dns_exited == nullptr) g_dns_exited = xSemaphoreCreateBinary();
+  if (g_dns_exited != nullptr) xSemaphoreTake(g_dns_exited, 0);
   g_dns_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (g_dns_sock < 0) {
     ADMIN_LOG_ERROR("dns socket create failed");
@@ -107,6 +116,7 @@ void startDnsHijack() {
   setsockopt(g_dns_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   g_dns_running = true;
   if (xTaskCreate(&dnsTask, "admin_dns", 4096, nullptr, 5, &g_dns_task) != pdPASS) {
+    g_dns_task = nullptr;
     g_dns_running = false;
     close(g_dns_sock);
     g_dns_sock = -1;
@@ -115,11 +125,14 @@ void startDnsHijack() {
 
 void stopDnsHijack() {
   g_dns_running = false;
-  if (g_dns_sock >= 0) {
-    shutdown(g_dns_sock, SHUT_RDWR);
-    close(g_dns_sock);
-    g_dns_sock = -1;
+  const int sock = g_dns_sock;
+  if (sock >= 0) shutdown(sock, SHUT_RDWR);  // wakes recvfrom; the task then exits
+  if (g_dns_task != nullptr && g_dns_exited != nullptr) {
+    // recvfrom has a 1 s timeout, so the task is gone well within this wait.
+    xSemaphoreTake(g_dns_exited, pdMS_TO_TICKS(2500));
   }
+  if (sock >= 0) close(sock);
+  g_dns_sock = -1;
   g_dns_task = nullptr;
 }
 
@@ -167,11 +180,11 @@ esp_err_t p_scan(httpd_req_t* req) {
   using alert_core::JsonValue;
   JsonValue::Array arr;
   for (const net::WifiScanEntry& e : diag.scan) {
-    arr.push_back(JsonValue::makeObject({
-        {"ssid", JsonValue::makeString(e.ssid)},
-        {"rssi", JsonValue::makeInt(e.rssi)},
-        {"secure", JsonValue::makeBool(e.authmode != WIFI_AUTH_OPEN)},
-    }));
+    arr.push_back(::eego::json::ObjectWriter(3)
+        .string("ssid", e.ssid)
+        .integer("rssi", e.rssi)
+        .boolean("secure", e.authmode != WIFI_AUTH_OPEN)
+        .take());
   }
   httpd_resp_set_type(req, "application/json; charset=utf-8");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -223,7 +236,7 @@ esp_err_t p_connect(httpd_req_t* req) {
   alert_core::JsonValue root;
   alert_core::JsonParseError perr;
   std::string ssid, pass, admin_pass;
-  if (!alert_core::jsonParse(body, root, perr) ||
+  if (!alert_core::jsonParse(body, root, perr, 4) ||
       root.type() != alert_core::JsonValue::Type::Object) {
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"state\":\"fail\",\"reason\":\"请求格式错误\"}",
@@ -324,14 +337,12 @@ esp_err_t p_status(httpd_req_t* req) {
     default: st = "idle"; break;
   }
   using alert_core::JsonValue;
-  const std::string body = JsonValue::makeObject({
-                                     {"state", JsonValue::makeString(st)},
-                                     {"reason", JsonValue::makeString(p.provReason())},
-                                     {"ip", JsonValue::makeString(p.provIp())},
-                                     {"window_remaining_s",
-                                      JsonValue::makeInt(
-                                          static_cast<int64_t>(p.windowRemainingMs() / 1000))},
-                                 })
+  const std::string body = ::eego::json::ObjectWriter(4)
+      .string("state", st)
+      .string("reason", p.provReason())
+      .string("ip", p.provIp())
+      .integer("window_remaining_s", static_cast<int64_t>(p.windowRemainingMs() / 1000))
+      .take()
                                  .toString();
   httpd_resp_set_type(req, "application/json; charset=utf-8");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -392,7 +403,7 @@ esp_err_t p_not_found(httpd_req_t* req) {
   return ESP_OK;
 }
 
-void windowTimerCallback(void* arg) {
+void windowExpired() {
   ProvisionPortal& p = ProvisionPortal::instance();
   if (p.isOpen()) {
     ADMIN_LOG_WARN("provision window expired; portal closing");
@@ -401,6 +412,17 @@ void windowTimerCallback(void* arg) {
     ADMIN_LOG_WARN("ap fallback window expired; AP closing");
     p.closeApFallback("expired");
   }
+}
+
+// esp_timer callbacks only hand the work to app_task: closing the portal stops httpd,
+// changes the WiFi mode and logs, which is too much for the esp_timer task.
+void windowTimerCallback(void*) {
+  if (!postDeferred(&windowExpired)) windowExpired();
+}
+
+void connectTimeoutCallback(void*) {
+  auto run = [] { ProvisionPortal::instance().checkConnectTimeout(); };
+  if (!postDeferred(run)) run();
 }
 
 }  // namespace
@@ -473,7 +495,7 @@ void ProvisionPortal::stopAp() {
 void ProvisionPortal::startWindowTimer(bool idle_reset) {
   if (window_timer_ == nullptr) {
     const esp_timer_create_args_t args = {
-        .callback = &windowTimerCallback, .name = "admin_window"};
+        .callback = &windowTimerCallback, .arg = nullptr, .dispatch_method = ESP_TIMER_TASK, .name = "admin_window", .skip_unhandled_events = false};
     if (esp_timer_create(&args, reinterpret_cast<esp_timer_handle_t*>(&window_timer_)) !=
         ESP_OK) {
       window_timer_ = nullptr;
@@ -536,7 +558,7 @@ esp_err_t ProvisionPortal::open() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 80;
   config.max_uri_handlers = 16;
-  config.stack_size = 6144;
+  config.stack_size = 12288;  // /api/v1/wifi/diag builds a large JSON document
   config.max_open_sockets = 5;
   config.recv_wait_timeout = 5;
   config.lru_purge_enable = true;
@@ -558,19 +580,19 @@ esp_err_t ProvisionPortal::open() {
   }
 
   const httpd_uri_t routes[] = {
-      {.uri = "/", .method = HTTP_GET, .handler = &p_root},
-      {.uri = "/portal.js", .method = HTTP_GET, .handler = &p_js},
-      {.uri = "/portal.css", .method = HTTP_GET, .handler = &p_css},
-      {.uri = "/scan", .method = HTTP_GET, .handler = &p_scan},
-      {.uri = "/connect", .method = HTTP_POST, .handler = &p_connect},
-      {.uri = "/status", .method = HTTP_GET, .handler = &p_status},
-      {.uri = "/wifi-diag", .method = HTTP_GET, .handler = &p_diag_page},
-      {.uri = "/wifi-diag.js", .method = HTTP_GET, .handler = &p_diag_js},
-      {.uri = "/wifi-diag.css", .method = HTTP_GET, .handler = &p_diag_css},
-      {.uri = "/api/v1/wifi/diag", .method = HTTP_GET, .handler = &p_diag_json},
-      {.uri = "/api/v1/wifi/retry", .method = HTTP_POST, .handler = &p_diag_action},
-      {.uri = "/api/v1/wifi/scan", .method = HTTP_POST, .handler = &p_diag_action},
-      {.uri = "/*", .method = HTTP_GET, .handler = &p_not_found},
+      {.uri = "/", .method = HTTP_GET, .handler = &p_root, .user_ctx = nullptr},
+      {.uri = "/portal.js", .method = HTTP_GET, .handler = &p_js, .user_ctx = nullptr},
+      {.uri = "/portal.css", .method = HTTP_GET, .handler = &p_css, .user_ctx = nullptr},
+      {.uri = "/scan", .method = HTTP_GET, .handler = &p_scan, .user_ctx = nullptr},
+      {.uri = "/connect", .method = HTTP_POST, .handler = &p_connect, .user_ctx = nullptr},
+      {.uri = "/status", .method = HTTP_GET, .handler = &p_status, .user_ctx = nullptr},
+      {.uri = "/wifi-diag", .method = HTTP_GET, .handler = &p_diag_page, .user_ctx = nullptr},
+      {.uri = "/wifi-diag.js", .method = HTTP_GET, .handler = &p_diag_js, .user_ctx = nullptr},
+      {.uri = "/wifi-diag.css", .method = HTTP_GET, .handler = &p_diag_css, .user_ctx = nullptr},
+      {.uri = "/api/v1/wifi/diag", .method = HTTP_GET, .handler = &p_diag_json, .user_ctx = nullptr},
+      {.uri = "/api/v1/wifi/retry", .method = HTTP_POST, .handler = &p_diag_action, .user_ctx = nullptr},
+      {.uri = "/api/v1/wifi/scan", .method = HTTP_POST, .handler = &p_diag_action, .user_ctx = nullptr},
+      {.uri = "/*", .method = HTTP_GET, .handler = &p_not_found, .user_ctx = nullptr},
   };
   for (const auto& r : routes) {
     httpd_register_uri_handler(g_portal_server, &r);
@@ -649,8 +671,9 @@ void ProvisionPortal::checkConnectTimeout() {
 void ProvisionPortal::armConnectTimer() {
   if (connect_timer_ == nullptr) {
     const esp_timer_create_args_t args = {
-        .callback = [](void*) { ProvisionPortal::instance().checkConnectTimeout(); },
-        .name = "prov_connect"};
+        .callback = &connectTimeoutCallback, .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK, .name = "prov_connect",
+        .skip_unhandled_events = false};
     if (esp_timer_create(&args, reinterpret_cast<esp_timer_handle_t*>(&connect_timer_)) !=
         ESP_OK) {
       connect_timer_ = nullptr;
@@ -710,7 +733,7 @@ void ProvisionPortal::onConnectSucceeded(const std::string& ip) {
   static esp_timer_handle_t reboot_timer = nullptr;
   if (reboot_timer == nullptr) {
     const esp_timer_create_args_t args = {
-        .callback = [](void*) { esp_restart(); }, .name = "prov_reboot"};
+        .callback = [](void*) { esp_restart(); }, .arg = nullptr, .dispatch_method = ESP_TIMER_TASK, .name = "prov_reboot", .skip_unhandled_events = false};
     esp_timer_create(&args, &reboot_timer);
   }
   esp_timer_start_once(reboot_timer, static_cast<int64_t>(kRebootDelayMs) * 1000);

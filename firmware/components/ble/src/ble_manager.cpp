@@ -552,7 +552,7 @@ void BleManager::onLinkLost() {
   TunnelHandler handler;
   {
     RxLock rx(rx_mutex_);
-    if (rx_ != nullptr) rx_->reset();
+    resetRxLocked();
     handler = handler_;
   }
   if (tx_sem_ != nullptr) xSemaphoreGive(static_cast<SemaphoreHandle_t>(tx_sem_));
@@ -642,7 +642,7 @@ int BleManager::onConnEvent(struct ble_gap_event* event, void* arg) {
         TunnelHandler handler;
         {
           RxLock rx(self->rx_mutex_);
-          if (self->rx_ != nullptr) self->rx_->reset();
+          self->resetRxLocked();
           handler = self->handler_;
         }
         if (!self->link_up_notified_.exchange(true) && handler.onLinkUp != nullptr) {
@@ -774,6 +774,7 @@ void BleManager::handleRx(uint16_t conn, const uint8_t* data, size_t len) {
       msg_len = rx_->size();
       head_len = rx_->headLen();
       msg_id = rx_->id();
+      rx_lent_ = true;
     }
     handler = handler_;
   }
@@ -806,7 +807,14 @@ void BleManager::handleRx(uint16_t conn, const uint8_t* data, size_t len) {
 
 void BleManager::releaseMessage() {
   RxLock rx(rx_mutex_);
+  rx_lent_ = false;
   if (rx_ != nullptr && rx_->complete()) rx_->release();
+}
+
+void BleManager::resetRxLocked() {
+  // A message lent to the bridge stays allocated (state Complete, new frames get "busy")
+  // until the bridge calls releaseMessage().
+  if (rx_ != nullptr && !rx_lent_) rx_->reset();
 }
 
 bool BleManager::notifyFrame(uint16_t conn, const uint8_t* frame, size_t len, int64_t deadline_ms) {

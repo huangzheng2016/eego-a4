@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "admin/ble_bridge.h"
+#include "alert_core/json_writer.h"
 
 #include <cstring>
 #include <string>
@@ -97,8 +98,10 @@ void refreshInfo() {
 void reply(uint8_t id, int status, const JsonValue::Object& headers, const uint8_t* body,
            size_t body_len) {
   const std::string head =
-      JsonValue::makeObject({{"s", JsonValue::makeInt(status)},
-                             {"h", JsonValue::makeObject(headers)}})
+      ::eego::json::ObjectWriter(2)
+          .integer("s", status)
+          .value("h", ::eego::json::JsonValue(JsonValue::makeObject(headers)))
+          .take()
           .toString();
   const esp_err_t err = ble::BleManager::instance().sendMessage(
       id, reinterpret_cast<const uint8_t*>(head.data()), static_cast<uint16_t>(head.size()), body,
@@ -114,8 +117,10 @@ void replyJson(uint8_t id, int status, const std::string& json) {
 void replyError(uint8_t id, int status, const char* code, const std::string& message) {
   const std::string json =
       JsonValue::makeObject(
-          {{"error", JsonValue::makeObject({{"code", JsonValue::makeString(code)},
-                                            {"message", JsonValue::makeString(message)}})}})
+          {{"error", ::eego::json::ObjectWriter(2)
+              .string("code", code)
+              .string("message", message)
+              .take()}})
           .toString();
   replyJson(id, status, json);
 }
@@ -135,7 +140,8 @@ bool parseRequest(const Msg& m, Request& out, std::string& error) {
   JsonValue root;
   alert_core::JsonParseError perr;
   const std::string_view head(reinterpret_cast<const char*>(m.data), m.head_len);
-  if (!alert_core::jsonParse(head, root, perr) || root.type() != JsonValue::Type::Object) {
+  // Head is {m,p,h:{...},t}: depth 2; 3 leaves room without deep recursion.
+  if (!alert_core::jsonParse(head, root, perr, 3) || root.type() != JsonValue::Type::Object) {
     error = "invalid request head";
     return false;
   }
@@ -337,7 +343,7 @@ void handleSetup(uint8_t id, const Request& r) {
   JsonValue root;
   alert_core::JsonParseError perr;
   const std::string_view text(reinterpret_cast<const char*>(r.body), r.body_len);
-  if (r.body_len > 4096 || !alert_core::jsonParse(text, root, perr) ||
+  if (r.body_len > 4096 || !alert_core::jsonParse(text, root, perr, 4) ||
       root.type() != JsonValue::Type::Object) {
     replyError(id, 400, errc::kInvalidRequest, "invalid JSON");
     return;

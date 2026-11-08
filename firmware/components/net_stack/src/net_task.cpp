@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "net_stack/net_task.h"
 
+#include <cstdint>
 #include <algorithm>
 #include <cstring>
 #include <ctime>
@@ -462,17 +463,15 @@ esp_err_t NetStack::start(const NetStackConfig& cfg, alert_core::AlertStore* sto
 
   mbedtls_platform_set_calloc_free(
       [](size_t n, size_t size) -> void* {
+        if (size != 0 && n > SIZE_MAX / size) return nullptr;
+        // Small TLS blocks prefer internal RAM (speed) through the default heap, so they
+        // never consume the internal reserve kept for DMA; everything else uses PSRAM.
         if (n * size <= 4096) {
-          void* p = heap_caps_malloc(n * size, MALLOC_CAP_INTERNAL);
-          if (p) {
-            memset(p, 0, n * size);
-            return p;
-          }
+          return heap_caps_calloc_prefer(n, size, 2, MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL,
+                                         MALLOC_CAP_DEFAULT | MALLOC_CAP_SPIRAM);
         }
-        void* p = heap_caps_malloc(n * size, MALLOC_CAP_SPIRAM);
-        if (!p) p = heap_caps_malloc(n * size, MALLOC_CAP_INTERNAL);
-        if (p) memset(p, 0, n * size);
-        return p;
+        return heap_caps_calloc_prefer(n, size, 2, MALLOC_CAP_DEFAULT | MALLOC_CAP_SPIRAM,
+                                       MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL);
       },
       heap_caps_free);
 

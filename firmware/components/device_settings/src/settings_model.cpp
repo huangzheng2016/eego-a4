@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "device_settings/settings_model.h"
 
+#include "alert_core/json_writer.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -88,32 +90,31 @@ size_t bleValueWidth(BleValueType type) {
 }
 
 JsonValue fieldToJson(const BleFieldMap& field) {
-  return JsonValue::makeObject({
-      {"name", JsonValue::makeString(field.name)},
-      {"offset", JsonValue::makeInt(field.offset)},
-      {"type", JsonValue::makeString(bleValueTypeName(field.type))},
-      {"scale", JsonValue::makeDouble(field.scale)},
-  });
+  eego::json::ObjectWriter w(4);
+  w.string("name", field.name);
+  w.integer("offset", field.offset);
+  w.string("type", bleValueTypeName(field.type));
+  w.number("scale", field.scale);
+  return w.take();
 }
 
 JsonValue ruleToJson(const BleObserverRule& rule) {
   JsonValue::Array fields;
   for (const auto& field : rule.fields) fields.push_back(fieldToJson(field));
-  JsonValue::Object object{
-      {"id", JsonValue::makeString(rule.id)},
-      {"event_type", JsonValue::makeString(rule.event_type)},
-      {"title", JsonValue::makeString(rule.title)},
-      {"payload_offset", JsonValue::makeInt(rule.payload_offset)},
-      {"payload_match", JsonValue::makeString(bleBytesToHex(rule.payload_match))},
-      {"fields", JsonValue::makeArray(std::move(fields))},
-      {"ttl_s", JsonValue::makeInt(rule.ttl_s)},
-  };
+  eego::json::ObjectWriter w(8);
+  w.string("id", rule.id);
+  w.string("event_type", rule.event_type);
+  w.string("title", rule.title);
+  w.integer("payload_offset", rule.payload_offset);
+  w.string("payload_match", bleBytesToHex(rule.payload_match));
+  w.value("fields", JsonValue::makeArray(std::move(fields)));
+  w.integer("ttl_s", rule.ttl_s);
   if (rule.manufacturer_id >= 0) {
-    object.emplace_back("manufacturer_id", JsonValue::makeInt(rule.manufacturer_id));
+    w.integer("manufacturer_id", rule.manufacturer_id);
   } else {
-    object.emplace_back("service_uuid", JsonValue::makeString(rule.service_uuid));
+    w.string("service_uuid", rule.service_uuid);
   }
-  return JsonValue::makeObject(std::move(object));
+  return w.take();
 }
 
 bool parseField(const JsonValue& value, const std::string& path, BleFieldMap& out,
@@ -377,36 +378,36 @@ bool bleBytesFromHex(const std::string& text, std::vector<uint8_t>& out) {
 JsonValue toJson(const Settings& s) {
   JsonValue::Array rules;
   for (const auto& rule : s.ble_observer_rules) rules.push_back(ruleToJson(rule));
-  return JsonValue::makeObject({
-      {"schema_version", JsonValue::makeInt(kSchemaVersion)},
-      {"language", JsonValue::makeString(s.language)},
-      {"power_mode", JsonValue::makeString(powerModeName(s.power_mode))},
-      {"charge_signal", JsonValue::makeString(chargeSignalName(s.charge_signal))},
-      {"data_refresh_s", JsonValue::makeInt(s.data_refresh_s)},
-      {"battery_refresh_min", JsonValue::makeInt(s.battery_refresh_min)},
-      {"battery_max_stale_min", JsonValue::makeInt(s.battery_max_stale_min)},
-      {"battery_interactive_timeout_s", JsonValue::makeInt(s.battery_interactive_timeout_s)},
-      {"sleep_start_min", JsonValue::makeInt(s.sleep_start_min)},
-      {"sleep_end_min", JsonValue::makeInt(s.sleep_end_min)},
-      {"timezone_offset_min", JsonValue::makeInt(s.timezone_offset_min)},
-      {"frontlight_enabled", JsonValue::makeBool(s.frontlight_enabled)},
-      {"frontlight_brightness", JsonValue::makeInt(s.frontlight_brightness)},
-      {"frontlight_warmth", JsonValue::makeInt(s.frontlight_warmth)},
-      {"frontlight_hardware", JsonValue::makeString(frontlightHardwareName(s.frontlight_hardware))},
-      {"epd_full_refresh_s", JsonValue::makeInt(s.epd_full_refresh_s)},
-      {"idle_after_min", JsonValue::makeInt(s.idle_after_min)},
-      {"idle_refresh_min", JsonValue::makeInt(s.idle_refresh_min)},
-      {"idle_critical_immediate", JsonValue::makeBool(s.idle_critical_immediate)},
-      {"keep_awake_min", JsonValue::makeInt(s.keep_awake_min)},
-      {"screen_rotate_min", JsonValue::makeInt(s.screen_rotate_min)},
-      {"diagnostics_enabled", JsonValue::makeBool(s.diagnostics_enabled)},
-      {"ble_admin_enabled", JsonValue::makeBool(s.ble_admin_enabled)},
-      {"ble_observer_enabled", JsonValue::makeBool(s.ble_observer_enabled)},
-      {"ble_observer_window_s", JsonValue::makeInt(s.ble_observer_window_s)},
-      {"ble_observer_interval_s", JsonValue::makeInt(s.ble_observer_interval_s)},
-      {"ble_observer_dedup_ms", JsonValue::makeInt(s.ble_observer_dedup_ms)},
-      {"ble_observer_rules", JsonValue::makeArray(std::move(rules))},
-  });
+  eego::json::ObjectWriter w(28);
+  w.integer("schema_version", kSchemaVersion);
+  w.string("language", s.language);
+  w.string("power_mode", powerModeName(s.power_mode));
+  w.string("charge_signal", chargeSignalName(s.charge_signal));
+  w.integer("data_refresh_s", s.data_refresh_s);
+  w.integer("battery_refresh_min", s.battery_refresh_min);
+  w.integer("battery_max_stale_min", s.battery_max_stale_min);
+  w.integer("battery_interactive_timeout_s", s.battery_interactive_timeout_s);
+  w.integer("sleep_start_min", s.sleep_start_min);
+  w.integer("sleep_end_min", s.sleep_end_min);
+  w.integer("timezone_offset_min", s.timezone_offset_min);
+  w.boolean("frontlight_enabled", s.frontlight_enabled);
+  w.integer("frontlight_brightness", s.frontlight_brightness);
+  w.integer("frontlight_warmth", s.frontlight_warmth);
+  w.string("frontlight_hardware", frontlightHardwareName(s.frontlight_hardware));
+  w.integer("epd_full_refresh_s", s.epd_full_refresh_s);
+  w.integer("idle_after_min", s.idle_after_min);
+  w.integer("idle_refresh_min", s.idle_refresh_min);
+  w.boolean("idle_critical_immediate", s.idle_critical_immediate);
+  w.integer("keep_awake_min", s.keep_awake_min);
+  w.integer("screen_rotate_min", s.screen_rotate_min);
+  w.boolean("diagnostics_enabled", s.diagnostics_enabled);
+  w.boolean("ble_admin_enabled", s.ble_admin_enabled);
+  w.boolean("ble_observer_enabled", s.ble_observer_enabled);
+  w.integer("ble_observer_window_s", s.ble_observer_window_s);
+  w.integer("ble_observer_interval_s", s.ble_observer_interval_s);
+  w.integer("ble_observer_dedup_ms", s.ble_observer_dedup_ms);
+  w.value("ble_observer_rules", JsonValue::makeArray(std::move(rules)));
+  return w.take();
 }
 
 void validate(const Settings& s, FieldErrors& errors) {

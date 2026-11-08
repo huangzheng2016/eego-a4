@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "admin/admin_config.h"
+#include "alert_core/json_writer.h"
 
 #include <algorithm>
 #include <cctype>
@@ -420,11 +421,11 @@ alert_core::JsonValue muteRuleToJson(const alert_core::MuteRule& r) {
     case alert_core::MuteRule::MatchBy::Fingerprint: by = "fingerprint"; break;
     default: break;
   }
-  return JsonValue::makeObject({
-      {"match_by", JsonValue::makeString(by)},
-      {"value", JsonValue::makeString(r.value)},
-      {"expires_at", JsonValue::makeInt(static_cast<int64_t>(r.expires_at))},
-  });
+  return ::eego::json::ObjectWriter(3)
+      .string("match_by", by)
+      .string("value", r.value)
+      .integer("expires_at", static_cast<int64_t>(r.expires_at))
+      .take();
 }
 
 void validateMuteRulesSection(const alert_core::JsonValue& arr, FieldErrors& errs) {
@@ -495,27 +496,19 @@ AdminDomainConfig parseAdminView(const alert_core::JsonValue& dom) {
 
 alert_core::JsonValue makeDefaultDom() {
   using alert_core::JsonValue;
-  JsonValue admin = JsonValue::makeObject({
-      {"wifi_list", JsonValue::makeArray({})},
-      {"network", JsonValue::makeObject({{"auto_ap_fallback", JsonValue::makeBool(false)}})},
-      {"security", JsonValue::makeObject({
-                        {"session_ttl_s", JsonValue::makeInt(86400)},
-                        {"login_lock_threshold", JsonValue::makeInt(5)},
-                    })},
-      {"display", JsonValue::makeObject({
-                       {"font", JsonValue::makeString("")},
-                   })},
-      {"logging", JsonValue::makeObject({
-                       {"level", JsonValue::makeString("INFO")},
-                       {"sd_log", JsonValue::makeBool(false)},
-                   })},
-  });
-  return JsonValue::makeObject({
-      {"schema_version", JsonValue::makeInt(kSchemaVersion)},
-      {"admin", std::move(admin)},
-      {"alert_type_overrides", JsonValue::makeObject({})},
-      {"mute_rules", JsonValue::makeArray({})},
-  });
+  JsonValue admin = ::eego::json::ObjectWriter(5)
+      .value("wifi_list", ::eego::json::JsonValue(JsonValue::makeArray({})))
+      .value("network", ::eego::json::JsonValue(::eego::json::ObjectWriter(1).boolean("auto_ap_fallback", false).take()))
+      .value("security", ::eego::json::JsonValue(::eego::json::ObjectWriter(2).integer("session_ttl_s", 86400).integer("login_lock_threshold", 5).take()))
+      .value("display", ::eego::json::JsonValue(::eego::json::ObjectWriter(1).string("font", "").take()))
+      .value("logging", ::eego::json::JsonValue(::eego::json::ObjectWriter(2).string("level", "INFO").boolean("sd_log", false).take()))
+      .take();
+  return ::eego::json::ObjectWriter(4)
+      .integer("schema_version", kSchemaVersion)
+      .value("admin", ::eego::json::JsonValue(std::move(admin)))
+      .value("alert_type_overrides", ::eego::json::JsonValue(::eego::json::ObjectWriter(0).take()))
+      .value("mute_rules", ::eego::json::JsonValue(JsonValue::makeArray({})))
+      .take();
 }
 
 bool validateLoadedDom(const alert_core::JsonValue& dom, FieldErrors& errs) {
@@ -841,10 +834,10 @@ bool ConfigStore::setWifiListInDom(
   JsonValue::Array arr;
   arr.reserve(ssid_ref_list.size());
   for (const auto& e : ssid_ref_list) {
-    arr.push_back(JsonValue::makeObject({
-        {"ssid", JsonValue::makeString(e.first)},
-        {"pass_ref", JsonValue::makeString(e.second)},
-    }));
+    arr.push_back(::eego::json::ObjectWriter(2)
+        .string("ssid", e.first)
+        .string("pass_ref", e.second)
+        .take());
   }
   JsonValue* admin = nullptr;
   for (auto& kv : mutableItems(dom)) {

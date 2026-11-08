@@ -30,6 +30,8 @@ enum class AdminCommandType : uint8_t {
   WriteSourceCredential,
   DeleteSourceCredential,
   RenderPreview,
+  // Runs `deferred` on app_task; used to move work out of small-stack contexts (esp_timer).
+  RunDeferred,
 };
 
 struct RenderPreviewJob;
@@ -64,6 +66,8 @@ struct AdminCommand {
   std::shared_ptr<RenderPreviewJob> preview;
 
   uint32_t delay_ms = 2000;
+
+  void (*deferred)() = nullptr;
 };
 
 struct AdminResult {
@@ -79,5 +83,9 @@ void setAdminCommandHandler(AdminCommandHandler handler, void* ctx);
 bool serviceCommands(uint32_t wait_ms);
 
 bool enqueueAdminCommand(const AdminCommand& cmd, AdminResult& res, uint32_t wait_ms);
+
+// Fire-and-forget: queues `fn` for app_task without waiting. Returns false when the queue
+// is unavailable or full.
+bool postDeferred(void (*fn)());
 
 }  // namespace eego::admin

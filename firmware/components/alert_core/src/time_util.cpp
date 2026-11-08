@@ -65,7 +65,7 @@ std::string formatUtcIso8601(uint64_t unix_seconds) {
   unsigned hh = static_cast<unsigned>(rem / 3600);
   unsigned mm = static_cast<unsigned>((rem % 3600) / 60);
   unsigned ss = static_cast<unsigned>(rem % 60);
-  char buf[24];
+  char buf[64];  // sized for the full int64 year range so -Os range analysis stays quiet
   std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02uT%02u:%02u:%02uZ", static_cast<long long>(y),
                 m, d, hh, mm, ss);
   return buf;

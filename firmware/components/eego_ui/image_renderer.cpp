@@ -156,8 +156,10 @@ bool ImageRenderer::decodeJpeg(const uint8_t* data, size_t len, uint8_t*& outGra
     if (height) *height = 0;
     if (!data || len < 4) return false;
 
-    uint8_t* work = (uint8_t*)heap_caps_malloc(kJpegWorkSize, MALLOC_CAP_INTERNAL);
-    if (!work) work = (uint8_t*)heap_caps_malloc(kJpegWorkSize, MALLOC_CAP_SPIRAM);
+    // PSRAM first: an explicit MALLOC_CAP_INTERNAL request would eat the internal reserve
+    // that DMA (SD card, SPI) depends on.
+    uint8_t* work = (uint8_t*)heap_caps_malloc(kJpegWorkSize, MALLOC_CAP_SPIRAM);
+    if (!work) work = (uint8_t*)heap_caps_malloc(kJpegWorkSize, MALLOC_CAP_DEFAULT);
     if (!work) {
         ESP_LOGE(TAG, "jpeg work alloc failed");
         return false;
@@ -291,7 +293,7 @@ static uint8_t ditherGray4(uint8_t gray, int x, int y) {
     uint32_t level = scaled / 255;
     const uint32_t fraction = scaled % 255;
     const uint8_t threshold = kBayer4[(y % 4 + 4) % 4][(x % 4 + 4) % 4];
-    if (level < 3 && fraction * 32 > (threshold * 2 + 1) * 255) level++;
+    if (level < 3 && fraction * 32 > (static_cast<uint32_t>(threshold) * 2 + 1) * 255) level++;
     return kLevels[level];
 }
 

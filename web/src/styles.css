@@ -640,3 +640,4 @@ td.nowrap, th.nowrap { white-space: nowrap; }
 .input-suffix > .suffix { color: var(--text-2); font-size: var(--fs-sm); white-space: nowrap; }
 .save-bar { position: sticky; bottom: 16px; z-index: 20; display: flex; align-items: center; gap: var(--s2); padding: 10px 12px 10px 16px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r); box-shadow: var(--shadow-lg); }
 @media (max-width: 860px) { .save-bar { bottom: 8px; } }
+.table .num { text-align: right; font-variant-numeric: tabular-nums; }

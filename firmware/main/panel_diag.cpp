@@ -2,6 +2,7 @@
 //
 #include "panel_app.h"
 
+#include <vector>
 #include <cstdio>
 #include <cstring>
 #include <strings.h>  // strcasecmp
@@ -83,8 +84,9 @@ void PanelApp::diagSd() {
   eego::SdCard& sd = eego::SdCard::instance();
   printf("sd: ready=%d\n", sd.ready() ? 1 : 0);
   if (!sd.ready()) return;
-  eego::SdCard::DirEntry entries[16];
-  const int n = sd.listDir("/alertpanel", entries, 16);
+  // 16 x 264 B: on the heap, not the caller's stack.
+  std::vector<eego::SdCard::DirEntry> entries(16);
+  const int n = sd.listDir("/alertpanel", entries.data(), 16);
   printf("sd: /alertpanel entries=%d\n", n);
   for (int i = 0; i < n; i++) {
     printf("  %s %s %u\n", entries[i].isDir ? "DIR " : "FILE", entries[i].name,

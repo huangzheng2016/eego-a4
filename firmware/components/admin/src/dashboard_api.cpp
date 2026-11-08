@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "dashboard_api.h"
+#include "alert_core/json_writer.h"
 
 #include <atomic>
 #include <cerrno>
@@ -84,7 +85,9 @@ esp_err_t sendError(httpd_req_t* req, int status, const char* code,
   error.emplace_back("message", JsonValue::makeString(message));
   if (errors != nullptr && !errors->empty()) error.emplace_back("fields", errorsToJson(*errors));
   return sendJson(req, status,
-                  JsonValue::makeObject({{"error", JsonValue::makeObject(std::move(error))}})
+                  ::eego::json::ObjectWriter(1)
+                      .value("error", ::eego::json::JsonValue(JsonValue::makeObject(std::move(error))))
+                      .take()
                       .toString());
 }
 
@@ -273,10 +276,11 @@ esp_err_t commit(httpd_req_t* req, JsonValue& root, const DashboardDocument& cur
 
 esp_err_t collectionResponse(httpd_req_t* req, const JsonValue& items, uint64_t revision) {
   return sendJson(req, 200,
-                  JsonValue::makeObject({
-                      {"revision", JsonValue::makeInt(static_cast<int64_t>(revision))},
-                      {"items", items},
-                  }).toString());
+                  ::eego::json::ObjectWriter(2)
+                      .integer("revision", static_cast<int64_t>(revision))
+                      .value("items", ::eego::json::JsonValue(items))
+                      .take()
+                      .toString());
 }
 
 esp_err_t crud(httpd_req_t* req, JsonValue& root, JsonValue& parent,
@@ -357,7 +361,11 @@ esp_err_t sourceCrud(httpd_req_t* req, JsonValue& root, const std::string& id,
     if (source == nullptr) return sendError(req, 404, "not_found", "source not found");
     if (const JsonValue* plan = byId(*plans, "id", id)) {
       return sendJson(req, 200,
-                      JsonValue::makeObject({{"source", *source}, {"plan", *plan}}).toString());
+                      ::eego::json::ObjectWriter(2)
+                          .value("source", ::eego::json::JsonValue(*source))
+                          .value("plan", ::eego::json::JsonValue(*plan))
+                          .take()
+                          .toString());
     }
     return sendJson(req, 200, source->toString());
   }
@@ -433,19 +441,20 @@ esp_err_t layout(httpd_req_t* req, JsonValue& root, JsonValue& page,
     if (JsonValue* items = collection(page, "panels")) {
       for (const auto& panel : items->arrayItems()) {
         const JsonValue* grid = panel.find("grid");
-        panels.push_back(JsonValue::makeObject({
-            {"id", JsonValue::makeString(idValue(panel, "id"))},
-            {"grid", grid == nullptr ? JsonValue::makeObject({}) : *grid},
-        }));
+        panels.push_back(::eego::json::ObjectWriter(2)
+            .string("id", idValue(panel, "id"))
+            .value("grid", ::eego::json::JsonValue(grid == nullptr ? ::eego::json::ObjectWriter(0).take() : *grid))
+            .take());
       }
     }
     const JsonValue* columns = page.find("grid_columns");
     return sendJson(req, 200,
-                    JsonValue::makeObject({
-                        {"page_id", JsonValue::makeString(idValue(page, "id"))},
-                        {"grid_columns", columns == nullptr ? JsonValue::makeInt(24) : *columns},
-                        {"panels", JsonValue::makeArray(std::move(panels))},
-                    }).toString());
+                    ::eego::json::ObjectWriter(3)
+                        .string("page_id", idValue(page, "id"))
+                        .value("grid_columns", ::eego::json::JsonValue(columns == nullptr ? JsonValue::makeInt(24) : *columns))
+                        .value("panels", ::eego::json::JsonValue(JsonValue::makeArray(std::move(panels))))
+                        .take()
+                        .toString());
   }
   if (req->method == HTTP_DELETE) {
     // Reset to a non-overlapping flow: 4 panels (6x4) per band, 2 bands per
@@ -454,11 +463,12 @@ esp_err_t layout(httpd_req_t* req, JsonValue& root, JsonValue& page,
     if (JsonValue* panels = collection(page, "panels")) {
       int64_t index = 0;
       for (auto& panel : panels->arrayItems()) {
-        set(panel, "grid", JsonValue::makeObject({
-                               {"x", JsonValue::makeInt((index % 4) * 6)},
-                               {"y", JsonValue::makeInt((index / 4) * 4)},
-                               {"w", JsonValue::makeInt(6)}, {"h", JsonValue::makeInt(4)},
-                           }));
+        set(panel, "grid", ::eego::json::ObjectWriter(4)
+            .integer("x", (index % 4) * 6)
+            .integer("y", (index / 4) * 4)
+            .integer("w", 6)
+            .integer("h", 4)
+            .take());
         ++index;
       }
     }
@@ -525,39 +535,39 @@ JsonValue previewJson(const SourceResult& result, int status, int64_t latency_ms
                                                     ? "********"
                                                     : previewText(label.value, 128)));
     }
-    metrics.push_back(JsonValue::makeObject({
-        {"source_id", JsonValue::makeString(sample.source_id)},
-        {"metric", JsonValue::makeString(previewText(sample.metric, 128))},
-        {"timestamp_ms", JsonValue::makeInt(sample.timestamp_ms)},
-        {"value", JsonValue::makeDouble(sample.value)},
-        {"unit", JsonValue::makeString(previewText(sample.unit, 32))},
-        {"labels", JsonValue::makeObject(std::move(labels))},
-    }));
+    metrics.push_back(::eego::json::ObjectWriter(6)
+        .string("source_id", sample.source_id)
+        .string("metric", previewText(sample.metric, 128))
+        .integer("timestamp_ms", sample.timestamp_ms)
+        .number("value", sample.value)
+        .string("unit", previewText(sample.unit, 32))
+        .value("labels", ::eego::json::JsonValue(JsonValue::makeObject(std::move(labels))))
+        .take());
   }
   JsonValue::Array events;
   constexpr size_t kEvents = 8;
   for (size_t i = 0; i < result.events.size() && i < kEvents; ++i) {
     const auto& event = result.events[i];
-    events.push_back(JsonValue::makeObject({
-        {"id", JsonValue::makeString(previewText(event.id, 64))},
-        {"rule_id", JsonValue::makeString(previewText(event.rule_id, 64))},
-        {"source_id", JsonValue::makeString(previewText(event.source_id, 64))},
-        {"timestamp_ms", JsonValue::makeInt(event.timestamp_ms)},
-        {"severity", JsonValue::makeString(dashboard::severityName(event.severity))},
-        {"state", JsonValue::makeString(dashboard::eventStateName(event.state))},
-        {"title", JsonValue::makeString(previewText(event.title, 160))},
-        {"message", JsonValue::makeString(previewText(event.message, 256))},
-        {"linked_panel_id", JsonValue::makeString(previewText(event.linked_panel_id, 64))},
-    }));
+    events.push_back(::eego::json::ObjectWriter(9)
+        .string("id", previewText(event.id, 64))
+        .string("rule_id", previewText(event.rule_id, 64))
+        .string("source_id", previewText(event.source_id, 64))
+        .integer("timestamp_ms", event.timestamp_ms)
+        .string("severity", dashboard::severityName(event.severity))
+        .string("state", dashboard::eventStateName(event.state))
+        .string("title", previewText(event.title, 160))
+        .string("message", previewText(event.message, 256))
+        .string("linked_panel_id", previewText(event.linked_panel_id, 64))
+        .take());
   }
   JsonValue::Array assets;
   if (result.has_image) {
-    assets.push_back(JsonValue::makeObject({
-        {"kind", JsonValue::makeString("image")},
-        {"media_type", JsonValue::makeString(previewText(result.image.media_type, 64))},
-        {"size_bytes", JsonValue::makeInt(static_cast<int64_t>(result.image.bytes.size()))},
-        {"fetched_at_ms", JsonValue::makeInt(result.image.fetched_at_ms)},
-    }));
+    assets.push_back(::eego::json::ObjectWriter(4)
+        .string("kind", "image")
+        .string("media_type", previewText(result.image.media_type, 64))
+        .integer("size_bytes", static_cast<int64_t>(result.image.bytes.size()))
+        .integer("fetched_at_ms", result.image.fetched_at_ms)
+        .take());
   }
   JsonValue::Object out;
   out.emplace_back("source_id", JsonValue::makeString(result.source_id));
@@ -567,10 +577,10 @@ JsonValue previewJson(const SourceResult& result, int status, int64_t latency_ms
   out.emplace_back("metrics", JsonValue::makeArray(std::move(metrics)));
   out.emplace_back("events", JsonValue::makeArray(std::move(events)));
   out.emplace_back("assets", JsonValue::makeArray(std::move(assets)));
-  out.emplace_back("truncated", JsonValue::makeObject({
-                                      {"metrics", JsonValue::makeBool(result.metrics.size() > kMetrics)},
-                                      {"events", JsonValue::makeBool(result.events.size() > kEvents)},
-                                  }));
+  out.emplace_back("truncated", ::eego::json::ObjectWriter(2)
+      .boolean("metrics", result.metrics.size() > kMetrics)
+      .boolean("events", result.events.size() > kEvents)
+      .take());
   return JsonValue::makeObject(std::move(out));
 }
 
@@ -706,7 +716,7 @@ bool fetchSource(httpd_req_t* req, const DashboardDocument& current, const char*
       sendError(req, 400, "validation_failed", "request validation failed: " + error);
       return false;
     }
-    dashboard::pipeline::NetStackTransport transport(net::NetStack::instance(), 12000);
+    dashboard::pipeline::NetStackTransport transport(net::NetStack::instance(), 12000, false);
     const bool transported = transport.execute(request, response);
     if (!transported && response.status == -1) {
       sendError(req, 503, "unavailable", "net_task unavailable or timed out");
@@ -858,10 +868,10 @@ esp_err_t validateOnly(httpd_req_t* req, const DashboardDocument& current) {
   DashboardParseResult parsed = DashboardStore::parse(body, &current);
   JsonValue::Array errors;
   for (const auto& error : parsed.errors) {
-    errors.push_back(JsonValue::makeObject({
-        {"field", JsonValue::makeString(error.field)},
-        {"message", JsonValue::makeString(error.message)},
-    }));
+    errors.push_back(::eego::json::ObjectWriter(2)
+        .string("field", error.field)
+        .string("message", error.message)
+        .take());
   }
   JsonValue::Object out;
   out.emplace_back("valid", JsonValue::makeBool(parsed.ok()));
@@ -1076,10 +1086,11 @@ esp_err_t eraseDashboard(httpd_req_t* req, const DashboardDocument& current) {
   }
   auto latest = DashboardStore::instance().snapshot();
   return sendJson(req, 200,
-                  JsonValue::makeObject({
-                      {"configured", JsonValue::makeBool(false)},
-                      {"revision", JsonValue::makeInt(static_cast<int64_t>(latest->revision))},
-                  }).toString());
+                  ::eego::json::ObjectWriter(2)
+                      .boolean("configured", false)
+                      .integer("revision", static_cast<int64_t>(latest->revision))
+                      .take()
+                      .toString());
 }
 
 const char* schemaInfo() {
@@ -1120,14 +1131,12 @@ esp_err_t handleDashboardApi(httpd_req_t* req, const char* path) {
     if (req->method == HTTP_GET) {
       if (!current->configured) {
         return sendJson(req, 404,
-                        JsonValue::makeObject({
-                            {"error", JsonValue::makeObject({
-                                          {"code", JsonValue::makeString("not_found")},
-                                          {"message", JsonValue::makeString("dashboard is not configured")},
-                                      })},
-                            {"configured", JsonValue::makeBool(false)},
-                            {"revision", JsonValue::makeInt(static_cast<int64_t>(current->revision))},
-                        }).toString());
+                        ::eego::json::ObjectWriter(3)
+                            .value("error", ::eego::json::JsonValue(::eego::json::ObjectWriter(2).string("code", "not_found").string("message", "dashboard is not configured").take()))
+                            .boolean("configured", false)
+                            .integer("revision", static_cast<int64_t>(current->revision))
+                            .take()
+                            .toString());
       }
       return sendDocument(req, *current);
     }

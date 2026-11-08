@@ -3,6 +3,7 @@
 //
 
 #include "admin/admin.h"
+#include "alert_core/json_writer.h"
 #include "admin/device_log.h"
 #include "admin/display_snapshot.h"
 #include "admin/device_screen.h"
@@ -153,7 +154,10 @@ esp_err_t sendError(httpd_req_t* req, int status, const char* code, const std::s
     err.emplace_back("fields", JsonValue::makeObject(std::move(fobj)));
   }
   const std::string body =
-      JsonValue::makeObject({{"error", JsonValue::makeObject(std::move(err))}}).toString();
+      ::eego::json::ObjectWriter(1)
+          .value("error", ::eego::json::JsonValue(JsonValue::makeObject(std::move(err))))
+          .take()
+          .toString();
   if (retry_after_s > 0) {
     char ra[16];
     snprintf(ra, sizeof(ra), "%lu", static_cast<unsigned long>(retry_after_s));
@@ -297,9 +301,15 @@ bool contentTypeJsonOk(httpd_req_t* req) {
   return ct.size() == 16 || ct[16] == ';' || ct[16] == ' ' || ct[16] == '\t';
 }
 
-bool parseJsonBody(httpd_req_t* req, const std::string& body, alert_core::JsonValue& out) {
+// Each nesting level costs ~400 B of stack in the recursive parser, so bodies are parsed
+// with the smallest depth their schema needs (kSmallBodyDepth for flat requests).
+constexpr size_t kSmallBodyDepth = 4;
+constexpr size_t kConfigBodyDepth = 8;
+
+bool parseJsonBody(httpd_req_t* req, const std::string& body, alert_core::JsonValue& out,
+                   size_t max_depth = kConfigBodyDepth) {
   alert_core::JsonParseError perr;
-  if (!alert_core::jsonParse(body, out, perr)) {
+  if (!alert_core::jsonParse(body, out, perr, max_depth)) {
     sendError(req, 400, errc::kInvalidRequest,
               std::string("invalid JSON at offset ") + std::to_string(perr.offset) + ": " +
                   perr.message);
@@ -430,7 +440,7 @@ esp_err_t h_login(httpd_req_t* req) {
   if (rb != 0) return ESP_OK;
 
   alert_core::JsonValue root;
-  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (!parseJsonBody(req, body, root, kSmallBodyDepth)) return ESP_OK;
   std::string password;
   if (root.type() != alert_core::JsonValue::Type::Object ||
       !jsonStringField(root, "password", password)) {
@@ -462,13 +472,11 @@ esp_err_t h_login(httpd_req_t* req) {
   }
   using alert_core::JsonValue;
   return sendJson(req, 200,
-                  JsonValue::makeObject({
-                                            {"token", JsonValue::makeString(token)},
-                                            {"token_type", JsonValue::makeString("Bearer")},
-                                            {"expires_in",
-                                             JsonValue::makeInt(static_cast<int64_t>(
-                                                 AuthManager::instance().sessionTtl()))},
-                                        })
+                  ::eego::json::ObjectWriter(3)
+                      .string("token", token)
+                      .string("token_type", "Bearer")
+                      .integer("expires_in", static_cast<int64_t>( AuthManager::instance().sessionTtl()))
+                      .take()
                       .toString());
 }
 
@@ -493,7 +501,7 @@ esp_err_t h_change_password(httpd_req_t* req) {
   const int rb = readBodyBudget(req, kBodyBudgetLogin, body);
   if (rb != 0) return ESP_OK;
   alert_core::JsonValue root;
-  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (!parseJsonBody(req, body, root, kSmallBodyDepth)) return ESP_OK;
   std::string old_pw, new_pw;
   if (root.type() != alert_core::JsonValue::Type::Object ||
       !jsonStringField(root, "old_password", old_pw) ||
@@ -550,8 +558,10 @@ esp_err_t h_alerts_ingest(httpd_req_t* req) {
       ADMIN_LOG_INFO("alert ingest: from=%s created=%d updated=%d", ip.c_str(), r.created,
                      r.updated);
       const std::string resp =
-          JsonValue::makeObject({{"created", JsonValue::makeInt(r.created)},
-                                 {"updated", JsonValue::makeInt(r.updated)}})
+          ::eego::json::ObjectWriter(2)
+              .integer("created", r.created)
+              .integer("updated", r.updated)
+              .take()
               .toString();
       return sendJson(req, r.created > 0 ? 201 : 202, resp);
     }
@@ -627,12 +637,11 @@ esp_err_t h_alerts_list(httpd_req_t* req) {
     }
   }
   return sendJson(req, 200,
-                  JsonValue::makeObject({
-                                            {"alerts", JsonValue::makeArray(std::move(arr))},
-                                            {"total", JsonValue::makeInt(static_cast<int64_t>(total))},
-                                            {"snapshot_seq",
-                                             JsonValue::makeInt(snap ? static_cast<int64_t>(snap->seq) : 0)},
-                                        })
+                  ::eego::json::ObjectWriter(3)
+                      .value("alerts", ::eego::json::JsonValue(JsonValue::makeArray(std::move(arr))))
+                      .integer("total", static_cast<int64_t>(total))
+                      .integer("snapshot_seq", snap ? static_cast<int64_t>(snap->seq) : 0)
+                      .take()
                       .toString());
 }
 
@@ -654,10 +663,10 @@ esp_err_t mapActionResult(httpd_req_t* req, const AlertActionResult& r, const ch
     case AlertActionResultCode::Ok: {
       ADMIN_LOG_INFO("alert %s: id=%s by=api:admin", action, id.c_str());
       return sendJson(req, 200,
-                      JsonValue::makeObject({
-                                                {"ok", JsonValue::makeBool(true)},
-                                                {"affected", JsonValue::makeInt(static_cast<int64_t>(r.affected))},
-                                            })
+                      ::eego::json::ObjectWriter(2)
+                          .boolean("ok", true)
+                          .integer("affected", static_cast<int64_t>(r.affected))
+                          .take()
                           .toString());
     }
     case AlertActionResultCode::NotFound:
@@ -726,13 +735,12 @@ alert_core::JsonValue keepAwakeJson() {
       remaining > 0 && sys >= static_cast<int64_t>(net::kPlausibleUnixFloor)
           ? sys + static_cast<int64_t>(remaining)
           : 0;
-  return JsonValue::makeObject({
-      {"active", JsonValue::makeBool(remaining > 0)},
-      {"remaining_s", JsonValue::makeInt(remaining)},
-      {"until", JsonValue::makeInt(until)},
-      {"default_min",
-       JsonValue::makeInt(settings::DeviceSettings::instance().snapshot().values.keep_awake_min)},
-  });
+  return ::eego::json::ObjectWriter(4)
+      .boolean("active", remaining > 0)
+      .integer("remaining_s", remaining)
+      .integer("until", until)
+      .integer("default_min", settings::DeviceSettings::instance().snapshot().values.keep_awake_min)
+      .take();
 }
 
 alert_core::JsonValue screenJson();
@@ -758,12 +766,12 @@ esp_err_t h_status(httpd_req_t* req) {
     snprintf(mode, sizeof(mode), "online");
   }
   root.emplace_back("device",
-                    JsonValue::makeObject({
-                        {"fw_version", JsonValue::makeString(app ? app->version : "unknown")},
-                        {"fw_sha256", JsonValue::makeString(sha_hex)},
-                        {"uptime_s", JsonValue::makeInt(esp_timer_get_time() / 1000000)},
-                        {"mode", JsonValue::makeString(mode)},
-                    }));
+                    ::eego::json::ObjectWriter(4)
+                        .string("fw_version", app ? app->version : "unknown")
+                        .string("fw_sha256", sha_hex)
+                        .integer("uptime_s", esp_timer_get_time() / 1000000)
+                        .string("mode", mode)
+                        .take());
 
   net::NetStatusSnapshot ns;
   const bool ns_ok = net::NetStack::instance().queryStatus(ns);
@@ -820,19 +828,15 @@ esp_err_t h_status(httpd_req_t* req) {
 
   // memory / storage
   root.emplace_back("memory",
-                    JsonValue::makeObject({
-                        {"internal_free",
-                         JsonValue::makeInt(static_cast<int64_t>(
-                             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)))},
-                        {"psram_free",
-                         JsonValue::makeInt(static_cast<int64_t>(
-                             heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)))},
-                    }));
+                    ::eego::json::ObjectWriter(2)
+                        .integer("internal_free", static_cast<int64_t>( heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)))
+                        .integer("psram_free", static_cast<int64_t>( heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)))
+                        .take());
   root.emplace_back("storage",
-                    JsonValue::makeObject({
-                        {"sd_ready", JsonValue::makeBool(::eego::SdCard::instance().ready())},
-                        {"config_valid", JsonValue::makeBool(ConfigStore::instance().valid())},
-                    }));
+                    ::eego::json::ObjectWriter(2)
+                        .boolean("sd_ready", ::eego::SdCard::instance().ready())
+                        .boolean("config_valid", ConfigStore::instance().valid())
+                        .take());
 
   bool wired = false;
   auto snap = acquireSnapshot(wired);
@@ -848,14 +852,11 @@ esp_err_t h_status(httpd_req_t* req) {
   root.emplace_back("alerts", JsonValue::makeObject(std::move(alobj)));
 
   root.emplace_back("security",
-                    JsonValue::makeObject({
-                        {"sessions",
-                         JsonValue::makeInt(static_cast<int64_t>(AuthManager::instance().sessionCount()))},
-                        {"ingest_key_masked",
-                         JsonValue::makeString(AuthManager::instance().maskedIngestKey())},
-                        {"provisioned",
-                         JsonValue::makeBool(AuthManager::instance().hasPassword())},
-                    }));
+                    ::eego::json::ObjectWriter(3)
+                        .integer("sessions", static_cast<int64_t>(AuthManager::instance().sessionCount()))
+                        .string("ingest_key_masked", AuthManager::instance().maskedIngestKey())
+                        .boolean("provisioned", AuthManager::instance().hasPassword())
+                        .take());
 
   root.emplace_back("screen", screenJson());
   root.emplace_back("keep_awake", keepAwakeJson());
@@ -863,22 +864,22 @@ esp_err_t h_status(httpd_req_t* req) {
   if (power.valid) {
     root.emplace_back(
         "power",
-        JsonValue::makeObject({
-            {"source", JsonValue::makeString(power.source)},
-            {"source_reason", JsonValue::makeString(power.source_reason)},
-            {"power_mode", JsonValue::makeString(power.power_mode)},
-            {"mode", JsonValue::makeString(power.mode)},
-            {"battery_pct", JsonValue::makeInt(power.battery_pct)},
-            {"battery_mv", JsonValue::makeInt(power.battery_mv)},
-            {"charging", JsonValue::makeBool(power.charging)},
-            {"usb_host", JsonValue::makeBool(power.usb_host)},
-            {"next_wake", JsonValue::makeInt(static_cast<int64_t>(power.next_wake))},
-            {"next_refresh", JsonValue::makeInt(static_cast<int64_t>(power.next_refresh))},
-            {"sleep_in_s", JsonValue::makeInt(power.sleep_in_s)},
-            {"last_wake_reason", JsonValue::makeString(power.last_wake_reason)},
-            {"sleeps_since_boot", JsonValue::makeInt(power.sleeps_since_boot)},
-            {"last_screen_update", JsonValue::makeInt(static_cast<int64_t>(power.last_screen_update))},
-        }));
+        ::eego::json::ObjectWriter(14)
+            .string("source", power.source)
+            .string("source_reason", power.source_reason)
+            .string("power_mode", power.power_mode)
+            .string("mode", power.mode)
+            .integer("battery_pct", power.battery_pct)
+            .integer("battery_mv", power.battery_mv)
+            .boolean("charging", power.charging)
+            .boolean("usb_host", power.usb_host)
+            .integer("next_wake", static_cast<int64_t>(power.next_wake))
+            .integer("next_refresh", static_cast<int64_t>(power.next_refresh))
+            .integer("sleep_in_s", power.sleep_in_s)
+            .string("last_wake_reason", power.last_wake_reason)
+            .integer("sleeps_since_boot", power.sleeps_since_boot)
+            .integer("last_screen_update", static_cast<int64_t>(power.last_screen_update))
+            .take());
   }
 
   return sendJson(req, 200, JsonValue::makeObject(std::move(root)).toString());
@@ -891,14 +892,14 @@ esp_err_t h_status(httpd_req_t* req) {
 alert_core::JsonValue screenJson() {
   using alert_core::JsonValue;
   const ScreenState state = screenState();
-  return JsonValue::makeObject({
-      {"available", JsonValue::makeBool(state.available)},
-      {"index", JsonValue::makeInt(state.index)},
-      {"count", JsonValue::makeInt(state.count)},
-      {"page_id", JsonValue::makeString(state.page_id)},
-      {"shown", JsonValue::makeBool(state.shown)},
-      {"rotate_min", JsonValue::makeInt(state.rotate_min)},
-  });
+  return ::eego::json::ObjectWriter(6)
+      .boolean("available", state.available)
+      .integer("index", state.index)
+      .integer("count", state.count)
+      .string("page_id", state.page_id)
+      .boolean("shown", state.shown)
+      .integer("rotate_min", state.rotate_min)
+      .take();
 }
 
 esp_err_t h_screen_post(httpd_req_t* req) {
@@ -909,7 +910,7 @@ esp_err_t h_screen_post(httpd_req_t* req) {
   std::string body;
   if (readBodyBudget(req, kBodyBudgetConfirm, body) != 0) return ESP_OK;
   JsonValue root;
-  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (!parseJsonBody(req, body, root, kSmallBodyDepth)) return ESP_OK;
   const JsonValue* index = root.find("index");
   const JsonValue* step = root.find("step");
   const bool index_ok = index != nullptr && index->type() == JsonValue::Type::Int;
@@ -934,10 +935,11 @@ esp_err_t h_screen_post(httpd_req_t* req) {
   requestScreen(static_cast<uint32_t>(target));
   ADMIN_LOG_INFO("screen %d/%u via api", static_cast<int>(target + 1),
                  static_cast<unsigned>(state.count));
-  return sendJson(req, 200, JsonValue::makeObject({
-                                {"index", JsonValue::makeInt(target)},
-                                {"count", JsonValue::makeInt(state.count)},
-                            }).toString());
+  return sendJson(req, 200, ::eego::json::ObjectWriter(2)
+      .integer("index", target)
+      .integer("count", state.count)
+      .take()
+      .toString());
 }
 
 // ---------------------------------------------------------------------------
@@ -953,7 +955,7 @@ esp_err_t h_device_time(httpd_req_t* req) {
   std::string body;
   if (readBodyBudget(req, kBodyBudgetConfirm, body) != 0) return ESP_OK;
   JsonValue root;
-  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (!parseJsonBody(req, body, root, kSmallBodyDepth)) return ESP_OK;
   const JsonValue* unix_ms = root.find("unix_ms");
   // 2020-01-01 .. 2100-01-01
   if (unix_ms == nullptr || unix_ms->type() != JsonValue::Type::Int ||
@@ -971,11 +973,12 @@ esp_err_t h_device_time(httpd_req_t* req) {
   if (result.applied) {
     ADMIN_LOG_INFO("time set from browser (drift %llds)", static_cast<long long>(result.drift_s));
   }
-  return sendJson(req, 200, JsonValue::makeObject({
-                                {"applied", JsonValue::makeBool(result.applied)},
-                                {"drift_s", JsonValue::makeInt(result.drift_s)},
-                                {"sntp_synced", JsonValue::makeBool(result.sntp_synced)},
-                            }).toString());
+  return sendJson(req, 200, ::eego::json::ObjectWriter(3)
+      .boolean("applied", result.applied)
+      .integer("drift_s", result.drift_s)
+      .boolean("sntp_synced", result.sntp_synced)
+      .take()
+      .toString());
 }
 
 esp_err_t h_keep_awake_get(httpd_req_t* req) {
@@ -990,7 +993,7 @@ esp_err_t h_keep_awake_post(httpd_req_t* req) {
   std::string body;
   if (readBodyBudget(req, kBodyBudgetConfirm, body) != 0) return ESP_OK;
   JsonValue root;
-  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (!parseJsonBody(req, body, root, kSmallBodyDepth)) return ESP_OK;
   const JsonValue* minutes = root.find("minutes");
   if (minutes == nullptr || minutes->type() != JsonValue::Type::Int ||
       !keep_awake::validRequestMinutes(minutes->intValue())) {
@@ -1011,19 +1014,21 @@ esp_err_t h_types_list(httpd_req_t* req) {
   JsonValue::Array arr;
   for (const auto& b : reg->builtins()) {
     const alert_core::AlertTypeDescriptor d = reg->resolve(b.id);
-    arr.push_back(JsonValue::makeObject({
-        {"id", JsonValue::makeString(d.id)},
-        {"name_zh", JsonValue::makeString(d.name_zh)},
-        {"name_en", JsonValue::makeString(d.name_en)},
-        {"severity_default", JsonValue::makeString(alert_core::severityName(d.severity_default))},
-        {"group", JsonValue::makeString(d.group)},
-        {"ttl_default_s", JsonValue::makeInt(static_cast<int64_t>(d.ttl_default_s))},
-        {"muted_default", JsonValue::makeBool(d.muted_default)},
-        {"overridden", JsonValue::makeBool(reg->findOverride(b.id) != nullptr)},
-    }));
+    arr.push_back(::eego::json::ObjectWriter(8)
+        .string("id", d.id)
+        .string("name_zh", d.name_zh)
+        .string("name_en", d.name_en)
+        .string("severity_default", alert_core::severityName(d.severity_default))
+        .string("group", d.group)
+        .integer("ttl_default_s", static_cast<int64_t>(d.ttl_default_s))
+        .boolean("muted_default", d.muted_default)
+        .boolean("overridden", reg->findOverride(b.id) != nullptr)
+        .take());
   }
   return sendJson(req, 200,
-                  JsonValue::makeObject({{"types", JsonValue::makeArray(std::move(arr))}})
+                  ::eego::json::ObjectWriter(1)
+                      .value("types", ::eego::json::JsonValue(JsonValue::makeArray(std::move(arr))))
+                      .take()
                       .toString());
 }
 
@@ -1132,15 +1137,14 @@ esp_err_t h_type_put(httpd_req_t* req, const std::string& id) {
   const alert_core::AlertTypeDescriptor d = reg->resolve(id);
   ADMIN_LOG_INFO("type override applied: id=%s", id.c_str());
   return sendJson(req, 200,
-                  JsonValue::makeObject({
-                                            {"id", JsonValue::makeString(d.id)},
-                                            {"name_zh", JsonValue::makeString(d.name_zh)},
-                                            {"name_en", JsonValue::makeString(d.name_en)},
-                                            {"severity_default",
-                                             JsonValue::makeString(alert_core::severityName(d.severity_default))},
-                                            {"ttl_default_s", JsonValue::makeInt(static_cast<int64_t>(d.ttl_default_s))},
-                                            {"muted_default", JsonValue::makeBool(d.muted_default)},
-                                        })
+                  ::eego::json::ObjectWriter(6)
+                      .string("id", d.id)
+                      .string("name_zh", d.name_zh)
+                      .string("name_en", d.name_en)
+                      .string("severity_default", alert_core::severityName(d.severity_default))
+                      .integer("ttl_default_s", static_cast<int64_t>(d.ttl_default_s))
+                      .boolean("muted_default", d.muted_default)
+                      .take()
                       .toString());
 }
 
@@ -1157,16 +1161,18 @@ esp_err_t h_logs(httpd_req_t* req) {
   using alert_core::JsonValue;
   JsonValue::Array arr;
   for (const auto& e : AdminLog::instance().recent(limit)) {
-    arr.push_back(JsonValue::makeObject({
-        {"ts", JsonValue::makeInt(static_cast<int64_t>(e.ts))},
-        {"unsynced", JsonValue::makeBool(e.unsynced)},
-        {"level", JsonValue::makeString(logLevelName(e.level))},
-        {"seq", JsonValue::makeInt(static_cast<int64_t>(e.seq))},
-        {"msg", JsonValue::makeString(e.msg)},
-    }));
+    arr.push_back(::eego::json::ObjectWriter(5)
+        .integer("ts", static_cast<int64_t>(e.ts))
+        .boolean("unsynced", e.unsynced)
+        .string("level", logLevelName(e.level))
+        .integer("seq", static_cast<int64_t>(e.seq))
+        .string("msg", e.msg)
+        .take());
   }
   return sendJson(req, 200,
-                  JsonValue::makeObject({{"entries", JsonValue::makeArray(std::move(arr))}})
+                  ::eego::json::ObjectWriter(1)
+                      .value("entries", ::eego::json::JsonValue(JsonValue::makeArray(std::move(arr))))
+                      .take()
                       .toString());
 }
 
@@ -1244,65 +1250,62 @@ esp_err_t h_settings_get(httpd_req_t* req) {
   if (now > 0) {
     settings::scheduledSleep(snap.values, static_cast<uint64_t>(now), wake_at, remaining);
   }
-  const JsonValue power = JsonValue::makeObject({
-      {"last_wake_reason", JsonValue::makeString(wakeReasonName())},
-      {"next_scheduled_wake", JsonValue::makeInt(static_cast<int64_t>(wake_at))},
-      {"deep_sleep_http_reachable", JsonValue::makeBool(false)},
-      {"deep_sleep_ble_reachable", JsonValue::makeBool(false)},
-      {"recovery_ap_active", JsonValue::makeBool(ProvisionPortal::instance().apActive())},
-      {"recovery_window_remaining_s",
-       JsonValue::makeInt(ProvisionPortal::instance().windowRemainingMs() / 1000)},
-      {"auto_sleep_suspended",
-       JsonValue::makeBool(ProvisionPortal::instance().apActive() || ble_state.scanning ||
-                           ble_state.pairing_passkey_valid)},
-  });
-  const JsonValue capabilities = JsonValue::makeObject({
-      {"frontlight", JsonValue::makeBool(cap.frontlight)},
-      {"battery", JsonValue::makeBool(cap.battery)},
-      {"bluetooth", JsonValue::makeBool(cap.bluetooth)},
-      {"ble_admin", JsonValue::makeBool(cap.ble_admin)},
-      {"ble_observer", JsonValue::makeBool(cap.ble_observer)},
-      {"display", JsonValue::makeBool(cap.display)},
-      {"sd", JsonValue::makeBool(cap.sd)},
-      {"rtc", JsonValue::makeBool(cap.rtc)},
-  });
-  const JsonValue ble_json = JsonValue::makeObject({
-      {"compiled", JsonValue::makeBool(ble_state.compiled)},
-      {"stack_active", JsonValue::makeBool(ble_state.stack_active)},
-      {"role", JsonValue::makeString(ble::roleName(ble_state.role))},
-      {"admin_enabled", JsonValue::makeBool(snap.values.ble_admin_enabled)},
-      {"admin_allowed", JsonValue::makeBool(ble_state.admin_allowed)},
-      {"advertising", JsonValue::makeBool(ble_state.advertising)},
-      {"link", JsonValue::makeString(ble::linkStateName(ble_state.link))},
-      {"pairing_locked", JsonValue::makeBool(ble_state.pairing_locked)},
-      {"bonds", JsonValue::makeInt(ble_state.bonds)},
-      {"att_mtu", JsonValue::makeInt(ble_state.att_mtu)},
-      {"device_name", JsonValue::makeString(ble_state.device_name)},
-      {"tunnel_messages", JsonValue::makeInt(ble_state.tunnel_messages)},
-      {"tunnel_errors", JsonValue::makeInt(ble_state.tunnel_errors)},
-      {"observer_enabled", JsonValue::makeBool(snap.values.ble_observer_enabled)},
-      {"observer_remaining_s", JsonValue::makeInt(ble_state.observer_remaining_s)},
-      {"recovery_ap_active", JsonValue::makeBool(ble_state.recovery_ap_active)},
-      {"deep_sleep_realtime", JsonValue::makeBool(false)},
-      {"dropped_advertisements", JsonValue::makeInt(ble_state.dropped_advertisements)},
-      {"duplicate_advertisements", JsonValue::makeInt(ble_state.duplicate_advertisements)},
-      {"malformed_advertisements", JsonValue::makeInt(ble_state.malformed_advertisements)},
-      {"emitted_events", JsonValue::makeInt(ble_state.emitted_events)},
-      {"ingest_errors", JsonValue::makeInt(ble_state.ingest_errors)},
-      {"diram_free_bytes", JsonValue::makeInt(ble_state.diram_free_bytes)},
-      {"diram_min_free_bytes", JsonValue::makeInt(ble_state.diram_min_free_bytes)},
-      {"psram_free_bytes", JsonValue::makeInt(ble_state.psram_free_bytes)},
-      {"last_error", JsonValue::makeString(ble_state.last_error)},
-  });
+  const JsonValue power = ::eego::json::ObjectWriter(7)
+      .string("last_wake_reason", wakeReasonName())
+      .integer("next_scheduled_wake", static_cast<int64_t>(wake_at))
+      .boolean("deep_sleep_http_reachable", false)
+      .boolean("deep_sleep_ble_reachable", false)
+      .boolean("recovery_ap_active", ProvisionPortal::instance().apActive())
+      .integer("recovery_window_remaining_s", ProvisionPortal::instance().windowRemainingMs() / 1000)
+      .boolean("auto_sleep_suspended", ProvisionPortal::instance().apActive() || ble_state.scanning || ble_state.pairing_passkey_valid)
+      .take();
+  const JsonValue capabilities = ::eego::json::ObjectWriter(8)
+      .boolean("frontlight", cap.frontlight)
+      .boolean("battery", cap.battery)
+      .boolean("bluetooth", cap.bluetooth)
+      .boolean("ble_admin", cap.ble_admin)
+      .boolean("ble_observer", cap.ble_observer)
+      .boolean("display", cap.display)
+      .boolean("sd", cap.sd)
+      .boolean("rtc", cap.rtc)
+      .take();
+  const JsonValue ble_json = ::eego::json::ObjectWriter(26)
+      .boolean("compiled", ble_state.compiled)
+      .boolean("stack_active", ble_state.stack_active)
+      .string("role", ble::roleName(ble_state.role))
+      .boolean("admin_enabled", snap.values.ble_admin_enabled)
+      .boolean("admin_allowed", ble_state.admin_allowed)
+      .boolean("advertising", ble_state.advertising)
+      .string("link", ble::linkStateName(ble_state.link))
+      .boolean("pairing_locked", ble_state.pairing_locked)
+      .integer("bonds", ble_state.bonds)
+      .integer("att_mtu", ble_state.att_mtu)
+      .string("device_name", ble_state.device_name)
+      .integer("tunnel_messages", ble_state.tunnel_messages)
+      .integer("tunnel_errors", ble_state.tunnel_errors)
+      .boolean("observer_enabled", snap.values.ble_observer_enabled)
+      .integer("observer_remaining_s", ble_state.observer_remaining_s)
+      .boolean("recovery_ap_active", ble_state.recovery_ap_active)
+      .boolean("deep_sleep_realtime", false)
+      .integer("dropped_advertisements", ble_state.dropped_advertisements)
+      .integer("duplicate_advertisements", ble_state.duplicate_advertisements)
+      .integer("malformed_advertisements", ble_state.malformed_advertisements)
+      .integer("emitted_events", ble_state.emitted_events)
+      .integer("ingest_errors", ble_state.ingest_errors)
+      .integer("diram_free_bytes", ble_state.diram_free_bytes)
+      .integer("diram_min_free_bytes", ble_state.diram_min_free_bytes)
+      .integer("psram_free_bytes", ble_state.psram_free_bytes)
+      .string("last_error", ble_state.last_error)
+      .take();
   return sendJson(req, 200,
-                  JsonValue::makeObject({
-                      {"schema_version", JsonValue::makeInt(settings::kSchemaVersion)},
-                      {"revision", JsonValue::makeInt(snap.revision)},
-                      {"settings", settings::toJson(snap.values)},
-                      {"capabilities", capabilities},
-                      {"power", power},
-                      {"ble", ble_json},
-                  })
+                  ::eego::json::ObjectWriter(6)
+                      .integer("schema_version", settings::kSchemaVersion)
+                      .integer("revision", snap.revision)
+                      .value("settings", ::eego::json::JsonValue(settings::toJson(snap.values)))
+                      .value("capabilities", ::eego::json::JsonValue(capabilities))
+                      .value("power", ::eego::json::JsonValue(power))
+                      .value("ble", ::eego::json::JsonValue(ble_json))
+                      .take()
                       .toString());
 }
 
@@ -1313,7 +1316,7 @@ esp_err_t h_ble_unbind(httpd_req_t* req) {
   std::string body;
   if (readBodyBudget(req, kBodyBudgetLogin, body) != 0) return ESP_OK;
   alert_core::JsonValue root;
-  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (!parseJsonBody(req, body, root, kSmallBodyDepth)) return ESP_OK;
   if (root.type() != alert_core::JsonValue::Type::Object || !root.objectItems().empty()) {
     return sendError(req, 400, errc::kInvalidRequest, "unbind requires an empty object");
   }
@@ -1329,15 +1332,20 @@ esp_err_t h_settings_schema(httpd_req_t* req) {
   return sendJson(req, 200, settings::schemaJson());
 }
 
-esp_err_t h_settings_put(httpd_req_t* req) {
+// Validates and applies a settings patch. Returns false when a response (error) has
+// already been sent; `result` then holds its send status. Kept out of line so its frame
+// (patch DOM, candidate settings) is gone before h_settings_get builds the reply.
+__attribute__((noinline)) bool applySettingsPatch(httpd_req_t* req, esp_err_t& result) {
+  result = ESP_OK;
   if (!contentTypeJsonOk(req)) {
-    return sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
+    result = sendError(req, 415, errc::kUnsupportedMediaType, "JSON content type required");
+    return false;
   }
   std::string body;
   const int rb = readBodyBudget(req, kBodyBudgetConfig, body);
-  if (rb != 0) return ESP_OK;
+  if (rb != 0) return false;
   alert_core::JsonValue patch;
-  if (!parseJsonBody(req, body, patch)) return ESP_OK;
+  if (!parseJsonBody(req, body, patch)) return false;
 
   const settings::Snapshot snap = settings::DeviceSettings::instance().snapshot();
   settings::Settings candidate;
@@ -1345,24 +1353,33 @@ esp_err_t h_settings_put(httpd_req_t* req) {
   if (!settings::mergePatch(snap.values, patch, candidate, settings_errors)) {
     FieldErrors errors;
     for (const auto& error : settings_errors) errors.push_back({error.field, error.message});
-    return sendError(req, 400, errc::kValidationFailed, "settings validation failed", &errors);
+    result = sendError(req, 400, errc::kValidationFailed, "settings validation failed", &errors);
+    return false;
   }
   if ((settings::changedFields(snap.values, candidate) & settings::kChangedFrontlight) != 0 &&
       !snap.capabilities.frontlight) {
     FieldErrors errors = fieldErr("frontlight_enabled", "frontlight hardware is unavailable");
-    return sendError(req, 400, errc::kValidationFailed, "settings validation failed", &errors);
+    result = sendError(req, 400, errc::kValidationFailed, "settings validation failed", &errors);
+    return false;
   }
   if (candidate.ble_observer_enabled && !snap.capabilities.ble_observer) {
     FieldErrors errors = fieldErr("ble_observer_enabled", "BLE observer is unavailable");
-    return sendError(req, 400, errc::kValidationFailed, "settings validation failed", &errors);
+    result = sendError(req, 400, errc::kValidationFailed, "settings validation failed", &errors);
+    return false;
   }
 
   AdminCommand cmd;
   cmd.type = AdminCommandType::ApplySettings;
   cmd.settings_patch = std::move(patch);
   AdminResult res;
-  if (!runCommand(req, cmd, res)) return ESP_OK;
+  if (!runCommand(req, cmd, res)) return false;
   ADMIN_LOG_INFO("typed device settings updated");
+  return true;
+}
+
+esp_err_t h_settings_put(httpd_req_t* req) {
+  esp_err_t result = ESP_OK;
+  if (!applySettingsPatch(req, result)) return result;
   return h_settings_get(req);
 }
 
@@ -1437,7 +1454,7 @@ esp_err_t h_wifi_add(httpd_req_t* req) {
   const int rb = readBodyBudget(req, kBodyBudgetSmall, body);
   if (rb != 0) return ESP_OK;
   alert_core::JsonValue root;
-  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (!parseJsonBody(req, body, root, kSmallBodyDepth)) return ESP_OK;
   std::string ssid, password;
   if (root.type() != alert_core::JsonValue::Type::Object ||
       !jsonStringField(root, "ssid", ssid)) {
@@ -1478,7 +1495,7 @@ esp_err_t h_wifi_remove(httpd_req_t* req) {
   const int rb = readBodyBudget(req, kBodyBudgetSmall, body);
   if (rb != 0) return ESP_OK;
   alert_core::JsonValue root;
-  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (!parseJsonBody(req, body, root, kSmallBodyDepth)) return ESP_OK;
   std::string ssid;
   if (root.type() != alert_core::JsonValue::Type::Object ||
       !jsonStringField(root, "ssid", ssid) || ssid.empty()) {
@@ -1503,11 +1520,11 @@ std::string wifiListJson() {
   net::CredentialStore::loadWifiAccounts(accounts);
   JsonValue::Array networks;
   for (size_t i = 0; i < accounts.size(); i++) {
-    networks.push_back(JsonValue::makeObject({
-        {"ssid", JsonValue::makeString(accounts[i].ssid)},
-        {"has_password", JsonValue::makeBool(!accounts[i].password.empty())},
-        {"pass_ref", JsonValue::makeString("nvs:wifi/" + std::to_string(i))},
-    }));
+    networks.push_back(::eego::json::ObjectWriter(3)
+        .string("ssid", accounts[i].ssid)
+        .boolean("has_password", !accounts[i].password.empty())
+        .string("pass_ref", "nvs:wifi/" + std::to_string(i))
+        .take());
     net::CredentialStore::secureErase(accounts[i].password);
   }
   net::NetStatusSnapshot ns;
@@ -1558,11 +1575,11 @@ std::string wifiListJson() {
     current.emplace_back("roams", JsonValue::makeInt(ns.wifi.roams));
     current.emplace_back("last_dhcp_ms", JsonValue::makeInt(ns.wifi.last_dhcp_ms));
   }
-  return JsonValue::makeObject({
-                                   {"networks", JsonValue::makeArray(std::move(networks))},
-                                   {"max", JsonValue::makeInt(net::kMaxWifiNetworks)},
-                                   {"current", JsonValue::makeObject(std::move(current))},
-                               })
+  return ::eego::json::ObjectWriter(3)
+      .value("networks", ::eego::json::JsonValue(JsonValue::makeArray(std::move(networks))))
+      .integer("max", net::kMaxWifiNetworks)
+      .value("current", ::eego::json::JsonValue(JsonValue::makeObject(std::move(current))))
+      .take()
       .toString();
 }
 
@@ -1577,7 +1594,7 @@ esp_err_t h_wifi_list_put(httpd_req_t* req) {
   const int rb = readBodyBudget(req, kBodyBudgetSmall, body);
   if (rb != 0) return ESP_OK;
   JsonValue root;
-  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (!parseJsonBody(req, body, root, kSmallBodyDepth)) return ESP_OK;
   net::CredentialStore::secureErase(body);
   const JsonValue* list = root.type() == JsonValue::Type::Object ? root.find("networks") : nullptr;
   if (list == nullptr || list->type() != JsonValue::Type::Array) {
@@ -1643,16 +1660,17 @@ esp_err_t h_source_credentials_get(httpd_req_t* req) {
   using alert_core::JsonValue;
   JsonValue::Array items;
   for (const auto& credential : credentials) {
-    items.push_back(JsonValue::makeObject({
-        {"key", JsonValue::makeString(credential.key)},
-        {"ref", JsonValue::makeString(credential.ref)},
-    }));
+    items.push_back(::eego::json::ObjectWriter(2)
+        .string("key", credential.key)
+        .string("ref", credential.ref)
+        .take());
   }
   return sendJson(req, 200,
-                  JsonValue::makeObject({
-                      {"namespace", JsonValue::makeString("source")},
-                      {"credentials", JsonValue::makeArray(std::move(items))},
-                  }).toString());
+                  ::eego::json::ObjectWriter(2)
+                      .string("namespace", "source")
+                      .value("credentials", ::eego::json::JsonValue(JsonValue::makeArray(std::move(items))))
+                      .take()
+                      .toString());
 }
 
 esp_err_t h_source_credentials_write(httpd_req_t* req, bool remove) {
@@ -1666,7 +1684,7 @@ esp_err_t h_source_credentials_write(httpd_req_t* req, bool remove) {
   std::string body;
   if (readBodyBudget(req, kBodyBudgetSmall, body) != 0) return ESP_OK;
   alert_core::JsonValue root;
-  if (!parseJsonBody(req, body, root)) {
+  if (!parseJsonBody(req, body, root, kSmallBodyDepth)) {
     net::CredentialStore::secureErase(body);
     return ESP_OK;
   }
@@ -1707,11 +1725,12 @@ esp_err_t h_source_credentials_write(httpd_req_t* req, bool remove) {
   if (!ok) return ESP_OK;
   ADMIN_LOG_INFO(remove ? "source credential deleted" : "source credential written");
   return sendJson(req, 200,
-                  JsonValue::makeObject({
-                      {"key", JsonValue::makeString(key)},
-                      {"ref", JsonValue::makeString(net::CredentialStore::sourceRef(key))},
-                      {"deleted", JsonValue::makeBool(remove)},
-                  }).toString());
+                  ::eego::json::ObjectWriter(3)
+                      .string("key", key)
+                      .string("ref", net::CredentialStore::sourceRef(key))
+                      .boolean("deleted", remove)
+                      .take()
+                      .toString());
 }
 
 // ---------------------------------------------------------------------------
@@ -1724,7 +1743,7 @@ esp_err_t h_reboot(httpd_req_t* req) {
   const int rb = readBodyBudget(req, kBodyBudgetConfirm, body);
   if (rb != 0) return ESP_OK;
   alert_core::JsonValue root;
-  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (!parseJsonBody(req, body, root, kSmallBodyDepth)) return ESP_OK;
   std::string confirm;
   if (!jsonStringField(root, "confirm", confirm) || confirm != "REBOOT") {
     FieldErrors errs = fieldErr("confirm", "must be \"REBOOT\"");
@@ -1747,7 +1766,7 @@ esp_err_t h_factory_reset(httpd_req_t* req) {
   const int rb = readBodyBudget(req, kBodyBudgetSmall, body);
   if (rb != 0) return ESP_OK;
   alert_core::JsonValue root;
-  if (!parseJsonBody(req, body, root)) return ESP_OK;
+  if (!parseJsonBody(req, body, root, kSmallBodyDepth)) return ESP_OK;
   std::string password, confirm;
   if (!jsonStringField(root, "password", password) ||
       !jsonStringField(root, "confirm", confirm)) {
@@ -1787,9 +1806,9 @@ esp_err_t h_ingest_rotate(httpd_req_t* req) {
   }
   ADMIN_LOG_WARN("ingest key rotated; previous key revoked");
   return sendJson(req, 200,
-                  alert_core::JsonValue::makeObject({
-                                            {"ingest_key", alert_core::JsonValue::makeString(key)},
-                                        })
+                  ::eego::json::ObjectWriter(1)
+                      .string("ingest_key", key)
+                      .take()
                       .toString());
 }
 
@@ -1866,7 +1885,7 @@ esp_err_t h_display_snapshot(httpd_req_t* req) {
 // ---------------------------------------------------------------------------
 struct AsyncJob {
   httpd_req_t* req;
-  char path[64];
+  char path[160];
 };
 QueueHandle_t g_async_queue = nullptr;
 
@@ -1879,20 +1898,22 @@ void asyncWorker(void*) {
   }
 }
 
-bool asyncDashboardPath(const char* path) {
-  return strcmp(path, "dashboard/sources/test") == 0 ||
+// Every dashboard write (and the slow source/preview calls) runs on the 20 KB worker:
+// they parse and validate whole dashboards, which is too deep for the httpd stack.
+bool asyncDashboardPath(httpd_req_t* req, const char* path) {
+  return req->method != HTTP_GET || strcmp(path, "dashboard/sources/test") == 0 ||
          strcmp(path, "dashboard/sources/probe") == 0 ||
          strcmp(path, "dashboard/render-preview") == 0;
 }
 
 esp_err_t handleDashboardMaybeAsync(httpd_req_t* req, const std::string& path) {
-  if (!asyncDashboardPath(path.c_str()) || path.size() >= sizeof(AsyncJob::path)) {
+  if (!asyncDashboardPath(req, path.c_str()) || path.size() >= sizeof(AsyncJob::path)) {
     return internal::handleDashboardApi(req, path.c_str());
   }
   if (g_async_queue == nullptr) {
     g_async_queue = xQueueCreate(4, sizeof(AsyncJob));
     if (g_async_queue == nullptr ||
-        xTaskCreate(&asyncWorker, "admin_async", 8192, nullptr, 5, nullptr) != pdPASS) {
+        xTaskCreate(&asyncWorker, "admin_async", 20480, nullptr, 5, nullptr) != pdPASS) {
       if (g_async_queue != nullptr) vQueueDelete(g_async_queue);
       g_async_queue = nullptr;
       return internal::handleDashboardApi(req, path.c_str());
@@ -1997,6 +2018,10 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     if (strcmp(path, "system/crash") == 0) {
       if (!bearer()) return ESP_OK;
       return sendJson(req, 200, devlog::crashJson());
+    }
+    if (strcmp(path, "system/tasks") == 0) {
+      if (!bearer()) return ESP_OK;
+      return sendJson(req, 200, devlog::tasksJson());
     }
     if (strcmp(path, "display/snapshot.bmp") == 0) {
       if (!bearer()) return ESP_OK;
@@ -2238,7 +2263,7 @@ esp_err_t startAdminApi(const AdminConfig& cfg) {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = cfg.port;
   config.max_uri_handlers = 12;
-  config.stack_size = 8192;
+  config.stack_size = 16384;  // measured handler chains reach ~15 KB at -Og
   config.max_open_sockets = 7;
   config.recv_wait_timeout = 5;
   config.lru_purge_enable = true;
@@ -2255,10 +2280,10 @@ esp_err_t startAdminApi(const AdminConfig& cfg) {
   }
 
   const httpd_uri_t routes[] = {
-      {.uri = "/*", .method = HTTP_GET, .handler = &wildcardHandler},
-      {.uri = "/*", .method = HTTP_POST, .handler = &wildcardHandler},
-      {.uri = "/*", .method = HTTP_PUT, .handler = &wildcardHandler},
-      {.uri = "/*", .method = HTTP_DELETE, .handler = &wildcardHandler},
+      {.uri = "/*", .method = HTTP_GET, .handler = &wildcardHandler, .user_ctx = nullptr},
+      {.uri = "/*", .method = HTTP_POST, .handler = &wildcardHandler, .user_ctx = nullptr},
+      {.uri = "/*", .method = HTTP_PUT, .handler = &wildcardHandler, .user_ctx = nullptr},
+      {.uri = "/*", .method = HTTP_DELETE, .handler = &wildcardHandler, .user_ctx = nullptr},
   };
   for (const auto& r : routes) {
     httpd_register_uri_handler(g_server, &r);

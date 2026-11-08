@@ -52,6 +52,23 @@ bool serviceCommands(uint32_t wait_ms) {
   return true;
 }
 
+bool postDeferred(void (*fn)()) {
+  QueueHandle_t q = cmdQueue();
+  if (q == nullptr || g_handler == nullptr || fn == nullptr) return false;
+  RawCmdPtr raw = std::make_shared<RawCmd>();
+  raw->cmd.type = AdminCommandType::RunDeferred;
+  raw->cmd.deferred = fn;
+  raw->done = xSemaphoreCreateBinary();
+  if (raw->done == nullptr) return false;
+  RawCmdPtr* slot = new (std::nothrow) RawCmdPtr(raw);
+  if (slot == nullptr) return false;
+  if (xQueueSend(q, &slot, 0) != pdTRUE) {
+    delete slot;
+    return false;
+  }
+  return true;
+}
+
 bool enqueueAdminCommand(const AdminCommand& cmd, AdminResult& res, uint32_t wait_ms) {
   QueueHandle_t q = cmdQueue();
   if (q == nullptr || g_handler == nullptr) return false;

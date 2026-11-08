@@ -36,3 +36,18 @@ describe('expression (mirror of dashboard_core/expression.cpp)', () => {
     expect(ruleFires('x')).toBe(false);
   });
 });
+
+describe('expression limits (mirror of dashboard_core)', () => {
+  const chain = (n: number) => Array.from({ length: n }, () => '1').join(' + ');
+  it('bounds nesting depth to 6', () => {
+    expect(checkExpression('((((((1))))))')).toBeNull();
+    expect(checkExpression('(((((((1)))))))')?.message).toBe('expression nesting exceeds limit');
+    expect(checkExpression('------1')).toBeNull();
+    expect(checkExpression('-------1')?.message).toBe('expression nesting exceeds limit');
+  });
+  it('bounds tree height to 24', () => {
+    expect(checkExpression(chain(24))).toBeNull();
+    expect(checkExpression(chain(25))?.message).toBe('expression nesting exceeds limit');
+    expect(checkExpression(chain(200))).not.toBeNull();
+  });
+});

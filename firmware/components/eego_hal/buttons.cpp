@@ -13,7 +13,7 @@ static const char* BTN_TAG = "eego_btn";
 static constexpr uint32_t POLL_PERIOD_MS = 10;
 static constexpr uint8_t DEBOUNCE_SAMPLES = 2;
 static constexpr uint32_t QUEUE_LEN = 64;
-static constexpr uint32_t TASK_STACK = 4096;
+static constexpr uint32_t TASK_STACK = 2560;  // poll loop + event dispatch; measured well under 1 KB
 static constexpr UBaseType_t TASK_PRIORITY = 2;
 
 namespace eego {

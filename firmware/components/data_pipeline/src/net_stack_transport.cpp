@@ -16,7 +16,7 @@ namespace {
 
 constexpr UBaseType_t kRequestQueueLength = 16;
 constexpr UBaseType_t kResultQueueLength = kRequestQueueLength + 1;
-constexpr uint32_t kWorkerStackBytes = 8192;
+constexpr uint32_t kWorkerStackBytes = 4096;  // worst case measured ~0.7 KB
 constexpr UBaseType_t kWorkerPriority = 3;
 
 struct AsyncExchange {
@@ -125,9 +125,10 @@ struct NetStackTransport::AsyncState {
   std::atomic<bool> started{false};
 };
 
-NetStackTransport::NetStackTransport(net::NetStack& stack, uint32_t wait_ms)
-    : stack_(stack), wait_ms_(wait_ms), async_(std::make_shared<AsyncState>(stack, wait_ms)) {
-  AsyncState::start(async_);
+NetStackTransport::NetStackTransport(net::NetStack& stack, uint32_t wait_ms, bool async)
+    : stack_(stack), wait_ms_(wait_ms),
+      async_(async ? std::make_shared<AsyncState>(stack, wait_ms) : nullptr) {
+  if (async_ != nullptr) AsyncState::start(async_);
 }
 
 NetStackTransport::~NetStackTransport() {

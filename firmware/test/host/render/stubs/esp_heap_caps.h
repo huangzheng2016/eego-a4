@@ -6,6 +6,7 @@
 #define MALLOC_CAP_SPIRAM (1 << 10)
 #define MALLOC_CAP_INTERNAL (1 << 11)
 #define MALLOC_CAP_8BIT (1 << 2)
+#define MALLOC_CAP_DEFAULT (1 << 12)
 inline void* heap_caps_malloc(size_t size, unsigned) { return std::malloc(size); }
 inline void* heap_caps_realloc(void* ptr, size_t size, unsigned) { return std::realloc(ptr, size); }
 inline void heap_caps_free(void* ptr) { std::free(ptr); }

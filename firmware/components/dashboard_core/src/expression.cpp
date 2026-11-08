@@ -12,7 +12,11 @@ namespace eego::dashboard {
 namespace {
 
 constexpr size_t kMaxNodes = 128;
-constexpr size_t kMaxDepth = 24;
+// Parentheses, ?: branches, unary operators and call arguments each add one level.
+constexpr size_t kMaxDepth = 6;
+// Longest root-to-leaf path; also bounds evaluator recursion (left-deep a+b+c+... chains).
+constexpr size_t kMaxHeight = 24;
+constexpr size_t kMaxEvalDepth = 24;
 constexpr size_t kMaxArguments = 8;
 constexpr size_t kMaxEvalSteps = 512;
 const std::string kEmptyString;
@@ -25,7 +29,20 @@ struct Node {
   std::string text;
   std::vector<Node> children;
   size_t offset = 0;
+  size_t height = 1;
 };
+
+struct BinaryOp {
+  std::string_view token;
+  int precedence;
+};
+// Longer tokens first so "<=" wins over "<".
+constexpr BinaryOp kBinaryOps[] = {
+    {"||", 1}, {"&&", 2}, {"==", 3}, {"!=", 3}, {"<=", 4}, {">=", 4}, {"<", 4},
+    {">", 4},  {"+", 5},  {"-", 5},  {"*", 6},  {"/", 6},  {"%", 6},
+};
+
+#define EEGO_NOINLINE __attribute__((noinline))
 
 bool identifierStart(char c) {
   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
@@ -88,77 +105,66 @@ class Parser {
     return true;
   }
 
+  // Replaces `out` with an interior node owning `children`. Recursion frames only hold a
+  // small std::vector; the Node temporaries live in this non-inlined frame.
+  EEGO_NOINLINE bool finishNode(Node& out, NodeKind kind, size_t offset, std::string_view text,
+                                std::vector<Node>&& children, bool count) {
+    if (count && ++nodes_ > kMaxNodes) return fail("expression exceeds node limit");
+    size_t height = 0;
+    for (const Node& child : children) height = std::max(height, child.height);
+    if (++height > kMaxHeight) return fail("expression nesting exceeds limit");
+    out = Node();
+    out.kind = kind;
+    out.offset = offset;
+    out.text.assign(text.data(), text.size());
+    out.children = std::move(children);
+    out.height = height;
+    return true;
+  }
+
   bool parseConditional(Node& out, size_t depth) {
     if (depth > kMaxDepth) return fail("expression nesting exceeds limit");
-    Node condition;
-    if (!parseOr(condition, depth)) return false;
-    if (!match("?")) {
-      out = std::move(condition);
-      return true;
-    }
-    const size_t offset = position_ - 1;
-    Node yes;
-    Node no;
-    if (!parseConditional(yes, depth + 1)) return false;
-    if (!match(":")) return fail("expected ':' in conditional expression");
-    if (!parseConditional(no, depth + 1)) return false;
-    Node result;
-    if (!makeNode(result, NodeKind::Conditional, offset)) return false;
-    result.children.push_back(std::move(condition));
-    result.children.push_back(std::move(yes));
-    result.children.push_back(std::move(no));
-    out = std::move(result);
-    return true;
+    if (!parseBinary(out, depth, 1)) return false;
+    if (!match("?")) return true;
+    return parseConditionalTail(out, depth, position_ - 1);
   }
 
-  using ParseLevel = bool (Parser::*)(Node&, size_t);
+  EEGO_NOINLINE bool parseConditionalTail(Node& out, size_t depth, size_t offset) {
+    std::vector<Node> children(3);
+    children[0] = std::move(out);
+    if (!parseConditional(children[1], depth + 1)) return false;
+    if (!match(":")) return fail("expected ':' in conditional expression");
+    if (!parseConditional(children[2], depth + 1)) return false;
+    return finishNode(out, NodeKind::Conditional, offset, {}, std::move(children), true);
+  }
 
-  bool parseBinary(Node& out, size_t depth, ParseLevel next,
-                   std::initializer_list<std::string_view> operators) {
-    Node left;
-    if (!(this->*next)(left, depth)) return false;
+  const BinaryOp* peekBinary() const {
+    const std::string_view rest = expression_.substr(position_);
+    for (const BinaryOp& op : kBinaryOps) {
+      if (rest.substr(0, op.token.size()) == op.token) return &op;
+    }
+    return nullptr;
+  }
+
+  // Precedence climbing; every binary operator is left-associative. Recursion only goes
+  // to strictly higher precedence, so it is at most six levels per nesting level.
+  bool parseBinary(Node& out, size_t depth, int min_precedence) {
+    if (!parseUnary(out, depth)) return false;
     for (;;) {
       skipWhitespace();
-      std::string_view operation;
-      for (const auto candidate : operators) {
-        if (expression_.substr(position_, candidate.size()) == candidate) {
-          operation = candidate;
-          break;
-        }
-      }
-      if (operation.empty()) break;
+      const BinaryOp* op = peekBinary();
+      if (op == nullptr || op->precedence < min_precedence) return true;
       const size_t offset = position_;
-      position_ += operation.size();
-      Node right;
-      if (!(this->*next)(right, depth)) return false;
-      Node combined;
-      if (!makeNode(combined, NodeKind::Binary, offset)) return false;
-      combined.text = std::string(operation);
-      combined.children.push_back(std::move(left));
-      combined.children.push_back(std::move(right));
-      left = std::move(combined);
+      position_ += op->token.size();
+      if (!parseBinaryRight(out, depth, *op, offset)) return false;
     }
-    out = std::move(left);
-    return true;
   }
 
-  bool parseOr(Node& out, size_t depth) {
-    return parseBinary(out, depth, &Parser::parseAnd, {"||"});
-  }
-  bool parseAnd(Node& out, size_t depth) {
-    return parseBinary(out, depth, &Parser::parseEquality, {"&&"});
-  }
-  bool parseEquality(Node& out, size_t depth) {
-    return parseBinary(out, depth, &Parser::parseComparison, {"==", "!="});
-  }
-  bool parseComparison(Node& out, size_t depth) {
-    return parseBinary(out, depth, &Parser::parseTerm, {"<=", ">=", "<", ">"});
-  }
-  bool parseTerm(Node& out, size_t depth) {
-    return parseBinary(out, depth, &Parser::parseFactor, {"+", "-"});
-  }
-  bool parseFactor(Node& out, size_t depth) {
-    return parseBinary(out, depth, &Parser::parseUnary, {"*", "/", "%"});
+  EEGO_NOINLINE bool parseBinaryRight(Node& out, size_t depth, const BinaryOp& op, size_t offset) {
+    std::vector<Node> children(2);
+    children[0] = std::move(out);
+    if (!parseBinary(children[1], depth, op.precedence + 1)) return false;
+    return finishNode(out, NodeKind::Binary, offset, op.token, std::move(children), true);
   }
 
   bool parseUnary(Node& out, size_t depth) {
@@ -169,19 +175,15 @@ class Parser {
          expression_[position_] == '+')) {
       const size_t offset = position_;
       const char operation = expression_[position_++];
-      Node operand;
-      if (!parseUnary(operand, depth + 1)) return false;
-      Node result;
-      if (!makeNode(result, NodeKind::Unary, offset)) return false;
-      result.text.assign(1, operation);
-      result.children.push_back(std::move(operand));
-      out = std::move(result);
-      return true;
+      std::vector<Node> children(1);
+      if (!parseUnary(children[0], depth + 1)) return false;
+      return finishNode(out, NodeKind::Unary, offset, std::string_view(&operation, 1),
+                        std::move(children), true);
     }
     return parsePrimary(out, depth);
   }
 
-  bool parseNumber(Node& out) {
+  EEGO_NOINLINE bool parseNumber(Node& out) {
     const size_t start = position_;
     if (position_ < expression_.size() && expression_[position_] == '0') {
       ++position_;
@@ -224,7 +226,7 @@ class Parser {
     return true;
   }
 
-  bool parseString(Node& out) {
+  EEGO_NOINLINE bool parseString(Node& out) {
     const size_t start = position_;
     const char quote = expression_[position_++];
     std::string value;
@@ -262,15 +264,20 @@ class Parser {
   bool parsePrimary(Node& out, size_t depth) {
     skipWhitespace();
     if (position_ >= expression_.size()) return fail("expected operand");
-    const char c = expression_[position_];
-    if (c >= '0' && c <= '9') return parseNumber(out);
-    if (c == '"' || c == '\'') return parseString(out);
-    if (c == '(') {
+    if (expression_[position_] == '(') {
       ++position_;
       if (!parseConditional(out, depth + 1)) return false;
       if (!match(")")) return fail("expected ')'");
       return true;
     }
+    return parseAtom(out, depth);
+  }
+
+  // Literals, identifiers and calls: kept out of the parenthesis recursion frame.
+  EEGO_NOINLINE bool parseAtom(Node& out, size_t depth) {
+    const char c = expression_[position_];
+    if (c >= '0' && c <= '9') return parseNumber(out);
+    if (c == '"' || c == '\'') return parseString(out);
     if (!identifierStart(c)) return fail("expected operand");
     const size_t start = position_++;
     while (position_ < expression_.size() && identifierPart(expression_[position_])) ++position_;
@@ -281,24 +288,7 @@ class Parser {
     if (position_ < expression_.size() && expression_[position_] == '(') {
       if (!knownFunction(name)) return fail("unknown function");
       ++position_;
-      Node call;
-      if (!makeNode(call, NodeKind::Call, start)) return false;
-      call.text = std::string(name);
-      skipWhitespace();
-      if (position_ < expression_.size() && expression_[position_] == ')') {
-        ++position_;
-      } else {
-        for (;;) {
-          Node argument;
-          if (!parseConditional(argument, depth + 1)) return false;
-          call.children.push_back(std::move(argument));
-          if (call.children.size() > kMaxArguments) return fail("too many function arguments");
-          if (match(")")) break;
-          if (!match(",")) return fail("expected ',' or ')' in function call");
-        }
-      }
-      out = std::move(call);
-      return true;
+      return parseCall(out, depth, start, name);
     }
     if (name == "true" || name == "false") {
       if (!makeNode(out, NodeKind::Literal, start)) return false;
@@ -313,6 +303,25 @@ class Parser {
     return true;
   }
 
+  EEGO_NOINLINE bool parseCall(Node& out, size_t depth, size_t start, std::string_view name) {
+    // The call node is counted before its arguments (matches the web parser's offsets).
+    if (++nodes_ > kMaxNodes) return fail("expression exceeds node limit");
+    std::vector<Node> arguments;
+    skipWhitespace();
+    if (position_ < expression_.size() && expression_[position_] == ')') {
+      ++position_;
+    } else {
+      for (;;) {
+        arguments.emplace_back();
+        if (!parseConditional(arguments.back(), depth + 1)) return false;
+        if (arguments.size() > kMaxArguments) return fail("too many function arguments");
+        if (match(")")) break;
+        if (!match(",")) return fail("expected ',' or ')' in function call");
+      }
+    }
+    return finishNode(out, NodeKind::Call, start, name, std::move(arguments), false);
+  }
+
   std::string_view expression_;
   size_t position_ = 0;
   size_t nodes_ = 0;
@@ -325,7 +334,7 @@ class Evaluator {
 
   bool evaluate(const Node& node, EvalValue& out, size_t depth = 0) {
     if (++steps_ > kMaxEvalSteps) return fail(node, "expression evaluation step limit exceeded");
-    if (depth > kMaxNodes) return fail(node, "expression evaluation depth exceeded");
+    if (depth > kMaxEvalDepth) return fail(node, "expression evaluation depth exceeded");
     switch (node.kind) {
       case NodeKind::Literal:
         out = node.literal;
@@ -427,6 +436,11 @@ class Evaluator {
     }
     EvalValue right;
     if (!evaluate(node.children[1], right, depth + 1)) return false;
+    return applyBinary(node, left, right, out);
+  }
+
+  EEGO_NOINLINE bool applyBinary(const Node& node, const EvalValue& left, const EvalValue& right,
+                                 EvalValue& out) {
     if (node.text == "==" || node.text == "!=") {
       const bool equal = equalValues(left, right);
       out = EvalValue::makeBool(node.text == "==" ? equal : !equal);
@@ -485,15 +499,6 @@ class Evaluator {
   }
 
   bool evaluateCall(const Node& node, EvalValue& out, size_t depth) {
-    if (node.text == "isnull" || node.text == "isfinite") {
-      if (node.children.size() != 1) return fail(node, "invalid argument count for " + node.text);
-      EvalValue value;
-      if (!evaluate(node.children[0], value, depth + 1)) return false;
-      if (node.text == "isnull") out = EvalValue::makeBool(value.type() == EvalValue::Type::Null);
-      else out = EvalValue::makeBool(value.type() == EvalValue::Type::Number &&
-                                     std::isfinite(value.number()));
-      return true;
-    }
     if (node.text == "coalesce") {
       if (node.children.empty()) return fail(node, "coalesce requires at least one argument");
       for (const auto& child : node.children) {
@@ -503,7 +508,22 @@ class Evaluator {
       out = EvalValue::makeNull();
       return true;
     }
-    if (node.text == "convert") {
+    if (node.text == "isnull" || node.text == "isfinite" || node.text == "convert")
+      return evaluateValueCall(node, out, depth);
+    return evaluateNumericCall(node, out, depth);
+  }
+
+  EEGO_NOINLINE bool evaluateValueCall(const Node& node, EvalValue& out, size_t depth) {
+    if (node.text == "isnull" || node.text == "isfinite") {
+      if (node.children.size() != 1) return fail(node, "invalid argument count for " + node.text);
+      EvalValue value;
+      if (!evaluate(node.children[0], value, depth + 1)) return false;
+      if (node.text == "isnull") out = EvalValue::makeBool(value.type() == EvalValue::Type::Null);
+      else out = EvalValue::makeBool(value.type() == EvalValue::Type::Number &&
+                                     std::isfinite(value.number()));
+      return true;
+    }
+    {
       if (node.children.size() != 3) return fail(node, "convert requires three arguments");
       EvalValue input;
       EvalValue from;
@@ -522,7 +542,9 @@ class Evaluator {
       out = EvalValue::makeNumber(converted);
       return true;
     }
+  }
 
+  EEGO_NOINLINE bool evaluateNumericCall(const Node& node, EvalValue& out, size_t depth) {
     std::vector<double> values;
     size_t minimum = 1;
     size_t maximum = 1;

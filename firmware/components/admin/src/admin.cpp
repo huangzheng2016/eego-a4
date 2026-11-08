@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "admin/admin.h"
+#include "alert_core/json_writer.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -40,7 +41,7 @@ void scheduleReboot(uint32_t delay_ms) {
   if (delay_ms < 2000) delay_ms = 2000;
   if (g_reboot_timer == nullptr) {
     const esp_timer_create_args_t args = {
-        .callback = &rebootTimerCallback, .name = "admin_reboot"};
+        .callback = &rebootTimerCallback, .arg = nullptr, .dispatch_method = ESP_TIMER_TASK, .name = "admin_reboot", .skip_unhandled_events = false};
     if (esp_timer_create(&args, &g_reboot_timer) != ESP_OK) {
       esp_restart();
       return;
@@ -82,7 +83,7 @@ bool syncMuteRules(const std::vector<alert_core::MuteRule>& rules, std::string& 
 
 struct RuntimeConfig {
   AdminDomainConfig admin;
-  alert_core::JsonValue overrides = alert_core::JsonValue::makeObject({});
+  alert_core::JsonValue overrides = ::eego::json::ObjectWriter(0).take();
   std::vector<alert_core::MuteRule> mute_rules;
 };
 
@@ -447,6 +448,12 @@ void defaultCommandHandler(const AdminCommand& cmd, AdminResult& res, void* ctx)
       // app_task (UI owner): offscreen render via the registered provider.
       res.ok = cmd.preview != nullptr && internal::runRenderPreviewJob(*cmd.preview, res.err);
       if (cmd.preview == nullptr) res.err = "render preview job missing";
+      return;
+    }
+
+    case AdminCommandType::RunDeferred: {
+      if (cmd.deferred != nullptr) cmd.deferred();
+      res.ok = true;
       return;
     }
 

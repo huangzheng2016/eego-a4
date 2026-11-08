@@ -27,6 +27,7 @@ export function SystemPage() {
   const [crash, setCrash] = useState<api.CrashReport | null>(null);
   const [devLog, setDevLog] = useState<string | null>(null);
   const [devLogBusy, setDevLogBusy] = useState(false);
+  const [tasks, setTasks] = useState<api.TaskStack[] | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [password, setPassword] = useState('');
@@ -43,12 +44,20 @@ export function SystemPage() {
   }, [toast, t]);
   const loadDevLog = useCallback(() => {
     setDevLogBusy(true);
-    api
-      .getDeviceLog()
-      .then((text) => {
+    Promise.all([
+      api.getDeviceLog().then((text) => {
         setDevLog(text);
         console.info('[eego device log]\n' + text);
-      }, (e) => toast('error', errorText(e, t)))
+      }),
+      api.getTasks().then(
+        (r) => {
+          setTasks(r.tasks);
+          console.info('[eego tasks]', r.tasks);
+        },
+        () => setTasks(null),
+      ),
+    ])
+      .catch((e) => toast('error', errorText(e, t)))
       .finally(() => setDevLogBusy(false));
   }, [toast, t]);
   useEffect(() => {
@@ -224,6 +233,21 @@ export function SystemPage() {
             <Button size="sm" loading={devLogBusy} onClick={loadDevLog}>{t('common.refresh')}</Button>
             <Button size="sm" variant="ghost" disabled={!devLog} onClick={() => devLog && void copy(devLog)}>{t('common.copy')}</Button>
           </div>
+          {tasks && tasks.length > 0 && (
+            <table className="table mb-2">
+              <thead>
+                <tr><th>{t('sys.task')}</th><th className="num">{t('sys.stack_free')}</th></tr>
+              </thead>
+              <tbody>
+                {tasks.map((task) => (
+                  <tr key={task.name}>
+                    <td className="mono">{task.name}</td>
+                    <td className="num mono">{task.stack_free < 1024 ? <Badge tone="danger">{task.stack_free}</Badge> : task.stack_free}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
           <pre className="mono device-log">{devLog ?? ''}</pre>
         </details>
       </Card>

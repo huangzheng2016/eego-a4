@@ -86,6 +86,8 @@ void appendUtf8(std::string& out, uint32_t cp) {
   }
 }
 
+#define EEGO_JSON_NOINLINE __attribute__((noinline))
+
 class Parser {
  public:
   Parser(std::string_view text, size_t max_depth) : text_(text), max_depth_(max_depth) {}
@@ -123,28 +125,44 @@ class Parser {
     return true;
   }
 
+  // Recursion frames only hold small locals: every JsonValue temporary (makeX) is built
+  // in a non-inlined helper, children are parsed straight into their container slot.
+  static EEGO_JSON_NOINLINE void setNull(JsonValue& out) { out = JsonValue::makeNull(); }
+  static EEGO_JSON_NOINLINE void setBool(JsonValue& out, bool value) {
+    out = JsonValue::makeBool(value);
+  }
+  static EEGO_JSON_NOINLINE void setEmptyArray(JsonValue& out) {
+    out = JsonValue::makeArray(JsonValue::Array());
+  }
+  static EEGO_JSON_NOINLINE void setEmptyObject(JsonValue& out) {
+    out = JsonValue::makeObject(JsonValue::Object());
+  }
+
+  EEGO_JSON_NOINLINE bool parseStringValue(JsonValue& out) {
+    std::string value;
+    if (!parseString(value)) return false;
+    out = JsonValue::makeString(std::move(value));
+    return true;
+  }
+
   bool parseValue(JsonValue& out, size_t depth) {
     if (depth > max_depth_) return fail("JSON nesting exceeds configured depth");
     if (position_ >= text_.size()) return fail("unexpected end of input");
     switch (text_[position_]) {
       case 'n':
         if (!literal("null")) return false;
-        out = JsonValue::makeNull();
+        setNull(out);
         return true;
       case 't':
         if (!literal("true")) return false;
-        out = JsonValue::makeBool(true);
+        setBool(out, true);
         return true;
       case 'f':
         if (!literal("false")) return false;
-        out = JsonValue::makeBool(false);
+        setBool(out, false);
         return true;
-      case '"': {
-        std::string value;
-        if (!parseString(value)) return false;
-        out = JsonValue::makeString(std::move(value));
-        return true;
-      }
+      case '"':
+        return parseStringValue(out);
       case '[':
         return parseArray(out, depth);
       case '{':
@@ -156,23 +174,21 @@ class Parser {
 
   bool parseArray(JsonValue& out, size_t depth) {
     ++position_;
-    JsonValue::Array items;
+    setEmptyArray(out);
+    JsonValue::Array& items = out.arrayItems();
     skipWhitespace();
     if (position_ < text_.size() && text_[position_] == ']') {
       ++position_;
-      out = JsonValue::makeArray(std::move(items));
       return true;
     }
     for (;;) {
       skipWhitespace();
-      JsonValue item;
-      if (!parseValue(item, depth + 1)) return false;
-      items.push_back(std::move(item));
+      items.emplace_back();
+      if (!parseValue(items.back(), depth + 1)) return false;
       skipWhitespace();
       if (position_ >= text_.size()) return fail("unterminated array");
       if (text_[position_] == ']') {
         ++position_;
-        out = JsonValue::makeArray(std::move(items));
         return true;
       }
       if (text_[position_] != ',') return fail("expected ',' or ']' in array");
@@ -180,35 +196,39 @@ class Parser {
     }
   }
 
+  // Parses `"key"` and the ':' after it, then appends an empty member for the value.
+  EEGO_JSON_NOINLINE bool parseMemberKey(JsonValue::Object& members) {
+    if (position_ >= text_.size() || text_[position_] != '"') return fail("expected object key");
+    std::string key;
+    if (!parseString(key)) return false;
+    for (const auto& member : members) {
+      if (member.first == key) return fail("duplicate object key");
+    }
+    skipWhitespace();
+    if (position_ >= text_.size() || text_[position_] != ':') return fail("expected ':' after key");
+    ++position_;
+    members.emplace_back(std::move(key), JsonValue());
+    return true;
+  }
+
   bool parseObject(JsonValue& out, size_t depth) {
     ++position_;
-    JsonValue::Object members;
+    setEmptyObject(out);
+    JsonValue::Object& members = out.objectItems();
     skipWhitespace();
     if (position_ < text_.size() && text_[position_] == '}') {
       ++position_;
-      out = JsonValue::makeObject(std::move(members));
       return true;
     }
     for (;;) {
       skipWhitespace();
-      if (position_ >= text_.size() || text_[position_] != '"') return fail("expected object key");
-      std::string key;
-      if (!parseString(key)) return false;
-      for (const auto& member : members) {
-        if (member.first == key) return fail("duplicate object key");
-      }
+      if (!parseMemberKey(members)) return false;
       skipWhitespace();
-      if (position_ >= text_.size() || text_[position_] != ':') return fail("expected ':' after key");
-      ++position_;
-      skipWhitespace();
-      JsonValue value;
-      if (!parseValue(value, depth + 1)) return false;
-      members.emplace_back(std::move(key), std::move(value));
+      if (!parseValue(members.back().second, depth + 1)) return false;
       skipWhitespace();
       if (position_ >= text_.size()) return fail("unterminated object");
       if (text_[position_] == '}') {
         ++position_;
-        out = JsonValue::makeObject(std::move(members));
         return true;
       }
       if (text_[position_] != ',') return fail("expected ',' or '}' in object");
@@ -269,7 +289,7 @@ class Parser {
     return true;
   }
 
-  bool parseString(std::string& out) {
+  EEGO_JSON_NOINLINE bool parseString(std::string& out) {
     ++position_;
     while (position_ < text_.size()) {
       const unsigned char c = static_cast<unsigned char>(text_[position_]);
@@ -323,7 +343,7 @@ class Parser {
     return fail("unterminated string");
   }
 
-  bool parseNumber(JsonValue& out) {
+  EEGO_JSON_NOINLINE bool parseNumber(JsonValue& out) {
     const size_t start = position_;
     if (position_ < text_.size() && text_[position_] == '-') ++position_;
     if (position_ >= text_.size()) return fail("truncated number");
@@ -483,7 +503,12 @@ std::string JsonValue::scalarText() const {
 
 bool jsonParse(std::string_view text, JsonValue& out, JsonParseError& err, size_t max_depth) {
   Parser parser(text, max_depth);
-  if (parser.parse(out)) return true;
+  // Parse into a scratch value so `out` is untouched on failure (children are built in place).
+  JsonValue parsed;
+  if (parser.parse(parsed)) {
+    out = std::move(parsed);
+    return true;
+  }
   err = parser.error();
   return false;
 }

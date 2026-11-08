@@ -16,6 +16,9 @@ std::string crashJson();
 
 esp_err_t clearCrash();
 
+// {"tasks":[{"name":"httpd","stack_free":1234,"priority":5},...]}, lowest stack_free first.
+std::string tasksJson();
+
 void logBootReport();
 
 }  // namespace eego::admin::devlog

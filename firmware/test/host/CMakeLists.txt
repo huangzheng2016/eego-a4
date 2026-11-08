@@ -29,6 +29,7 @@ endif()
 set(FW_SOURCES
   ${C}/json_dom/src/json.cpp
   ${C}/alert_core/src/sha1.cpp
+  ${C}/alert_core/src/json_writer.cpp
   ${C}/alert_core/src/types.cpp
   ${C}/alert_core/src/type_registry.cpp
   ${C}/alert_core/src/time_util.cpp
@@ -87,12 +88,13 @@ set(TEST_SUITES dashboard layout expression pipeline gesture settings probe_mask
     refresh_policy battery_policy confirm wifi_list)
 list(APPEND TEST_SUITES touch_cal)
 list(APPEND TEST_SUITES keep_awake power_source device_screen screen_rotate)
-list(APPEND TEST_SUITES ble_tunnel time_policy)
+list(APPEND TEST_SUITES ble_tunnel time_policy json_parser)
 add_executable(firmware_host_tests
   test_main.cpp
   test_dashboard.cpp
   test_layout.cpp
   test_expression.cpp
+  test_json_parser.cpp
   test_pipeline.cpp
   test_gesture.cpp
   test_settings.cpp

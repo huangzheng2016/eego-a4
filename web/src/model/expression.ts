@@ -13,7 +13,10 @@ export const EXPRESSION_FUNCTIONS = ['abs', 'min', 'max', 'clamp', 'floor', 'cei
 const KNOWN = new Set<string>(EXPRESSION_FUNCTIONS);
 const MAX_LEN = 512;
 const MAX_NODES = 128;
-const MAX_DEPTH = 24;
+// Parentheses, ?: branches, unary operators and call arguments each add one level.
+const MAX_DEPTH = 6;
+// Longest root-to-leaf path (bounds left-deep chains such as a+b+c+...).
+const MAX_HEIGHT = 24;
 const MAX_ARGS = 8;
 
 type Node =
@@ -51,8 +54,13 @@ class Parser {
     }
     return false;
   }
+  heights = new WeakMap<Node, number>();
   node<T extends Node>(n: T): T {
     if (++this.nodes > MAX_NODES) this.fail('expression exceeds node limit');
+    const kids = n.k === 'un' ? [n.a] : n.k === 'bin' ? [n.a, n.b] : n.k === 'cond' ? [n.c, n.a, n.b] : n.k === 'call' ? n.args : [];
+    const h = 1 + Math.max(0, ...kids.map((c) => this.heights.get(c) ?? 1));
+    if (h > MAX_HEIGHT) this.fail('expression nesting exceeds limit');
+    this.heights.set(n, h);
     return n;
   }
   parse(): Node {

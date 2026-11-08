@@ -295,13 +295,17 @@ void Uc8279cDisplay::loadGrayLut() {
 void Uc8279cDisplay::writeFrame(uint8_t cmd, const uint8_t* fb) {
     uint8_t white[PANEL_ROW_BYTES];
     memset(white, 0xff, sizeof(white));
+    // The framebuffer lives in PSRAM; copying each row into this internal (DMA-capable)
+    // stack buffer avoids a DMA bounce allocation per row inside the SPI driver.
+    uint8_t row[PANEL_ROW_BYTES];
 
     sendCmd(cmd);
 
     gpio_set_level(gn(EPD_CS), 0);
     gpio_set_level(gn(EPD_DC), 1);
     for (int y = static_cast<int>(PANEL_HEIGHT) - 1; y >= 0; --y) {
-        spiTransmit(fb + static_cast<uint32_t>(y) * PANEL_ROW_BYTES, PANEL_ROW_BYTES);
+        memcpy(row, fb + static_cast<uint32_t>(y) * PANEL_ROW_BYTES, PANEL_ROW_BYTES);
+        spiTransmit(row, PANEL_ROW_BYTES);
     }
     for (uint16_t y = 0; y < CONTROLLER_PADDING_ROWS; ++y) {
         spiTransmit(white, PANEL_ROW_BYTES);
@@ -494,7 +498,14 @@ void Uc8279cDisplay::spiTransmit(const uint8_t* data, size_t len) {
     spi_transaction_t t = {};
     t.length = static_cast<size_t>(len) * 8;
     t.tx_buffer = data;
-    (void)spi_device_polling_transmit(spi_, &t);
+    const esp_err_t err = spi_device_polling_transmit(spi_, &t);
+    if (err != ESP_OK) {
+        static uint32_t failures = 0;
+        if (failures++ % 64 == 0) {
+            ESP_LOGE(TAG_UC, "spi transmit failed: %s (len=%u, %u failures)", esp_err_to_name(err),
+                     (unsigned)len, (unsigned)failures);
+        }
+    }
 }
 
 void Uc8279cDisplay::sendCmd(uint8_t cmd) {

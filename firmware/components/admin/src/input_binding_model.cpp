@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "admin/input_binding_model.h"
+#include "alert_core/json_writer.h"
 
 #include <algorithm>
 #include <array>
@@ -300,11 +301,11 @@ JsonValue inputBindingToJson(const InputBinding& binding) {
       action.emplace_back("action_id", JsonValue::makeString(binding.action.action_id));
       break;
   }
-  return JsonValue::makeObject({
-      {"page", JsonValue::makeString(binding.page)},
-      {"trigger", JsonValue::makeString(inputTriggerName(binding.trigger))},
-      {"action", JsonValue::makeObject(std::move(action))},
-  });
+  return ::eego::json::ObjectWriter(3)
+      .string("page", binding.page)
+      .string("trigger", inputTriggerName(binding.trigger))
+      .value("action", ::eego::json::JsonValue(JsonValue::makeObject(std::move(action))))
+      .take();
 }
 
 JsonValue inputBindingListToJson(const std::vector<InputBinding>& bindings) {
@@ -315,11 +316,11 @@ JsonValue inputBindingListToJson(const std::vector<InputBinding>& bindings) {
 }
 
 JsonValue inputBindingsToJson(const InputBindingSet& set) {
-  return JsonValue::makeObject({
-      {"schema_version", JsonValue::makeInt(kInputBindingSchemaVersion)},
-      {"revision", JsonValue::makeInt(set.revision)},
-      {"bindings", inputBindingListToJson(set.bindings)},
-  });
+  return ::eego::json::ObjectWriter(3)
+      .integer("schema_version", kInputBindingSchemaVersion)
+      .integer("revision", set.revision)
+      .value("bindings", ::eego::json::JsonValue(inputBindingListToJson(set.bindings)))
+      .take();
 }
 
 bool validateInputBindingsSyntax(const std::vector<InputBinding>& bindings,
@@ -422,36 +423,31 @@ JsonValue inputBindingSchema(const Dashboard* dashboard) {
     for (const auto& page : dashboard->pages) {
       for (const auto& panel : page.panels) {
         for (const auto& action : panel.actions) {
-          actions.push_back(JsonValue::makeObject({
-              {"panel_id", JsonValue::makeString(panel.id)},
-              {"action_id", JsonValue::makeString(action.id)},
-              {"action_kind", JsonValue::makeString(dashboard::actionKindName(action.kind))},
-              {"target", JsonValue::makeString(action.target)},
-              {"confirm", JsonValue::makeBool(action.confirm || action.kind == ActionKind::AckAlert)},
-          }));
+          actions.push_back(::eego::json::ObjectWriter(5)
+              .string("panel_id", panel.id)
+              .string("action_id", action.id)
+              .string("action_kind", dashboard::actionKindName(action.kind))
+              .string("target", action.target)
+              .boolean("confirm", action.confirm || action.kind == ActionKind::AckAlert)
+              .take());
         }
       }
     }
   }
   JsonValue::Array pages;
   for (const char* page : kLocalPages) pages.push_back(JsonValue::makeString(page));
-  return JsonValue::makeObject({
-      {"schema", JsonValue::makeString("eego.input-bindings/1")},
-      {"required", JsonValue::makeArray({JsonValue::makeString("schema_version"),
-                                         JsonValue::makeString("revision"),
-                                         JsonValue::makeString("bindings")})},
-      {"max_bindings", JsonValue::makeInt(kMaxInputBindings)},
-      {"triggers", JsonValue::makeArray(std::move(triggers))},
-      {"local_pages", JsonValue::makeArray(std::move(pages))},
-      {"dashboard_page_prefix", JsonValue::makeString("dashboard:")},
-      {"builtins", JsonValue::makeArray(std::move(builtins))},
-      {"registered_actions", JsonValue::makeArray(std::move(actions))},
-      {"reserved", JsonValue::makeArray({JsonValue::makeString("power.*"),
-                                         JsonValue::makeString("front.short"),
-                                         JsonValue::makeString("confirm"),
-                                         JsonValue::makeString("recovery")})},
-      {"confirmation", JsonValue::makeString("fresh_hold_700ms_same_target")},
-  });
+  return ::eego::json::ObjectWriter(10)
+      .string("schema", "eego.input-bindings/1")
+      .value("required", ::eego::json::JsonValue(JsonValue::makeArray({JsonValue::makeString("schema_version"), JsonValue::makeString("revision"), JsonValue::makeString("bindings")})))
+      .integer("max_bindings", kMaxInputBindings)
+      .value("triggers", ::eego::json::JsonValue(JsonValue::makeArray(std::move(triggers))))
+      .value("local_pages", ::eego::json::JsonValue(JsonValue::makeArray(std::move(pages))))
+      .string("dashboard_page_prefix", "dashboard:")
+      .value("builtins", ::eego::json::JsonValue(JsonValue::makeArray(std::move(builtins))))
+      .value("registered_actions", ::eego::json::JsonValue(JsonValue::makeArray(std::move(actions))))
+      .value("reserved", ::eego::json::JsonValue(JsonValue::makeArray({JsonValue::makeString("power.*"), JsonValue::makeString("front.short"), JsonValue::makeString("confirm"), JsonValue::makeString("recovery")})))
+      .string("confirmation", "fresh_hold_700ms_same_target")
+      .take();
 }
 
 }  // namespace eego::admin

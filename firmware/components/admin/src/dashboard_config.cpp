@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "admin/dashboard_config.h"
+#include "alert_core/json_writer.h"
 
 #include <cctype>
 #include <cerrno>
@@ -143,19 +144,19 @@ JsonValue sourceToJson(const dashboard::Source& source) {
   for (const auto& header : source.header_secret_refs) {
     secret_headers.emplace_back(header.key, JsonValue::makeString(header.value));
   }
-  return JsonValue::makeObject({
-      {"id", JsonValue::makeString(source.id)},
-      {"kind", JsonValue::makeString(dashboard::sourceKindName(source.kind))},
-      {"enabled", JsonValue::makeBool(source.enabled)},
-      {"url", JsonValue::makeString(source.url)},
-      {"refresh_ms", JsonValue::makeInt(source.refresh_ms)},
-      {"timeout_ms", JsonValue::makeInt(source.timeout_ms)},
-      {"max_response_bytes", JsonValue::makeInt(source.max_response_bytes)},
-      {"tls_verify", JsonValue::makeBool(source.tls_verify)},
-      {"auth_token_ref", JsonValue::makeString(source.auth_token_ref)},
-      {"headers", JsonValue::makeObject(std::move(headers))},
-      {"header_secret_refs", JsonValue::makeObject(std::move(secret_headers))},
-  });
+  return ::eego::json::ObjectWriter(11)
+      .string("id", source.id)
+      .string("kind", dashboard::sourceKindName(source.kind))
+      .boolean("enabled", source.enabled)
+      .string("url", source.url)
+      .integer("refresh_ms", source.refresh_ms)
+      .integer("timeout_ms", source.timeout_ms)
+      .integer("max_response_bytes", source.max_response_bytes)
+      .boolean("tls_verify", source.tls_verify)
+      .string("auth_token_ref", source.auth_token_ref)
+      .value("headers", ::eego::json::JsonValue(JsonValue::makeObject(std::move(headers))))
+      .value("header_secret_refs", ::eego::json::JsonValue(JsonValue::makeObject(std::move(secret_headers))))
+      .take();
 }
 
 void syncPlanSource(JsonValue& plan, const dashboard::Source& source) {

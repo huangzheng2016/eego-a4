@@ -11,11 +11,13 @@ namespace eego::dashboard::pipeline {
 
 class NetStackTransport final : public IHttpTransport {
  public:
-  explicit NetStackTransport(net::NetStack& stack, uint32_t wait_ms = 30000);
+  // async=false: synchronous requests only, no worker task (one-shot callers such as
+  // source tests and probes).
+  explicit NetStackTransport(net::NetStack& stack, uint32_t wait_ms = 30000, bool async = true);
   ~NetStackTransport() override;
 
   bool execute(const net::NetRequest& request, HttpResponse& response) override;
-  bool asyncSupported() const override { return true; }
+  bool asyncSupported() const override { return async_ != nullptr; }
   bool executeAsync(uint64_t id, const net::NetRequest& request) override;
   bool pollAsync(AsyncHttpResult& result) override;
   bool asyncIdle() const override;

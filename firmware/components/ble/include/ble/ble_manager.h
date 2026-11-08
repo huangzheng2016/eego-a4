@@ -163,6 +163,10 @@ class BleManager {
 
   TunnelHandler handler_{};
   tunnel::Reassembler* rx_ = nullptr;
+  // True while a completed message is lent to the bridge (its buffer must not be freed
+  // until releaseMessage()). Guarded by rx_mutex_.
+  bool rx_lent_ = false;
+  void resetRxLocked();
   std::string info_fw_;
   std::atomic<bool> info_provisioned_{false};
   std::atomic<bool> info_httpd_{false};

@@ -124,3 +124,54 @@ TEST(expression, variable_interpolation) {
   out.clear();
   CHECK(!interpolateVariables("${host}${host}", values, out, error, 6));  // byte budget
 }
+
+namespace {
+
+std::string syntaxError(const std::string& expr) {
+  ExpressionError err;
+  return validateExpressionSyntax(expr, err) ? std::string() : err.message;
+}
+
+std::string chain(size_t terms) {
+  std::string out = "1";
+  for (size_t i = 1; i < terms; ++i) out += " + 1";
+  return out;
+}
+
+}  // namespace
+
+TEST(expression, precedence_climbing_matches_grammar) {
+  CHECK_NEAR(num("1 + 2 * 3 - 4 / 2 % 3"), 5.0, 1e-12);
+  CHECK_NEAR(num("2 * 3 % 4"), 2.0, 1e-12);       // left associative within a level
+  CHECK_NEAR(num("10 - 2 - 3 + 1"), 6.0, 1e-12);
+  CHECK(eval("true || false && false").boolean());  // && binds tighter than ||
+  CHECK(eval("1 < 2 == true").boolean());           // comparison before equality
+  CHECK(eval("1 + 1 == 2 && 3 >= 3 || false").boolean());
+  CHECK(!eval("1 <= 0 != false").boolean());
+  CHECK_NEAR(num("1 > 2 ? 1 : 2 > 1 ? 3 : 4"), 3.0, 1e-12);  // right-nested conditional
+  CHECK_NEAR(num("-2 * -3 + +1"), 7.0, 1e-12);
+  CHECK(eval("!!true").boolean());
+  CHECK_NEAR(num("max(1, min(5, 3), -2) * 2"), 6.0, 1e-12);
+  CHECK(eval("coalesce(null, 2) == 2").boolean());
+  CHECK_NEAR(num("convert(90, 'min', 'h') * 2"), 3.0, 1e-12);
+  ExpressionError err;
+  CHECK(!validateExpressionSyntax("1 <> 2", err));
+  CHECK(!validateExpressionSyntax("a !== b", err));
+  CHECK(!validateExpressionSyntax("1 & 2", err));
+  CHECK(!validateExpressionSyntax("1 ? 2", err));
+  CHECK_EQ(err.message, std::string("expected ':' in conditional expression"));
+}
+
+TEST(expression, nesting_and_height_are_bounded) {
+  const std::string six = "((((((1))))))";
+  CHECK_EQ(syntaxError(six), std::string());
+  CHECK_EQ(syntaxError("(" + six + ")"), std::string("expression nesting exceeds limit"));
+  CHECK_EQ(syntaxError("------1"), std::string());
+  CHECK_EQ(syntaxError("-------1"), std::string("expression nesting exceeds limit"));
+  // A left-deep chain of n terms has height n.
+  CHECK_NEAR(num(chain(24).c_str()), 24.0, 1e-12);
+  CHECK_EQ(syntaxError(chain(25)), std::string("expression nesting exceeds limit"));
+  // Long chains fail cleanly (node or height limit) without deep recursion.
+  CHECK(!syntaxError(chain(200)).empty());
+  CHECK(fails(chain(200).c_str()));
+}

@@ -55,8 +55,8 @@ struct NetResponse {
 };
 
 struct PoolConfig {
-  size_t max_sessions = 4;
-  uint32_t idle_close_ms = 30000;
+  size_t max_sessions = 2;
+  uint32_t idle_close_ms = 10000;
   uint32_t rx_buf_init = 64 * 1024;
   uint32_t rx_buf_max = 512 * 1024;
   uint32_t host_cooldown_ms = 30000;

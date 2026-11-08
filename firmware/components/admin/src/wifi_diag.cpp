@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "wifi_diag.h"
+#include "alert_core/json_writer.h"
 
 #include <vector>
 
@@ -46,90 +47,53 @@ std::string diagJson() {
   JsonValue::Array networks;
   for (size_t i = 0; i < d.networks.size(); i++) {
     const net::WifiNetworkDiag& n = d.networks[i];
-    networks.push_back(JsonValue::makeObject({
-        {"priority", JsonValue::makeInt(static_cast<int64_t>(i) + 1)},
-        {"ssid", JsonValue::makeString(n.ssid)},
-        {"result", JsonValue::makeString(net::wifiAttemptResultName(n.result))},
-        {"last_attempt_age_s", JsonValue::makeInt(ageSeconds(n.last_attempt_ms, now))},
-        {"attempts", JsonValue::makeInt(n.attempts)},
-        {"failures", JsonValue::makeInt(n.failures)},
-        {"last_reason", JsonValue::makeInt(n.last_reason)},
-        {"reason_name", JsonValue::makeString(net::wifiReasonName(n.last_reason))},
-        {"reason_text", JsonValue::makeString(n.failures > 0 ? net::wifiReasonText(n.last_reason)
-                                                             : "")},
-        {"first_reason", JsonValue::makeInt(n.first_reason)},
-        {"first_reason_name",
-         JsonValue::makeString(n.failures > 0 ? net::wifiReasonName(n.first_reason) : "")},
-        {"first_failure_age_s", JsonValue::makeInt(ageSeconds(n.first_failure_ms, now))},
-        {"seen", JsonValue::makeBool(n.seen)},
-        {"rssi", JsonValue::makeInt(n.rssi)},
-        {"channel", JsonValue::makeInt(n.channel)},
-        {"auth", JsonValue::makeString(n.authmode >= 0 ? net::wifiAuthModeName(n.authmode) : "")},
-    }));
+    networks.push_back(::eego::json::ObjectWriter(16)
+        .integer("priority", static_cast<int64_t>(i) + 1)
+        .string("ssid", n.ssid)
+        .string("result", net::wifiAttemptResultName(n.result))
+        .integer("last_attempt_age_s", ageSeconds(n.last_attempt_ms, now))
+        .integer("attempts", n.attempts)
+        .integer("failures", n.failures)
+        .integer("last_reason", n.last_reason)
+        .string("reason_name", net::wifiReasonName(n.last_reason))
+        .string("reason_text", n.failures > 0 ? net::wifiReasonText(n.last_reason) : "")
+        .integer("first_reason", n.first_reason)
+        .string("first_reason_name", n.failures > 0 ? net::wifiReasonName(n.first_reason) : "")
+        .integer("first_failure_age_s", ageSeconds(n.first_failure_ms, now))
+        .boolean("seen", n.seen)
+        .integer("rssi", n.rssi)
+        .integer("channel", n.channel)
+        .string("auth", n.authmode >= 0 ? net::wifiAuthModeName(n.authmode) : "")
+        .take());
   }
 
   JsonValue::Array aps;
   for (const net::WifiScanEntry& e : d.scan) {
     bool saved = false;
     for (const auto& n : d.networks) saved = saved || n.ssid == e.ssid;
-    aps.push_back(JsonValue::makeObject({
-        {"ssid", JsonValue::makeString(e.ssid)},
-        {"rssi", JsonValue::makeInt(e.rssi)},
-        {"channel", JsonValue::makeInt(e.channel)},
-        {"auth", JsonValue::makeString(net::wifiAuthModeName(e.authmode))},
-        {"saved", JsonValue::makeBool(saved)},
-    }));
+    aps.push_back(::eego::json::ObjectWriter(5)
+        .string("ssid", e.ssid)
+        .integer("rssi", e.rssi)
+        .integer("channel", e.channel)
+        .string("auth", net::wifiAuthModeName(e.authmode))
+        .boolean("saved", saved)
+        .take());
   }
 
   const net::WifiState st = wifi.state();
   const int cur_rssi = wifi.rssi();
   const net::WifiSignal q = net::wifiSignalQuality(cur_rssi);
   const net::WifiManager::LinkInfo link = wifi.linkInfo();
-  return JsonValue::makeObject({
-             {"mode", JsonValue::makeString(mode)},
-             {"current",
-              JsonValue::makeObject({
-                  {"state", JsonValue::makeString(net::wifiStateName(st))},
-                  {"ssid", JsonValue::makeString(st == net::WifiState::Connected ||
-                                                         st == net::WifiState::Connecting
-                                                     ? wifi.currentSsid()
-                                                     : std::string())},
-                  {"ip", JsonValue::makeString(wifi.currentIp())},
-                  {"rssi", JsonValue::makeInt(cur_rssi)},
-                  {"signal", JsonValue::makeString(net::wifiSignalName(q))},
-                  {"signal_label", JsonValue::makeString(net::wifiSignalLabel(q, false))},
-                  {"signal_bars", JsonValue::makeInt(net::wifiSignalBars(q))},
-                  {"signal_hint", JsonValue::makeString(q == net::WifiSignal::Weak
-                                                            ? net::kWifiWeakSignalHint
-                                                            : "")},
-                  {"last_disconnect_reason", JsonValue::makeInt(wifi.lastDisconnectReason())},
-                  {"last_disconnect_text",
-                   JsonValue::makeString(wifi.lastDisconnectReason() != 0
-                                             ? net::wifiReasonText(wifi.lastDisconnectReason())
-                                             : "")},
-              })},
-             {"radio", JsonValue::makeString(wifi.summary())},
-             {"link",
-              JsonValue::makeObject({
-                  {"rssi_samples_10m", JsonValue::makeInt(link.rssi.samples)},
-                  {"rssi_min_10m", JsonValue::makeInt(link.rssi.samples ? link.rssi.min : 0)},
-                  {"rssi_avg_10m", JsonValue::makeInt(link.rssi.samples ? link.rssi.avg : 0)},
-                  {"beacon_timeouts", JsonValue::makeInt(link.beacon_timeouts)},
-                  {"roams", JsonValue::makeInt(link.roams)},
-                  {"roam_scans", JsonValue::makeInt(link.roam_scans)},
-                  {"last_assoc_ms", JsonValue::makeInt(link.last_assoc_ms)},
-                  {"last_dhcp_ms", JsonValue::makeInt(link.last_dhcp_ms)},
-                  {"tx_power_qdbm", JsonValue::makeInt(link.tx_power_qdbm)},
-              })},
-             {"failed_passes", JsonValue::makeInt(d.failed_passes)},
-             {"ap_clients", JsonValue::makeInt(ProvisionPortal::instance().apClientCount())},
-             {"networks", JsonValue::makeArray(std::move(networks))},
-             {"scan", JsonValue::makeObject({
-                          {"ok", JsonValue::makeBool(d.scan_ok)},
-                          {"age_s", JsonValue::makeInt(ageSeconds(d.scan_ms, now))},
-                          {"aps", JsonValue::makeArray(std::move(aps))},
-                      })},
-         })
+  return ::eego::json::ObjectWriter(8)
+      .string("mode", mode)
+      .value("current", ::eego::json::JsonValue(::eego::json::ObjectWriter(10).string("state", net::wifiStateName(st)).string("ssid", st == net::WifiState::Connected || st == net::WifiState::Connecting ? wifi.currentSsid() : std::string()).string("ip", wifi.currentIp()).integer("rssi", cur_rssi).string("signal", net::wifiSignalName(q)).string("signal_label", net::wifiSignalLabel(q, false)).integer("signal_bars", net::wifiSignalBars(q)).string("signal_hint", q == net::WifiSignal::Weak ? net::kWifiWeakSignalHint : "").integer("last_disconnect_reason", wifi.lastDisconnectReason()).string("last_disconnect_text", wifi.lastDisconnectReason() != 0 ? net::wifiReasonText(wifi.lastDisconnectReason()) : "").take()))
+      .string("radio", wifi.summary())
+      .value("link", ::eego::json::JsonValue(::eego::json::ObjectWriter(9).integer("rssi_samples_10m", link.rssi.samples).integer("rssi_min_10m", link.rssi.samples ? link.rssi.min : 0).integer("rssi_avg_10m", link.rssi.samples ? link.rssi.avg : 0).integer("beacon_timeouts", link.beacon_timeouts).integer("roams", link.roams).integer("roam_scans", link.roam_scans).integer("last_assoc_ms", link.last_assoc_ms).integer("last_dhcp_ms", link.last_dhcp_ms).integer("tx_power_qdbm", link.tx_power_qdbm).take()))
+      .integer("failed_passes", d.failed_passes)
+      .integer("ap_clients", ProvisionPortal::instance().apClientCount())
+      .value("networks", ::eego::json::JsonValue(JsonValue::makeArray(std::move(networks))))
+      .value("scan", ::eego::json::JsonValue(::eego::json::ObjectWriter(3).boolean("ok", d.scan_ok).integer("age_s", ageSeconds(d.scan_ms, now)).value("aps", ::eego::json::JsonValue(JsonValue::makeArray(std::move(aps)))).take()))
+      .take()
       .toString();
 }
 

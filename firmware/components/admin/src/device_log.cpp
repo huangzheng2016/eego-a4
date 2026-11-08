@@ -3,14 +3,18 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
+#include <vector>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 
 #if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH && CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF
@@ -102,12 +106,28 @@ void appendHex(std::string& out, uint32_t v) {
   out += b;
 }
 
+// Runs in whatever context failed, possibly on a tiny stack: use the ROM printf (no heap,
+// small frame) and skip ISR context entirely. The line reaches the serial console only.
 void onAllocFailed(size_t size, uint32_t caps, const char* function) {
-  ESP_LOGE(kTag, "alloc failed: %u bytes caps=0x%lx in %s; internal free=%u largest=%u, psram free=%u",
-           static_cast<unsigned>(size), static_cast<unsigned long>(caps), function ? function : "?",
-           static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-           static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-           static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+  if (xPortInIsrContext()) return;
+  esp_rom_printf("E devlog: alloc failed: %u bytes caps=0x%x in %s; internal free=%u largest=%u\n",
+                 static_cast<unsigned>(size), static_cast<unsigned>(caps), function ? function : "?",
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(
+                     heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+}
+
+constexpr uint32_t kLowStackBytes = 1024;
+
+// Snapshot of every task's stack high-water mark (bytes never used), lowest first.
+std::vector<TaskStatus_t> taskSnapshot() {
+  std::vector<TaskStatus_t> tasks(uxTaskGetNumberOfTasks() + 4);
+  const UBaseType_t n = uxTaskGetSystemState(tasks.data(), tasks.size(), nullptr);
+  tasks.resize(n);
+  std::sort(tasks.begin(), tasks.end(), [](const TaskStatus_t& a, const TaskStatus_t& b) {
+    return a.usStackHighWaterMark < b.usStackHighWaterMark;
+  });
+  return tasks;
 }
 
 void logHeap(void*) {
@@ -116,9 +136,36 @@ void logHeap(void*) {
            static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+  for (const TaskStatus_t& t : taskSnapshot()) {
+    const uint32_t free_bytes = t.usStackHighWaterMark;  // ESP-IDF reports bytes
+    if (free_bytes < kLowStackBytes) {
+      ESP_LOGW(kTag, "stack low: task %s has %u bytes left", t.pcTaskName,
+               static_cast<unsigned>(free_bytes));
+    }
+  }
 }
 
 }  // namespace
+
+std::string tasksJson() {
+  std::string out = "{\"tasks\":[";
+  bool first = true;
+  char line[96];
+  for (const TaskStatus_t& t : taskSnapshot()) {
+    char name[configMAX_TASK_NAME_LEN + 1] = {};
+    std::snprintf(name, sizeof(name), "%s", t.pcTaskName);
+    for (char& c : name) {
+      if (c == '"' || c == '\\' || (c != 0 && static_cast<unsigned char>(c) < 0x20)) c = '?';
+    }
+    std::snprintf(line, sizeof(line), "%s{\"name\":\"%s\",\"stack_free\":%u,\"priority\":%u}",
+                  first ? "" : ",", name, static_cast<unsigned>(t.usStackHighWaterMark),
+                  static_cast<unsigned>(t.uxCurrentPriority));
+    out += line;
+    first = false;
+  }
+  out += "]}";
+  return out;
+}
 
 void install() {
   if (g_ring != nullptr) return;

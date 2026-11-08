@@ -165,6 +165,14 @@ export interface CrashReport {
 }
 /** Reset reason and the last crash summary (firmware coredump in flash). */
 export const getCrash = () => request<CrashReport>('/system/crash', { timeoutMs: 8000 });
+export interface TaskStack {
+  name: string;
+  /** Bytes of stack never used since the task started (high-water mark). */
+  stack_free: number;
+  priority: number;
+}
+/** Every FreeRTOS task's stack headroom, lowest first. */
+export const getTasks = () => request<{ tasks: TaskStack[] }>('/system/tasks', { timeoutMs: 8000 });
 export const clearCrash = () => request<unknown>('/system/crash/clear', { method: 'POST', body: {} });
 /** Recent ESP_LOG output kept on the device (plain text). */
 export async function getDeviceLog(bytes = 16384): Promise<string> {
