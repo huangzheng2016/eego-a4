@@ -19,6 +19,7 @@
 //     （ingest key 仅轮换响应完整显示一次）。
 
 #include "admin/admin.h"
+#include "admin/device_log.h"
 #include "admin/display_snapshot.h"
 #include "admin/device_screen.h"
 #include "admin/keep_awake.h"
@@ -2079,6 +2080,26 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
       if (!bearer()) return ESP_OK;
       return h_logs(req);
     }
+    if (strcmp(path, "system/device-log") == 0) {
+      if (!bearer()) return ESP_OK;
+      // 纯文本，默认最近 16 KiB（?bytes= 最多 32 KiB）。
+      size_t bytes = 16 * 1024;
+      char q[32] = {};
+      char v[12] = {};
+      if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+          httpd_query_key_value(q, "bytes", v, sizeof(v)) == ESP_OK) {
+        const long n = strtol(v, nullptr, 10);
+        if (n > 0) bytes = static_cast<size_t>(n);
+      }
+      const std::string text = devlog::tail(bytes);
+      httpd_resp_set_type(req, "text/plain; charset=utf-8");
+      httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+      return httpd_resp_send(req, text.data(), text.size());
+    }
+    if (strcmp(path, "system/crash") == 0) {
+      if (!bearer()) return ESP_OK;
+      return sendJson(req, 200, devlog::crashJson());
+    }
     if (strcmp(path, "display/snapshot.bmp") == 0) {
       if (!bearer()) return ESP_OK;
       return h_display_snapshot(req);
@@ -2189,6 +2210,12 @@ esp_err_t apiDispatch(httpd_req_t* req, const char* path) {
     if (strcmp(path, "system/reboot") == 0) {
       if (!bearer()) return ESP_OK;
       return h_reboot(req);
+    }
+    if (strcmp(path, "system/crash/clear") == 0) {
+      if (!bearer()) return ESP_OK;
+      const esp_err_t err = devlog::clearCrash();
+      if (err != ESP_OK) return sendError(req, 500, errc::kInternal, esp_err_to_name(err));
+      return sendJson(req, 200, "{\"cleared\":true}");
     }
     if (strcmp(path, "device/keep-awake") == 0) {
       if (!bearer()) return ESP_OK;

@@ -55,6 +55,17 @@ idf.py -C firmware -B .tmp/firmware-build -p <PORT> flash monitor
 可选：复制 `firmware/main/local_secrets.example.h` 为 `local_secrets.h`，在编译期写入
 默认 WiFi 和管理密码。这样构建出的固件含明文密码，不要分享。
 
+### 调试
+
+- **网页**：浏览器开发者工具的控制台会打印每个失败的请求和蓝牙连接过程，前缀为
+  `[eego api]` / `[eego ble]`。「系统 → 日志 → 设备调试日志」可查看设备最近的输出。
+- **崩溃**：固件崩溃后会把转储写进 Flash。重启后「系统」页顶部显示崩溃的任务和回溯
+  地址，可复制。用同一次构建解码：
+  `xtensa-esp32s3-elf-addr2line -pfiaC -e .tmp/firmware-build/eego-a4-alert-panel.elf <地址...>`，
+  或 `idf.py -C firmware -B .tmp/firmware-build -p <PORT> coredump-info` 读取完整转储。
+- **串口**：USB 连接电脑后运行 `idf.py -C firmware -B .tmp/firmware-build -p <PORT> monitor`，
+  可实时看到全部日志，崩溃时回溯会自动解码。按 `Ctrl+]` 退出。
+
 主机测试：
 
 ```sh

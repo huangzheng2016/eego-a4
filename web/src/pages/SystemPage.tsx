@@ -24,6 +24,9 @@ export function SystemPage() {
   const toast = useToast();
   const { status, connection, refreshStatus, logout } = useSession();
   const [logs, setLogs] = useState<api.LogEntry[]>([]);
+  const [crash, setCrash] = useState<api.CrashReport | null>(null);
+  const [devLog, setDevLog] = useState<string | null>(null);
+  const [devLogBusy, setDevLogBusy] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [password, setPassword] = useState('');
@@ -38,10 +41,32 @@ export function SystemPage() {
   const loadLogs = useCallback(() => {
     api.getLogs(200).then((r) => setLogs(r.entries), (e) => toast('error', errorText(e, t)));
   }, [toast, t]);
+  const loadDevLog = useCallback(() => {
+    setDevLogBusy(true);
+    api
+      .getDeviceLog()
+      .then((text) => {
+        setDevLog(text);
+        console.info('[eego device log]\n' + text);
+      }, (e) => toast('error', errorText(e, t)))
+      .finally(() => setDevLogBusy(false));
+  }, [toast, t]);
   useEffect(() => {
     void refreshStatus();
     loadLogs();
+    api.getCrash().then(
+      (c) => {
+        setCrash(c);
+        if (c.crashed) console.error('[eego] device crashed before the last boot:', c);
+      },
+      () => undefined,
+    );
   }, [refreshStatus, loadLogs]);
+  const crashText = crash?.crashed
+    ? [`reset: ${crash.reset_reason}`, `task: ${crash.task}`, `pc: ${crash.pc}`, `backtrace: ${(crash.backtrace ?? []).join(' ')}${crash.backtrace_corrupted ? ' (corrupted)' : ''}`, `cause: ${crash.cause} vaddr: ${crash.vaddr}`, `elf: ${crash.elf_sha256}`].join('\n')
+    : '';
+  const copy = (text: string) =>
+    navigator.clipboard?.writeText(text).then(() => toast('ok', t('common.copied')), () => undefined);
 
   // After a reboot, poll until the device answers again (or give up after a minute).
   useEffect(() => {
@@ -154,6 +179,18 @@ export function SystemPage() {
           <span>{t('sys.rebooting')}</span>
         </div>
       )}
+      {crash?.crashed && (
+        <div className="notice danger" role="alert">
+          <div className="grow">
+            <strong>{t('sys.crash_title', { task: crash.task ?? '?' })}</strong>
+            <pre className="mono crash-pre">{crashText}</pre>
+          </div>
+          <div className="row">
+            <Button size="sm" onClick={() => void copy(crashText)}>{t('common.copy')}</Button>
+            <Button size="sm" variant="ghost" onClick={() => void api.clearCrash().then(() => setCrash({ ...crash, crashed: false }), (e) => toast('error', errorText(e, t)))}>{t('common.clear')}</Button>
+          </div>
+        </div>
+      )}
       <Card title={t('sys.status')} actions={<Button size="sm" onClick={() => void refreshStatus()}>{t('common.refresh')}</Button>}>
         {status ? (
           <table className="table">
@@ -181,6 +218,14 @@ export function SystemPage() {
             </div>
           ))}
         </div>
+        <details className="form-details" onToggle={(e) => (e.currentTarget as HTMLDetailsElement).open && devLog === null && loadDevLog()}>
+          <summary>{t('sys.device_log')}</summary>
+          <div className="row mb-2">
+            <Button size="sm" loading={devLogBusy} onClick={loadDevLog}>{t('common.refresh')}</Button>
+            <Button size="sm" variant="ghost" disabled={!devLog} onClick={() => devLog && void copy(devLog)}>{t('common.copy')}</Button>
+          </div>
+          <pre className="mono device-log">{devLog ?? ''}</pre>
+        </details>
       </Card>
 
       <Card title={t('sys.password')}>

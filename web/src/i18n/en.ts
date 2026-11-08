@@ -549,6 +549,8 @@ export const en: Record<keyof typeof zh, string> = {
   "sys.time": "Time",
   "sys.time_unsynced": "Not synchronized",
   "sys.logs": "Logs",
+  "sys.crash_title": "Last reboot was a crash in task {task}",
+  "sys.device_log": "Device debug log",
   "sys.reboot": "Reboot device",
   "sys.rebooting": "Rebooting…",
   "sys.reset": "Factory reset",

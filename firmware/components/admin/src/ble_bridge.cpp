@@ -29,7 +29,7 @@ namespace {
 
 using alert_core::JsonValue;
 
-constexpr uint32_t kTaskStack = 6144;
+constexpr uint32_t kTaskStack = 8192;  // esp_http_client + lwIP + JSON 解析
 constexpr UBaseType_t kTaskPriority = 4;  // 低于 httpd（5）
 constexpr int kMinTimeoutMs = 5000;
 constexpr int kMaxTimeoutMs = 60000;

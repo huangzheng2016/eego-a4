@@ -489,6 +489,9 @@ button.conn:hover { background: var(--surface-2); }
 
 .logs { max-height: 420px; overflow: auto; font-family: var(--mono); font-size: 12px; }
 .logs div { padding: 3px 0; border-bottom: 1px solid var(--border); }
+.device-log, .crash-pre { max-height: 420px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; margin: 0; }
+.crash-pre { max-height: 200px; margin-top: var(--s2); }
+.crash-screen { max-width: 760px; margin: 48px auto; padding: 0 16px; display: grid; gap: var(--s3); }
 .spin { width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; display: inline-block; animation: spin .7s linear infinite; flex: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }

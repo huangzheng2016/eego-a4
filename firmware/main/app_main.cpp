@@ -46,6 +46,7 @@
 
 #include "admin/admin.h"
 #include "admin/ble_bridge.h"
+#include "admin/device_log.h"
 #include "admin/time_policy.h"
 #include "admin/dashboard_config.h"
 #include "admin/display_snapshot.h"
@@ -393,7 +394,10 @@ admin::AlertActionResult adaptActionResult(const eego::net::AlertActionResult& r
 }  // namespace
 
 extern "C" void app_main(void) {
+  // 先装日志缓冲：之后的 ESP_LOG 都能在网页「系统 → 设备日志」看到。
+  eego::admin::devlog::install();
   ESP_LOGI(TAG, "EEGO A4 monitoring panel boot");
+  eego::admin::devlog::logBootReport();
 
   // 0. 唤醒分类：定时唤醒 = 电池快速路径；任何深睡唤醒（及快速路径主动重启）都
   //    保留面板上的上一帧（不做开机白屏）。

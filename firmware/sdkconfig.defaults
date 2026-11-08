@@ -132,3 +132,8 @@ CONFIG_I2C_ENABLE_DEBUG_LOG=n
 
 # OTA 回滚保护
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# 崩溃转储到 Flash（coredump 分区）：重启后网页「系统」页显示崩溃任务与回溯，
+# 也可 `idf.py -p <PORT> coredump-info` 读取完整转储。
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y

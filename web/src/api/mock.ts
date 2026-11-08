@@ -304,6 +304,12 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
     }
     case 'GET system/logs':
       return json(200, { entries: state.logs.slice().reverse() });
+    case 'GET system/crash':
+      return json(200, { reset_reason: 'power_on', crashed: false });
+    case 'POST system/crash/clear':
+      return json(200, { cleared: true });
+    case 'GET system/device-log':
+      return new Response('I (1200) app: EEGO A4 monitoring panel boot\nI (1250) devlog: reset reason: power_on\n', { status: 200, headers: { 'Content-Type': 'text/plain' } });
     case 'POST system/reboot':
       return json(202, { status: 'reboot scheduled' });
     case 'POST system/factory-reset':

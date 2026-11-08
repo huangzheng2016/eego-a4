@@ -152,6 +152,25 @@ export interface LogEntry {
   msg: string;
 }
 export const getLogs = (limit = 200) => request<{ entries: LogEntry[] }>(`/system/logs?limit=${limit}`);
+export interface CrashReport {
+  reset_reason: string;
+  crashed: boolean;
+  task?: string;
+  pc?: string;
+  backtrace?: string[];
+  backtrace_corrupted?: boolean;
+  cause?: number;
+  vaddr?: string;
+  elf_sha256?: string;
+}
+/** Reset reason and the last crash summary (firmware coredump in flash). */
+export const getCrash = () => request<CrashReport>('/system/crash', { timeoutMs: 8000 });
+export const clearCrash = () => request<unknown>('/system/crash/clear', { method: 'POST', body: {} });
+/** Recent ESP_LOG output kept on the device (plain text). */
+export async function getDeviceLog(bytes = 16384): Promise<string> {
+  const res = await request<Response>(`/system/device-log?bytes=${bytes}`, { raw: true, timeoutMs: 20000 });
+  return res.text();
+}
 export const reboot = () => request<unknown>('/system/reboot', { method: 'POST', body: { confirm: 'REBOOT' } });
 export const factoryReset = (password: string) =>
   request<unknown>('/system/factory-reset', { method: 'POST', body: { password, confirm: 'RESET' } });

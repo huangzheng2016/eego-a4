@@ -562,6 +562,8 @@ export const zh = {
   'sys.time': '时间',
   'sys.time_unsynced': '未同步',
   'sys.logs': '日志',
+  'sys.crash_title': '上次异常重启：{task} 任务崩溃',
+  'sys.device_log': '设备调试日志',
   'sys.reboot': '重启设备',
   'sys.rebooting': '设备重启中…',
   'sys.reset': '恢复出厂设置',
