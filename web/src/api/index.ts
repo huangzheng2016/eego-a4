@@ -56,9 +56,32 @@ export interface DeviceStatus {
   screen?: DeviceScreen;
   /** Power source/sleep state published by the device UI task. */
   power?: PowerState;
+  /** BLE admin link (firmware with the BLE tunnel). */
+  ble?: { link: string; bonds: number };
 }
 /** Passive poll: does not count as activity (a battery device may still go to sleep). */
 export const getStatus = () => request<DeviceStatus>('/status', { timeoutMs: 8000 });
+
+/** Set the device clock from this computer; the device ignores it while SNTP is trusted. */
+export const setDeviceTime = (unix_ms: number) =>
+  request<{ applied: boolean; drift_s: number; sntp_synced: boolean }>('/device/time', {
+    method: 'POST',
+    body: { unix_ms, source: 'browser' },
+    timeoutMs: 8000,
+  });
+
+/** First-time setup over BLE (no admin password yet; served by the BLE bridge itself). The device reboots. */
+export interface SetupNetwork {
+  ssid: string;
+  password: string;
+}
+export const bleSetup = (admin_password: string, networks: SetupNetwork[] = []) =>
+  request<{ status: string; rebooting: boolean }>('/setup', {
+    method: 'POST',
+    body: networks.length ? { admin_password, networks } : { admin_password },
+    timeoutMs: 15000,
+    quiet401: true,
+  });
 
 // ---------------------------------------------------------------- keep awake ("config mode")
 /** minutes = 0 cancels; 1..240 keeps the device awake (no idle batching, no auto deep sleep). */

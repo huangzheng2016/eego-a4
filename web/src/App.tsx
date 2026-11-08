@@ -5,7 +5,7 @@ import { SessionProvider, useSession } from './state/session';
 import { DraftProvider, useDraft } from './state/draft';
 import { navigate, useRoute, type Route } from './state/router';
 import { ApiError } from './api';
-import { Badge, Button, Icon, Logo, Modal, Segmented, TextInput } from './ui';
+import { Badge, Button, Icon, Logo, Modal, Segmented, TextInput, useConfirm } from './ui';
 import { applyTheme, loadTheme, type Theme } from './theme';
 import { EditorPage } from './pages/editor/EditorPage';
 import { TemplatesPage } from './pages/TemplatesPage';
@@ -19,7 +19,8 @@ import { PreviewPage } from './pages/PreviewPage';
 import { RulesPage } from './pages/RulesPage';
 import { WelcomePage, WELCOME_SKIP_KEY } from './pages/WelcomePage';
 import { KeepAwakeToggle, PowerBanner } from './pages/PowerControls';
-import { probablyAsleep } from './model/power';
+import { BleEntry, BleSetup } from './pages/BleLogin';
+import { isPagesOrigin } from './model/origin';
 
 export function App() {
   return (
@@ -34,12 +35,13 @@ export function App() {
 }
 
 function Gate() {
-  const { authed } = useSession();
+  const { authed, ble } = useSession();
   const { t } = useI18n();
   useEffect(() => {
     document.title = t('app.title');
   }, [t]);
   useEffect(() => applyTheme(loadTheme()), []);
+  if (ble && !ble.provisioned) return <BleSetup />;
   if (!authed) return <Login />;
   return (
     <DraftProvider>
@@ -50,11 +52,12 @@ function Gate() {
 
 function Login() {
   const { t } = useI18n();
-  const { login } = useSession();
+  const { login, expired } = useSession();
   const [pw, setPw] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
-  const onDevice = !/github\.io$/.test(location.hostname);
+  // On the Pages origin there is no device API over HTTP: Bluetooth is the only way in.
+  const onPages = isPagesOrigin();
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -81,20 +84,24 @@ function Login() {
           </div>
         </div>
         <form className="col gap-lg" onSubmit={submit}>
-          <div>
-            <h2>{t('login.title')}</h2>
-            <p className="muted login-sub">{t('login.subtitle')}</p>
-          </div>
-          {!onDevice && (
+          <h2>{t('login.title')}</h2>
+          {expired && !err && (
             <div className="notice warn">
               <Icon name="warn" size={16} />
-              <span>{t('conn.not_device')}</span>
+              <span>{t('login.expired')}</span>
             </div>
           )}
-          <TextInput label={t('login.password')} type="password" autoComplete="current-password" autoFocus value={pw} onChange={setPw} error={err} />
-          <Button type="submit" variant="primary" loading={busy} disabled={!pw} className="btn-lg">
-            {t('login.submit')}
-          </Button>
+          {onPages ? (
+            <BleEntry primary />
+          ) : (
+            <>
+              <TextInput label={t('login.password')} type="password" autoComplete="current-password" autoFocus value={pw} onChange={setPw} error={err} />
+              <Button type="submit" variant="primary" loading={busy} disabled={!pw} className="btn-lg">
+                {t('login.submit')}
+              </Button>
+              <BleEntry primary={false} />
+            </>
+          )}
         </form>
       </div>
     </div>
@@ -133,12 +140,23 @@ const BOTTOM: Route[] = ['editor', 'sources', 'preview', 'alerts'];
 
 function Shell() {
   const { t, lang, setLang } = useI18n();
-  const { connection, status, logout, refreshStatus } = useSession();
+  const { connection, status, logout: doLogout, refreshStatus, ble } = useSession();
   const { route, arg, explicit } = useRoute();
   const draft = useDraft();
   const [sheet, setSheet] = useState(false);
   const [theme, setTheme] = useState<Theme>(loadTheme);
+  const [confirm, confirmDialog] = useConfirm();
   useEffect(() => setSheet(false), [route]);
+  useEffect(() => {
+    if (!sheet) return;
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setSheet(false);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sheet]);
+  const logout = async () => {
+    if (draft.dirty && draft.configured && !(await confirm({ title: t('login.logout'), body: t('login.logout_dirty'), ok: t('login.logout'), danger: true }))) return;
+    await doLogout();
+  };
   useEffect(() => {
     const warn = (e: BeforeUnloadEvent) => {
       if (draft.dirty && draft.configured) e.preventDefault();
@@ -152,11 +170,11 @@ function Shell() {
   useEffect(() => {
     let skipped = false;
     try {
-      skipped = sessionStorage.getItem(WELCOME_SKIP_KEY) === '1';
+      skipped = localStorage.getItem(WELCOME_SKIP_KEY) === '1';
     } catch {
       /* ignore */
     }
-    if (fresh && !skipped && (!explicit || route === 'editor')) navigate('welcome');
+    if (fresh && !skipped && !explicit) navigate('welcome');
   }, [fresh, explicit, route]);
 
   const setThemeTo = (next: Theme) => {
@@ -164,19 +182,17 @@ function Shell() {
     applyTheme(next);
   };
   const activeAlerts = status?.alerts.available ? status.alerts.active_total ?? 0 : 0;
-  // Unreachable: a battery/sleep-scheduled device is most likely asleep — say how to wake it.
-  const offlineLabel = probablyAsleep(status?.power) ? `${t('conn.offline')} · ${t('conn.asleep')}` : t('conn.offline');
-  const connLabel = connection === 'online' ? t('conn.online') : connection === 'offline' ? offlineLabel : t('conn.unknown');
+  // How to wake a sleeping device is explained once, by the PowerBanner.
+  const bleMsg = ble?.state === 'asleep' ? t('bt.asleep') : ble?.state === 'rebooting' ? t('bt.rebooting') : ble && ble.state !== 'ready' ? t('bt.lost') : '';
+  const connLabel = bleMsg || (connection === 'online' ? t('conn.online') : connection === 'offline' ? t('conn.offline') : t('conn.unknown'));
+  // Over BLE the badge says "Bluetooth" where the WiFi IP would be.
+  const connVia = ble ? t('bt.badge') : status?.network.ip;
   const badgeFor = (r: Route) =>
     r === 'editor' && draft.dirty && draft.configured ? (
       <span className="nav-pip" title={t('draft.dirty')} />
     ) : r === 'alerts' && activeAlerts > 0 ? (
       <span className="nav-badge">
         <Badge tone="danger">{activeAlerts}</Badge>
-      </span>
-    ) : r === 'rules' && draft.draft.dashboard.alert_rules.length > 0 ? (
-      <span className="nav-badge">
-        <Badge>{draft.draft.dashboard.alert_rules.length}</Badge>
       </span>
     ) : null;
   const current = ALL_NAV.find((n) => n.route === route);
@@ -194,8 +210,8 @@ function Shell() {
           { value: 'dark', label: '', icon: 'moon', title: t('common.theme.dark') },
         ]}
       />
-      <Button size="sm" variant="ghost" onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')} title="Language">
-        <Icon name="globe" size={16} /> {lang === 'zh' ? 'EN' : '中文'}
+      <Button size="sm" variant="ghost" onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}>
+        <Icon name="globe" size={16} /> {t('common.lang')}
       </Button>
     </>
   );
@@ -232,11 +248,11 @@ function Shell() {
           >
             <span className={`dot ${connection === 'online' ? 'ok' : connection === 'offline' ? 'bad' : ''}`} />
             <span className="grow">{connLabel}</span>
-            {status && <span className="mono dim">{status.network.ip}</span>}
+            {connVia && <span className="mono dim">{connVia}</span>}
           </button>
           <div className="row between">{prefs}</div>
           <Button size="sm" variant="ghost" onClick={() => void logout()} className="justify-start">
-            <Icon name="logout" size={16} /> {t('login.logout')}
+            <Icon name="logout" size={16} /> {t(ble ? 'bt.disconnect' : 'login.logout')}
           </Button>
         </div>
       </aside>
@@ -290,18 +306,19 @@ function Shell() {
               ))}
               <button type="button" className="sheet-item borderless" onClick={() => void logout()}>
                 <Icon name="logout" size={22} />
-                {t('login.logout')}
+                {t(ble ? 'bt.disconnect' : 'login.logout')}
               </button>
             </div>
             <div className="row between mt-3">{prefs}</div>
             <div className="conn mt-2">
               <span className={`dot ${connection === 'online' ? 'ok' : connection === 'offline' ? 'bad' : ''}`} />
-              {connLabel} {status && <span className="mono dim">{status.network.ip}</span>}
+              {connLabel} {connVia && <span className="mono dim">{connVia}</span>}
             </div>
           </div>
         </>
       )}
       <DraftDialogs />
+      {confirmDialog}
     </div>
   );
 }
@@ -309,6 +326,8 @@ function Shell() {
 function DraftDialogs() {
   const { t } = useI18n();
   const d = useDraft();
+  // Dismissing (Esc / backdrop) only hides the prompt; the draft stays restorable.
+  const [restoreHidden, setRestoreHidden] = useState(false);
   if (d.conflict) {
     return (
       <Modal
@@ -318,7 +337,7 @@ function DraftDialogs() {
           <>
             <Button onClick={() => void d.resolveConflict('cancel')}>{t('common.cancel')}</Button>
             <Button onClick={() => void d.resolveConflict('reload')}>{t('conflict.reload')}</Button>
-            <Button variant="primary" onClick={() => void d.resolveConflict('overwrite')}>
+            <Button variant="danger" onClick={() => void d.resolveConflict('overwrite')}>
               {t('conflict.overwrite')}
             </Button>
           </>
@@ -328,11 +347,11 @@ function DraftDialogs() {
       </Modal>
     );
   }
-  if (d.restorable) {
+  if (d.restorable && !restoreHidden) {
     return (
       <Modal
         title={t('draft.restore_title')}
-        onClose={() => d.restore(false)}
+        onClose={() => setRestoreHidden(true)}
         footer={
           <>
             <Button onClick={() => d.restore(false)}>{t('draft.restore_no')}</Button>

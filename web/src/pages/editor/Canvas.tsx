@@ -263,7 +263,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
               onKeyDown={(e) => onKey(e, panel)}
               onFocus={() => editable && !selected && onSelect?.(panel.id)}
             >
-              <DevicePanel panel={panel} bundle={bundle} observed={observed} w={px.w} h={px.h} />
+              <DevicePanel panel={panel} bundle={bundle} observed={observed} w={px.w} h={px.h} demoTitle={t('editor.demo')} />
               {editable && selected && !(isDrag && drag.mode === 'move') && HANDLES.map((h) => <div key={h} className={`handle ${h}`} onPointerDown={(e) => begin(e, panel, h)} />)}
               {isDrag && drag.mode !== 'move' && sizeLabel && <div className="size-tag" style={{ fontSize: labelFont, bottom: -labelFont * 2.1 }}>{sizeLabel(g.w, g.h)}</div>}
             </div>

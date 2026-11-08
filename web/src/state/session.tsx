@@ -1,12 +1,32 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import * as api from '../api';
-import { useI18n } from '../i18n';
-import { useToast } from './toast';
+import { setTransport } from '../api/transport';
+import { BleLink, gattConnector, requestBleDevice, type BleState, type Connector } from '../api/ble/bleTransport';
+import { setDeviceScope } from '../model/origin';
+import { needsTimeSync } from '../model/timeSync';
 
 export type Connection = 'unknown' | 'online' | 'offline';
 
+/** BLE link as seen by the UI; null when using WiFi. */
+export interface BleView {
+  state: BleState;
+  name: string;
+  /** false: the device has no admin password yet (first-time setup over BLE). */
+  provisioned: boolean;
+}
+
+async function bleConnector(): Promise<Connector> {
+  if (import.meta.env.VITE_MOCK === '1') {
+    const [{ loopbackDevice, fetchHandler }, { TOKEN }] = await Promise.all([import('../api/ble/loopback'), import('../api/mock')]);
+    return loopbackDevice(fetchHandler(TOKEN), { v: 1, mtu: 247, name: 'EEGO-A4-MOCK', provisioned: true, httpd: true }).connector;
+  }
+  return gattConnector(await requestBleDevice());
+}
+
 interface SessionCtx {
   authed: boolean;
+  /** The last session ended because the device rejected the token (shown on the login card). */
+  expired: boolean;
   connection: Connection;
   status: api.DeviceStatus | null;
   /** performance.now() when `status` was fetched (local countdowns of remaining_s/sleep_in_s). */
@@ -16,26 +36,76 @@ interface SessionCtx {
   login: (password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshStatus: () => Promise<void>;
+  ble: BleView | null;
+  /** Pick a device and connect over Web Bluetooth (call from a click). */
+  connectBle: () => Promise<void>;
+  disconnectBle: () => void;
 }
 
 const Ctx = createContext<SessionCtx | null>(null);
 
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [authed, setAuthed] = useState(() => !!api.getToken());
+  const [expired, setExpired] = useState(false);
   const [connection, setConnection] = useState<Connection>('unknown');
   const [status, setStatus] = useState<api.DeviceStatus | null>(null);
   const [statusAt, setStatusAt] = useState(0);
-  const toast = useToast();
-  const { t } = useI18n();
+  const [ble, setBle] = useState<BleView | null>(null);
+  const link = useRef<BleLink | null>(null);
+  const timeSynced = useRef(false);
+
+  const disconnectBle = useCallback(() => {
+    link.current?.close();
+    link.current = null;
+    setTransport(null);
+    setDeviceScope(null);
+    setBle(null);
+    setAuthed(!!api.getToken());
+    setStatus(null);
+  }, []);
+
+  const connectBle = useCallback(async () => {
+    link.current?.close();
+    const l = new BleLink(await bleConnector());
+    link.current = l;
+    const sync = () => {
+      const info = l.info;
+      setBle({ state: l.state, name: info?.name ?? '', provisioned: info?.provisioned !== false });
+      // The link (a passkey-paired bond) is the authorization; no password login over BLE.
+      if (l.state === 'ready' && info?.provisioned !== false) {
+        setDeviceScope(info?.name);
+        setExpired(false);
+        setAuthed(true);
+      }
+    };
+    l.onState(sync);
+    setTransport(l);
+    try {
+      await l.open();
+      timeSynced.current = false;
+      sync();
+    } catch (e) {
+      l.close();
+      if (link.current === l) link.current = null;
+      setTransport(null);
+      setBle(null);
+      throw e;
+    }
+  }, []);
 
   useEffect(
     () =>
       api.onUnauthorized(() => {
-        if (api.getToken()) toast('warn', t('login.expired'));
+        if (link.current) {
+          disconnectBle();
+          setExpired(true);
+          return;
+        }
+        if (api.getToken()) setExpired(true);
         api.setToken(null);
         setAuthed(false);
       }),
-    [toast, t],
+    [disconnectBle],
   );
   useEffect(() => api.onConnectivity((ok) => setConnection(ok ? 'online' : 'offline')), []);
 
@@ -44,6 +114,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const next = await api.getStatus();
       setStatus(next);
       setStatusAt(performance.now());
+      // A device without SNTP (no internet, or BLE only) takes the time from this computer once.
+      if (!timeSynced.current && needsTimeSync(next.time, Date.now())) {
+        timeSynced.current = true;
+        void api.setDeviceTime(Date.now()).catch(() => undefined);
+      }
     } catch {
       /* connectivity listener records the failure */
     }
@@ -58,9 +133,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (password: string) => {
     await api.login(password);
+    setExpired(false);
     setAuthed(true);
   }, []);
   const logout = useCallback(async () => {
+    if (link.current) {
+      disconnectBle();
+      setAuthed(false);
+      return;
+    }
     try {
       await api.logout();
     } catch {
@@ -68,7 +149,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
     setAuthed(false);
     setStatus(null);
-  }, []);
+  }, [disconnectBle]);
 
   const setKeepAwake = useCallback((ka: api.DeviceStatus['keep_awake']) => {
     setStatus((s) => (s ? { ...s, keep_awake: ka } : s));
@@ -76,8 +157,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ authed, connection, status, statusAt, setKeepAwake, login, logout, refreshStatus }),
-    [authed, connection, status, statusAt, setKeepAwake, login, logout, refreshStatus],
+    () => ({ authed, expired, connection, status, statusAt, setKeepAwake, login, logout, refreshStatus, ble, connectBle, disconnectBle }),
+    [authed, expired, connection, status, statusAt, setKeepAwake, login, logout, refreshStatus, ble, connectBle, disconnectBle],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

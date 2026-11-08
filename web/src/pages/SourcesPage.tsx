@@ -16,6 +16,8 @@ import { RESPONSE_KINDS, type Bundle, type EventMapping, type MetricMapping, typ
 import { plainHeaderErrors } from '../model/credentials';
 import { Badge, Button, Card, Checkbox, Empty, Field, Icon, KeyValueEditor, NumberInput, Segmented, Select, TextArea, TextInput, PageHeader } from '../ui';
 import { JsonTree } from '../ui/JsonTree';
+import { HttpStatusBadge, SeverityBadge } from '../ui/badges';
+import { IdInput } from '../ui/controls';
 import { DraftToolbar } from './editor/EditorPage';
 import { AuthSection } from './SourceAuth';
 import { VariablesCard } from './VariablesCard';
@@ -55,6 +57,17 @@ const EVENT_PATH_FIELDS: { key: keyof EventMapping; label: DictKey }[] = [
   { key: 'timestamp_path', label: 'map.timestamp_path' },
 ];
 
+const MORE_FIELDS = new Set<keyof MetricMapping>(['unit_path', 'timestamp_path']);
+const LONG_TEXT = { maxHeight: 160, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } as const;
+const TRUNCATE = { maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } as const;
+const labelText = (labels: Record<string, string>) => Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(', ');
+
+function activeLabel(active: NonNullable<ActiveField>, t: (k: DictKey) => string): string {
+  if (active.label !== undefined) return t('map.label_path');
+  const f = (active.list === 'metrics' ? METRIC_PATH_FIELDS : EVENT_PATH_FIELDS).find((x) => x.key === active.field);
+  return f ? t(f.label) : active.field;
+}
+
 function variableDefaults(b: Bundle): Record<string, string> {
   return Object.fromEntries(b.dashboard.variables.map((v) => [v.name, v.default_value ?? '']));
 }
@@ -93,15 +106,21 @@ export function SourcesPage({ sourceId }: { sourceId: string }) {
         <div className="card src-list">
           {sources.map((s) => {
             const used = d.draft.dashboard.pages.reduce((n, p) => n + p.panels.filter((x) => x.source_id === s.id).length, 0);
+            const rules = d.draft.dashboard.alert_rules.filter((x) => x.source_id === s.id).length;
             const errs = Object.keys(sourceErrors(d.draft, d.errors, s.id)).length;
             return (
-              <div key={s.id} className={`page-item${s.id === selected ? ' on' : ''}`} role="button" tabIndex={0} onClick={() => navigate('sources', s.id)} onKeyDown={(e) => e.key === 'Enter' && navigate('sources', s.id)}>
+              <div key={s.id} className={`page-item${s.id === selected ? ' on' : ''}`} role="button" tabIndex={0} onClick={() => navigate('sources', s.id)} onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  navigate('sources', s.id);
+                }
+              }}>
                 <span className="grow">
                   {s.id}
-                  <div className="dim">{t('src.used_by', { n: used })}</div>
+                  {(used > 0 || rules > 0) && <div className="dim">{[used > 0 && t('src.used_by', { n: used }), rules > 0 && t('src.used_by_rules', { n: rules })].filter(Boolean).join(' · ')}</div>}
                 </span>
                 {errs > 0 && <Badge tone="danger">{errs}</Badge>}
-                {s.enabled === false && <Badge>off</Badge>}
+                {s.enabled === false && <Badge>{t('common.disabled')}</Badge>}
               </div>
             );
           })}
@@ -173,7 +192,7 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
   );
 
   const headerErrs = plainHeaderErrors(plan.headers, plan.header_secret_refs);
-  const headerErrText = Object.entries(headerErrs).map(([k, e]) => `${k}: ${t(`auth.herr.${e}` as DictKey)}`).join(' · ');
+  const headerErrList = Object.entries(headerErrs).map(([k, e]) => `${k}: ${t(`auth.herr.${e}` as DictKey)}`);
   const variables = variableDefaults(d.draft);
 
   const runProbe = async () => {
@@ -247,7 +266,8 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
   );
 
   const deleteSource = () => {
-    if (!confirm(t('src.delete_confirm', { id: sourceId }))) return;
+    const inUse = d.draft.dashboard.pages.some((pg) => pg.panels.some((x) => x.source_id === sourceId)) || d.draft.dashboard.alert_rules.some((x) => x.source_id === sourceId);
+    if (inUse && !confirm(t('src.delete_confirm', { id: sourceId }))) return;
     d.update((b) => {
       b.dashboard.sources = b.dashboard.sources.filter((s) => s.id !== sourceId);
       b.source_plans = b.source_plans.filter((p) => p.id !== sourceId);
@@ -262,34 +282,31 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
   return (
     <div className="col gap-lg">
       <Card
-        title={source.id}
+        title={t('src.sec.connection')}
         actions={
-          <Button size="sm" variant="danger" onClick={deleteSource}>
+          <Button size="sm" variant="ghost" onClick={deleteSource}>
             {t('common.delete')}
           </Button>
         }
       >
         {errs._ && <div className="notice danger block-gap">{errs._}</div>}
         <div className="form-grid">
-          <TextInput
+          <IdInput
             label={t('src.id')}
             value={plan.id}
             error={errs.id}
-            hint={t('src.id_hint')}
-            maxLength={64}
-            onChange={(v) => {
-              const id = v.replace(/[^A-Za-z0-9_-]/g, '');
-              if (!id || d.draft.dashboard.sources.some((s) => s.id === id)) return;
+            validate={(id) => (!id ? t('common.id_empty') : d.draft.dashboard.sources.some((s) => s.id === id) ? t('common.id_taken') : undefined)}
+            onCommit={(id) => {
               setPlan((p) => (p.id = id), 'id');
               navigate('sources', id);
             }}
           />
-          <Select label={t('src.kind')} hint={t(plan.kind === 'http' ? 'src.kind_h.http' : 'src.kind_h.static')} value={plan.kind} options={[{ value: 'http', label: t('src.kind.http') }, { value: 'static', label: t('src.kind.static') }]} onChange={(v) => setPlan((p) => {
+          <Select label={t('src.kind')} value={plan.kind} options={[{ value: 'http', label: t('src.kind.http') }, { value: 'static', label: t('src.kind.static') }]} onChange={(v) => setPlan((p) => {
             p.kind = v as SourcePlan['kind'];
             if (p.kind === 'static') p.url = '';
             else if (!p.url) p.url = 'https://';
           })} />
-          <Checkbox label={t('src.enabled')} hint={t('src.enabled_h')} checked={plan.enabled !== false} onChange={(v) => setPlan((p) => (p.enabled = v))} />
+          <Checkbox label={t('src.enabled')} checked={plan.enabled !== false} onChange={(v) => setPlan((p) => (p.enabled = v))} />
         </div>
         {plan.kind === 'http' ? (
           <>
@@ -297,11 +314,11 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
               <h4>{t('src.sec.request')}</h4>
               <div className="form-grid">
                 <TextInput wide label={t('src.url')} hint={t('src.url_hint')} value={plan.url} error={errs.url} onChange={(v) => setPlan((p) => (p.url = v), 'url')} inputMode="url" spellCheck={false} placeholder="https://api.example.com/v1/metrics?host=${host}" />
-                <Field label={t('src.method')} error={errs.method} hint={t(plan.method === 'POST' ? 'src.method_h.post' : plan.method === 'HEAD' ? 'src.method_h.head' : 'src.method_h.get')}>
+                <Field label={t('src.method')} error={errs.method} hint={plan.method === 'POST' ? t('src.method_h.post') : undefined}>
                   <Segmented value={plan.method ?? 'GET'} options={METHODS.map((m) => ({ value: m, label: m }))} onChange={(v) => setPlan((p) => (p.method = v))} label={t('src.method')} />
                 </Field>
                 <NumberInput label={t('src.refresh')} hint={t('src.refresh_h')} min={1} max={86400} value={Math.round((plan.refresh_ms ?? 60000) / 1000)} onChange={(v) => v !== undefined && setPlan((p) => (p.refresh_ms = Math.round(v * 1000)), 'refresh')} error={errs.refresh_ms} />
-                <NumberInput label={t('src.timeout')} hint={t('src.timeout_h')} min={0.1} max={120} step={0.5} value={(plan.timeout_ms ?? 10000) / 1000} onChange={(v) => v !== undefined && setPlan((p) => (p.timeout_ms = Math.round(v * 1000)), 'to')} error={errs.timeout_ms} />
+                <NumberInput label={t('src.timeout')} min={0.1} max={120} step={0.5} value={(plan.timeout_ms ?? 10000) / 1000} onChange={(v) => v !== undefined && setPlan((p) => (p.timeout_ms = Math.round(v * 1000)), 'to')} error={errs.timeout_ms} />
                 {plan.method === 'POST' && <TextArea label={t('src.body')} hint={t('src.body_h')} value={plan.body ?? ''} onChange={(v) => setPlan((p) => (p.body = v), 'body')} rows={4} error={errs.body} placeholder='{"query": "${host}"}' />}
               </div>
             </div>
@@ -312,7 +329,7 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
               <h4>{t('src.headers')}</h4>
               <p className="dim card-lead">{t('src.headers_h')}</p>
               <KeyValueEditor value={plan.headers} onChange={(v) => setPlan((p) => (p.headers = v), 'headers')} keyLabel={t('src.header_name')} valueLabel={t('src.header_value')} addLabel={t('src.add_header')} />
-              {(errs.headers || headerErrText) && <div className="err-text">{errs.headers || headerErrText}</div>}
+              {errs.headers ? <div className="err-text">{errs.headers}</div> : headerErrList.map((e) => <div key={e} className="err-text">{e}</div>)}
             </div>
           </>
         ) : (
@@ -323,7 +340,7 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
         <div className="form-section">
           <h4>{t('src.sec.response')}</h4>
           <div className="form-grid">
-            <Select label={t('src.response')} hint={t(`src.response_h.${plan.response ?? 'standard_json'}` as DictKey)} value={plan.response ?? 'standard_json'} options={RESPONSE_KINDS.map((r) => ({ value: r, label: t(`src.response.${r}` as DictKey) }))} onChange={(v) => setPlan((p) => (p.response = v as SourcePlan['response']))} error={errs.response} />
+            <Select label={t('src.response')} hint={plan.response === 'prometheus' ? undefined : t(`src.response_h.${plan.response ?? 'standard_json'}` as DictKey)} value={plan.response ?? 'standard_json'} options={RESPONSE_KINDS.map((r) => ({ value: r, label: t(`src.response.${r}` as DictKey) }))} onChange={(v) => setPlan((p) => (p.response = v as SourcePlan['response']))} error={errs.response} />
             {(plan.response === 'text' || plan.response === 'generic_json') && <TextInput label={t('src.text_path')} hint={t('src.text_path_h')} value={plan.text_path} placeholder="$.message" spellCheck={false} onChange={(v) => setPlan((p) => (p.text_path = v), 'tp')} />}
           </div>
         </div>
@@ -332,13 +349,13 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
           <div className="form-grid">
             {plan.kind === 'http' && (
               <>
-                <NumberInput label={t('src.max_bytes')} hint={t('src.max_bytes_h')} min={1} max={256} value={Math.round((plan.max_response_bytes ?? 65536) / 1024)} onChange={(v) => v !== undefined && setPlan((p) => (p.max_response_bytes = Math.round(v * 1024)), 'mb')} error={errs.max_response_bytes} />
+                <NumberInput label={t('src.max_bytes')} min={1} max={256} value={Math.round((plan.max_response_bytes ?? 65536) / 1024)} onChange={(v) => v !== undefined && setPlan((p) => (p.max_response_bytes = Math.round(v * 1024)), 'mb')} error={errs.max_response_bytes} />
                 <Checkbox label={t('src.tls')} hint={t('src.tls_h')} checked={plan.tls_verify !== false} onChange={(v) => setPlan((p) => (p.tls_verify = v))} />
                 <Checkbox label={t('src.conditional_get')} hint={t('src.conditional_get_h')} checked={plan.conditional_get !== false} onChange={(v) => setPlan((p) => (p.conditional_get = v))} />
               </>
             )}
             <NumberInput label={t('src.stale_after')} hint={t('src.stale_after_h')} min={0} max={604800} value={Math.round((plan.stale_after_ms ?? 300000) / 1000)} onChange={(v) => v !== undefined && setPlan((p) => (p.stale_after_ms = Math.round(v * 1000)), 'st')} error={errs.stale_after_ms} />
-            <NumberInput label={t('src.max_depth')} hint={t('src.max_depth_h')} min={1} max={16} value={plan.max_json_depth ?? 16} onChange={(v) => v !== undefined && setPlan((p) => (p.max_json_depth = Math.min(16, Math.max(1, Math.round(v)))), 'depth')} error={errs.max_json_depth} />
+            <NumberInput label={t('src.max_depth')} min={1} max={16} value={plan.max_json_depth ?? 16} onChange={(v) => v !== undefined && setPlan((p) => (p.max_json_depth = Math.min(16, Math.max(1, Math.round(v)))), 'depth')} error={errs.max_json_depth} />
             <TextInput label={t('src.reset_at_path')} hint={t('src.reset_at_path_h')} value={plan.reset_at_path} placeholder="$.reset_at" spellCheck={false} onChange={(v) => setPlan((p) => (p.reset_at_path = v), 'ra')} />
           </div>
         </details>
@@ -361,7 +378,7 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
                   <div key={i} className="subcard">
                     <div className="form-grid two">
                       <TextInput label={t('map.name')} value={m.name} onChange={(v) => setPlan((p) => { p.metrics![i].name = v || undefined; if (v) delete p.metrics![i].name_path; }, `m${i}name`)} />
-                      {METRIC_PATH_FIELDS.map((f) => (
+                      {METRIC_PATH_FIELDS.filter((f) => !MORE_FIELDS.has(f.key)).map((f) => (
                         <PathInput
                           key={f.key}
                           label={t(f.label)}
@@ -372,9 +389,24 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
                         />
                       ))}
                       <TextInput label={t('map.unit')} value={m.unit} onChange={(v) => setPlan((p) => (p.metrics![i].unit = v || undefined), `m${i}unit`)} />
-                      <TextInput label={t('map.target_unit')} value={m.target_unit} onChange={(v) => setPlan((p) => (p.metrics![i].target_unit = v || undefined), `m${i}tu`)} />
-                      <TextInput label={t('map.expression')} value={m.expression} onChange={(v) => setPlan((p) => (p.metrics![i].expression = v || undefined), `m${i}ex`)} />
                     </div>
+                    <details className="form-details" open={!!(m.unit_path || m.timestamp_path || m.target_unit || m.expression) || undefined}>
+                      <summary>{t('common.more')}</summary>
+                      <div className="form-grid two">
+                        {METRIC_PATH_FIELDS.filter((f) => MORE_FIELDS.has(f.key)).map((f) => (
+                          <PathInput
+                            key={f.key}
+                            label={t(f.label)}
+                            value={m[f.key] as string | undefined}
+                            active={active?.list === 'metrics' && active.index === i && active.field === f.key && active.label === undefined}
+                            onFocus={() => setActive({ list: 'metrics', index: i, field: f.key })}
+                            onChange={(v) => setPlan((p) => ((p.metrics![i] as Record<string, unknown>)[f.key] = v || undefined), `m${i}${f.key}`)}
+                          />
+                        ))}
+                        <TextInput label={t('map.target_unit')} value={m.target_unit} onChange={(v) => setPlan((p) => (p.metrics![i].target_unit = v || undefined), `m${i}tu`)} />
+                        <TextInput label={t('map.expression')} value={m.expression} onChange={(v) => setPlan((p) => (p.metrics![i].expression = v || undefined), `m${i}ex`)} />
+                      </div>
+                    </details>
                     <div className="section tight">
                       <h4>{t('src.labels')}</h4>
                       {(m.labels ?? []).map((l, li) => (
@@ -394,7 +426,7 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
                           <Icon name="plus" /> {t('src.add_label')}
                         </Button>
                         <span className="spacer" />
-                        <Button size="sm" variant="danger" onClick={() => setPlan((p) => p.metrics!.splice(i, 1))}>
+                        <Button size="sm" variant="ghost" onClick={() => setPlan((p) => p.metrics!.splice(i, 1))}>
                           {t('common.delete')}
                         </Button>
                       </div>
@@ -413,6 +445,7 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
                 </Button>
               }
             >
+              {!plan.events?.length && <div className="dim">{t('src.event_mappings_empty')}</div>}
               <div className="col">
                 {(plan.events ?? []).map((ev, i) => (
                   <div key={i} className="subcard">
@@ -429,7 +462,7 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
                       ))}
                     </div>
                     <div className="row end">
-                      <Button size="sm" variant="danger" onClick={() => setPlan((p) => p.events!.splice(i, 1))}>
+                      <Button size="sm" variant="ghost" onClick={() => setPlan((p) => p.events!.splice(i, 1))}>
                         {t('common.delete')}
                       </Button>
                     </div>
@@ -444,7 +477,7 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
           <Card
             title={t('src.probe_title')}
             actions={
-              <Button size="sm" variant="primary" loading={busy === 'probe'} disabled={probeWait > 0} onClick={() => void runProbe()}>
+              <Button size="sm" loading={busy === 'probe'} disabled={probeWait > 0} onClick={() => void runProbe()}>
                 <Icon name="fetch" /> {probeWait ? `${probeWait}s` : t('src.fetch')}
               </Button>
             }
@@ -452,14 +485,14 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
             {probe ? (
               <div className="col">
                 <div className="row dim">
-                  <Badge tone={probe.status_code >= 200 && probe.status_code < 300 ? 'ok' : 'danger'}>{t('src.status', { code: probe.status_code, ms: probe.latency_ms })}</Badge>
+                  <HttpStatusBadge status={probe.status_code}>{t('src.status', { code: probe.status_code, ms: probe.latency_ms })}</HttpStatusBadge>
                   <span className="mono">{probe.content_type}</span>
                   <span>{probe.body_bytes} B</span>
                   {probe.masked_values > 0 && <Badge tone="warn">{t('src.probe_masked', { n: probe.masked_values })}</Badge>}
                   {probe.truncated && <Badge tone="warn">{t('src.probe_truncated')}</Badge>}
                 </div>
-                {probe.error && <div className="notice danger">{probe.error}</div>}
-                {active && <div className="notice">{t('src.active_field', { field: active.label !== undefined ? `labels[${active.label}].path` : active.field })} · {t('src.probe_hint')}</div>}
+                {probe.error && <div className="notice danger" style={LONG_TEXT}>{probe.error}</div>}
+                {active && probe.format === 'json' && <div className="notice">{t('src.active_field', { field: activeLabel(active, t) })}</div>}
                 {probe.format === 'json' && (
                   <div className="jt-box">
                     <JsonTree value={probe.json} onPick={onPick} isMatch={isMatch} />
@@ -474,7 +507,7 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
                 {probe.format === 'binary' && <div className="dim">{t('src.probe_binary')}</div>}
               </div>
             ) : (
-              <div className="dim">{t('src.probe_hint')}</div>
+              <div className="dim">{t('src.probe_empty')}</div>
             )}
           </Card>
           <Card
@@ -485,15 +518,15 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
               </Button>
             }
           >
-            <div className="dim card-lead">{t('src.preview_hint')}</div>
+            {!preview && <div className="dim">{t('src.preview_hint')}</div>}
             {preview && (
               <div className="col">
                 <div className="row">
-                  <Badge tone={preview.status_code >= 200 && preview.status_code < 300 ? 'ok' : 'danger'}>{t('src.status', { code: preview.status_code, ms: preview.latency_ms })}</Badge>
-                  {preview.error && <span className="err-text">{preview.error}</span>}
+                  <HttpStatusBadge status={preview.status_code}>{t('src.status', { code: preview.status_code, ms: preview.latency_ms })}</HttpStatusBadge>
                 </div>
+                {preview.error && <div className="notice danger" style={LONG_TEXT}>{preview.error}</div>}
                 {preview.metrics.length ? (
-                  <div className="scroll-x">
+                  <div className="scroll-x" style={{ maxHeight: 360, overflowY: 'auto' }}>
                     <table className="table">
                       <thead>
                         <tr>
@@ -509,7 +542,7 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
                             <td className="mono">{m.metric}</td>
                             <td className="mono">{m.value}</td>
                             <td>{m.unit}</td>
-                            <td className="dim">{Object.entries(m.labels).map(([k, v]) => `${k}=${v}`).join(', ')}</td>
+                            <td className="dim" style={TRUNCATE} title={labelText(m.labels)}>{labelText(m.labels)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -522,14 +555,14 @@ function SourceEditor({ sourceId }: { sourceId: string }) {
                   <ul className="plain-list">
                     {preview.events.map((e, i) => (
                       <li key={i}>
-                        <Badge tone={e.severity === 'critical' ? 'danger' : e.severity === 'warning' ? 'warn' : undefined}>{e.severity}</Badge> {e.title} <span className="dim">{e.message}</span>
+                        <SeverityBadge sev={e.severity} /> {e.title} <span className="dim">{e.message}</span>
                       </li>
                     ))}
                   </ul>
                 )}
                 {preview.assets.map((a, i) => (
                   <div key={i} className="dim">
-                    {a.kind} · {a.media_type} · {a.size_bytes} B
+                    {a.media_type} · {a.size_bytes} B
                   </div>
                 ))}
               </div>

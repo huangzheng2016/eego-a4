@@ -1,6 +1,7 @@
 // Dashboard draft store: applied (device) bundle vs local draft, undo/redo,
 // validate/apply with If-Match revision handling, and editor selection.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { deviceScope } from '../model/origin';
 import * as api from '../api';
 import { ApiError } from '../api';
 import { clone, emptyBundle, parseBundle, serializeBundle } from '../model/bundle';
@@ -13,6 +14,8 @@ import { errorText } from './errors';
 import { commit, initHistory, redo as redoH, reset, undo as undoH, type History } from './history';
 
 const LOCAL_KEY = 'eego_dashboard_draft';
+// Per-device on the Pages origin (BLE), where one origin serves several devices.
+const localKey = () => LOCAL_KEY + deviceScope();
 
 interface Saved {
   base_revision: number;
@@ -63,7 +66,7 @@ const Ctx = createContext<DraftCtx | null>(null);
 
 function readSaved(): Saved | null {
   try {
-    const raw = localStorage.getItem(LOCAL_KEY);
+    const raw = localStorage.getItem(localKey());
     return raw ? (JSON.parse(raw) as Saved) : null;
   } catch {
     return null;
@@ -71,8 +74,8 @@ function readSaved(): Saved | null {
 }
 function writeSaved(s: Saved | null) {
   try {
-    if (s) localStorage.setItem(LOCAL_KEY, JSON.stringify(s));
-    else localStorage.removeItem(LOCAL_KEY);
+    if (s) localStorage.setItem(localKey(), JSON.stringify(s));
+    else localStorage.removeItem(localKey());
   } catch {
     /* quota or disabled storage: draft persistence is best effort */
   }

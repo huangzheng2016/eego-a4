@@ -4,7 +4,7 @@
 // the stored secret from the draft source. Basic auth is not offered: the
 // firmware only injects Bearer tokens and named secret headers, and reserves
 // the Authorization header.
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import * as api from '../api';
 import { useI18n, type DictKey } from '../i18n';
 import { useToast } from '../state/toast';
@@ -36,10 +36,12 @@ interface SecretFieldProps {
   /** Label for the secret ("令牌" / "请求头的值"). */
   secretLabel: string;
   compact?: boolean;
+  /** Reports whether a typed-but-unsaved secret is pending. */
+  onDirty?: (dirty: boolean) => void;
 }
 
 /** One credential reference: shows the stored secret or an inline create/replace form. */
-export function SecretField({ value, onChange, creds, reloadCreds, suggest, secretLabel, compact }: SecretFieldProps) {
+export function SecretField({ value, onChange, creds, reloadCreds, suggest, secretLabel, compact, onDirty }: SecretFieldProps) {
   const { t } = useI18n();
   const toast = useToast();
   const key = keyFromRef(value);
@@ -50,6 +52,9 @@ export function SecretField({ value, onChange, creds, reloadCreds, suggest, secr
   const [secret, setSecret] = useState('');
   const [errs, setErrs] = useState<{ key?: string; value?: string }>({});
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    onDirty?.(!!secret);
+  }, [secret, onDirty]);
 
   // No stored token yet and nothing to pick → open the create form directly.
   const formOpen = mode !== null || (!value && creds !== null && !creds.length);
@@ -100,7 +105,17 @@ export function SecretField({ value, onChange, creds, reloadCreds, suggest, secr
   if (formOpen) {
     const overwrite = formMode === 'new' && !!creds?.some((c) => c.key === name.trim());
     return (
-      <form className={`secret-form${compact ? ' compact' : ''}`} onSubmit={(e) => void submit(e)} autoComplete="off">
+      <form
+        className={`secret-form${compact ? ' compact' : ''}`}
+        onSubmit={(e) => void submit(e)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape' && mode !== null) {
+            e.stopPropagation();
+            close();
+          }
+        }}
+        autoComplete="off"
+      >
         <div className="secret-form-fields">
           {formMode === 'new' ? (
             <TextInput
@@ -119,7 +134,6 @@ export function SecretField({ value, onChange, creds, reloadCreds, suggest, secr
             <div className="field">
               <span className="label">{t('auth.key')}</span>
               <div className="secret-fixed mono">{key}</div>
-              <span className="hint">{t('auth.replace_hint')}</span>
             </div>
           )}
           <SecretInput
@@ -195,7 +209,7 @@ export function SecretField({ value, onChange, creds, reloadCreds, suggest, secr
           </Button>
         )}
       </div>
-      {value && !exists && creds !== null && <span className="err-text">{t('auth.missing_hint', { key: key || value })}</span>}
+      {value && !exists && creds !== null && <span className="err-text">{t('auth.missing_hint')}</span>}
     </div>
   );
 }
@@ -220,8 +234,15 @@ export function AuthSection({ sourceId, plan, setPlan, creds, reloadCreds, errs 
   const keys = (creds ?? []).map((c) => c.key);
   const secret = plan.header_secret_refs ?? {};
   const secretCount = Object.keys(secret).length;
+  const dirty = useRef(false);
+  const onDirty = useRef((v: boolean) => {
+    dirty.current = v;
+  }).current;
 
   const pick = (m: AuthMode) => {
+    if (m === mode) return;
+    if (dirty.current && !confirm(t('auth.discard_confirm'))) return;
+    dirty.current = false;
     setMode(m);
     setPlan((p) => {
       if (m !== 'bearer') p.auth_token_ref = '';
@@ -235,9 +256,6 @@ export function AuthSection({ sourceId, plan, setPlan, creds, reloadCreds, errs 
         <span className="label-strong">{t('auth.title')}</span>
         <Segmented<AuthMode> value={mode} onChange={pick} label={t('auth.title')} options={AUTH_MODES.map((m) => ({ value: m, label: t(`auth.mode.${m}` as DictKey) }))} />
       </div>
-      <p className="dim auth-note">
-        <Icon name="shield" size={13} /> {t('auth.note')}
-      </p>
       {mode === 'bearer' && (
         <div className="auth-body">
           <SecretField
@@ -247,6 +265,7 @@ export function AuthSection({ sourceId, plan, setPlan, creds, reloadCreds, errs 
             reloadCreds={reloadCreds}
             suggest={suggestCredentialKey(sourceId, keys)}
             secretLabel={t('auth.token')}
+            onDirty={onDirty}
           />
           <span className="hint">{t('auth.bearer_hint')}</span>
           {errs.auth_token_ref && <span className="err-text">{errs.auth_token_ref}</span>}
@@ -262,9 +281,9 @@ export function AuthSection({ sourceId, plan, setPlan, creds, reloadCreds, errs 
           reloadCreds={reloadCreds}
           keys={keys}
           error={errs.header_secret_refs}
+          onDirty={onDirty}
         />
       )}
-      {mode === 'none' && <span className="hint">{t('auth.none_hint')}</span>}
       {mode === 'bearer' && secretCount > 0 && <span className="hint">{t('auth.also_headers', { n: secretCount })}</span>}
     </div>
   );
@@ -279,6 +298,7 @@ function SecretHeaders({
   reloadCreds,
   keys,
   error,
+  onDirty,
 }: {
   sourceId: string;
   value: Record<string, string>;
@@ -288,6 +308,7 @@ function SecretHeaders({
   reloadCreds: () => Promise<void>;
   keys: string[];
   error?: string;
+  onDirty?: (dirty: boolean) => void;
 }) {
   const { t } = useI18n();
   // Rows keep transient empty/duplicate names while typing.
@@ -337,12 +358,13 @@ function SecretHeaders({
               reloadCreds={reloadCreds}
               suggest={suggestCredentialKey(sourceId, keys, name)}
               secretLabel={t('auth.header_value')}
+              onDirty={onDirty}
             />
           </div>
         );
       })}
       <div className="row">
-        <Button size="sm" disabled={full} onClick={() => setRows([...rows, ['', '']])}>
+        <Button size="sm" disabled={full} title={full ? t('auth.headers_full', { n: MAX_HEADERS }) : undefined} onClick={() => setRows([...rows, ['', '']])}>
           <Icon name="plus" size={14} /> {t('auth.add_header')}
         </Button>
         <span className="hint">{t('auth.headers_hint')}</span>

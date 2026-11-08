@@ -62,7 +62,7 @@ export function KeepAwakeToggle({ compact = false }: { compact?: boolean }) {
       onClick={() => void run(target)}
       style={compact ? undefined : { justifyContent: 'flex-start' }}
     >
-      <Icon name="sun" size={16} /> {compact && active ? `${minutesLeft(left)}′` : label}
+      <Icon name="sun" size={16} /> {compact && active ? t('ka.min_short', { m: minutesLeft(left) }) : label}
     </Button>
   );
 }
@@ -77,7 +77,7 @@ export function PowerBanner() {
   const left = sleepIn(status?.power, !!ka?.active, statusAt, now);
   if (connection === 'offline' && probablyAsleep(status?.power)) {
     return (
-      <div className="notice danger" role="status" style={{ margin: '12px 16px 0', alignItems: 'center' }}>
+      <div className="notice danger banner" role="status">
         <Icon name="moon" size={16} />
         <span className="grow">{t('err.asleep')}</span>
       </div>
@@ -86,7 +86,7 @@ export function PowerBanner() {
   if (!sleepSoon(left)) return null;
   const minutes = toggleMinutes({ active: false, remaining_s: 0, until: 0, default_min: ka?.default_min });
   return (
-    <div className="notice warn" role="status" style={{ margin: '12px 16px 0', alignItems: 'center' }}>
+    <div className="notice warn banner" role="status">
       <Icon name="moon" size={16} />
       <span className="grow">{t('power.sleep_soon', { s: left ?? 0 })}</span>
       <Button size="sm" variant="primary" loading={busy} onClick={() => void run(minutes)}>

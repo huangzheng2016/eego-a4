@@ -1,6 +1,8 @@
 // Small UI primitives. Keep these dependency-free.
 import { Icon } from './icons';
+import { useI18n } from '../i18n';
 import {
+  useCallback,
   useEffect,
   useId,
   useRef,
@@ -97,12 +99,15 @@ export function NumberInput({
   value,
   onChange,
   allowEmpty,
+  suffix,
   ...rest
 }: BaseProps &
   Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange'> & {
     value: number | null | undefined;
     onChange: (v: number | undefined) => void;
     allowEmpty?: boolean;
+    /** Unit shown after the input (e.g. 「秒」). */
+    suffix?: ReactNode;
   }) {
   const id = useId();
   const [text, setText] = useState(value == null ? '' : String(value));
@@ -113,31 +118,46 @@ export function NumberInput({
       setText(value == null ? '' : String(value));
     }
   }, [value]);
+  const input = (
+    <input
+      id={id}
+      className="input"
+      inputMode="decimal"
+      type="number"
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value);
+        if (e.target.value.trim() === '') {
+          if (allowEmpty) {
+            last.current = undefined;
+            onChange(undefined);
+          }
+          return;
+        }
+        const n = Number(e.target.value);
+        if (Number.isFinite(n)) {
+          last.current = n;
+          onChange(n);
+        }
+      }}
+      {...rest}
+      onBlur={(e) => {
+        // A cleared field that cannot be empty snaps back to the committed value.
+        if (!allowEmpty && e.target.value.trim() === '') setText(last.current == null ? '' : String(last.current));
+        rest.onBlur?.(e);
+      }}
+    />
+  );
   return (
     <Field label={label} error={error} hint={hint} wide={wide} htmlFor={id}>
-      <input
-        id={id}
-        className="input"
-        inputMode="decimal"
-        type="number"
-        value={text}
-        onChange={(e) => {
-          setText(e.target.value);
-          if (e.target.value.trim() === '') {
-            if (allowEmpty) {
-              last.current = undefined;
-              onChange(undefined);
-            }
-            return;
-          }
-          const n = Number(e.target.value);
-          if (Number.isFinite(n)) {
-            last.current = n;
-            onChange(n);
-          }
-        }}
-        {...rest}
-      />
+      {suffix !== undefined ? (
+        <span className="input-suffix">
+          {input}
+          <span className="suffix">{suffix}</span>
+        </span>
+      ) : (
+        input
+      )}
     </Field>
   );
 }
@@ -229,17 +249,28 @@ export function Modal({
   onClose: () => void;
   size?: 'lg';
 }) {
+  const { t } = useI18n();
+  const box = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && closeRef.current();
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, []);
+  // Move focus into the dialog unless a field inside already took it (autoFocus);
+  // give it back to the opener on close.
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    if (!box.current?.contains(document.activeElement)) box.current?.focus();
+    return () => opener?.focus?.();
+  }, []);
   return (
     <div className="modal-scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`modal ${size ?? ''}`} role="dialog" aria-modal="true">
+      <div ref={box} tabIndex={-1} className={`modal ${size ?? ''}`} role="dialog" aria-modal="true">
         <div className="modal-head">
           <h2 className="grow">{title}</h2>
-          <button type="button" className="btn ghost icon sm" aria-label="close" onClick={onClose}>
+          <button type="button" className="btn ghost icon sm" aria-label={t('common.close')} onClick={onClose}>
             <Icon name="x" size={16} />
           </button>
         </div>
@@ -274,7 +305,8 @@ export function Badge({ tone, children, dot }: { tone?: 'ok' | 'warn' | 'danger'
 }
 
 export function Spinner() {
-  return <span className="spin" aria-label="loading" />;
+  const { t } = useI18n();
+  return <span className="spin" role="status" aria-label={t('common.loading')} />;
 }
 
 export function Empty({ children }: { children: ReactNode }) {
@@ -359,6 +391,44 @@ export function Switch({ checked, onChange, label, disabled, hint }: { checked: 
 
 export { Icon, Logo } from './icons';
 
+export interface ConfirmOptions {
+  title: ReactNode;
+  body?: ReactNode;
+  /** Confirm button label (defaults to 「确认」). */
+  ok?: ReactNode;
+  danger?: boolean;
+}
+/**
+ * In-app replacement for window.confirm(): `const [confirm, dialog] = useConfirm()`,
+ * render `dialog`, then `if (await confirm({...}))`.
+ */
+export function useConfirm(): [(o: ConfirmOptions) => Promise<boolean>, ReactNode] {
+  const { t } = useI18n();
+  const [req, setReq] = useState<{ o: ConfirmOptions; resolve: (v: boolean) => void } | null>(null);
+  const confirm = useCallback((o: ConfirmOptions) => new Promise<boolean>((resolve) => setReq({ o, resolve })), []);
+  const close = (v: boolean) => {
+    req?.resolve(v);
+    setReq(null);
+  };
+  const dialog = req ? (
+    <Modal
+      title={req.o.title}
+      onClose={() => close(false)}
+      footer={
+        <>
+          <Button onClick={() => close(false)}>{t('common.cancel')}</Button>
+          <Button variant={req.o.danger ? 'danger' : 'primary'} autoFocus onClick={() => close(true)}>
+            {req.o.ok ?? t('common.confirm')}
+          </Button>
+        </>
+      }
+    >
+      {req.o.body && <p>{req.o.body}</p>}
+    </Modal>
+  ) : null;
+  return [confirm, dialog];
+}
+
 /** Editable list of string key/value pairs (headers, label maps). */
 export function KeyValueEditor({
   value,
@@ -375,6 +445,7 @@ export function KeyValueEditor({
   addLabel: string;
   renderValue?: (v: string, set: (v: string) => void) => ReactNode;
 }) {
+  const { t } = useI18n();
   // Keep rows as an array so empty/duplicate keys can be edited transiently.
   const [rows, setRows] = useState<[string, string][]>(() => Object.entries(value ?? {}));
   const sig = JSON.stringify(value ?? {});
@@ -402,7 +473,7 @@ export function KeyValueEditor({
           ) : (
             <input className="input" placeholder={valueLabel} aria-label={valueLabel} value={v} onChange={(e) => commit(rows.map((r, j) => (j === i ? [r[0], e.target.value] : r)))} />
           )}
-          <Button icon aria-label="remove" onClick={() => commit(rows.filter((_, j) => j !== i))}>
+          <Button icon aria-label={t('common.delete')} title={t('common.delete')} onClick={() => commit(rows.filter((_, j) => j !== i))}>
             <Icon name="x" />
           </Button>
         </div>

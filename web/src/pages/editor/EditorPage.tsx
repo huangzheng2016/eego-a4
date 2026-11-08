@@ -10,10 +10,11 @@ import * as api from '../../api';
 import { errorText } from '../../state/errors';
 import { Canvas, type CanvasHandle } from './Canvas';
 import { PageInspector, PanelInspector, newPanel } from './Inspector';
-import { columnsOf, findFreeSpot, layoutIssues, MAX_SCREENS, SCREEN_W } from '../../model/grid';
+import { columnsOf, findFreeSpot, isVisible, layoutIssues, MAX_SCREENS, SCREEN_W } from '../../model/grid';
+import { panelSeries } from '../../model/series';
 import { applyPlacement, defaultSize, resolvePlacement, type Placement } from '../../model/layout';
 import { addScreen, allPanelIds, BundleError, bundleToText, deviceScreenIndex, duplicateScreen, moveScreen, parseBundle, removeScreen, uniqueId } from '../../model/bundle';
-import { locateError } from '../../model/errors';
+import { locateError, type ErrorTarget } from '../../model/errors';
 import { PANEL_KINDS, type GridRect, type PanelKind } from '../../model/types';
 import { LivePreview } from '../LivePreview';
 
@@ -94,7 +95,7 @@ export function DraftToolbar({ compact }: { compact?: boolean }) {
         {d.busy !== 'validate' && <Icon name={d.validity === 'valid' ? 'ok' : 'shield'} size={15} />}
         {d.validity === 'valid' ? t('draft.valid') : t('draft.validate')}
       </Button>
-      <Button size="sm" variant="primary" loading={d.busy === 'apply'} disabled={!d.dirty && d.configured} onClick={() => void d.apply()}>
+      <Button size="sm" variant="primary" loading={d.busy === 'apply'} disabled={!d.dirty && d.configured} title={!d.dirty && d.configured ? t('draft.clean') : undefined} onClick={() => void d.apply()}>
         {d.busy !== 'apply' && <Icon name="send" size={15} />}
         {t('draft.apply')}
       </Button>
@@ -122,6 +123,11 @@ export function useUndoShortcuts() {
   }, [d]);
 }
 
+const MAX_ERRORS = 12;
+
+/** Editor view preferences kept across route changes (not persisted). */
+const view: { zoom: number | null; showGrid: boolean; renderSupported: boolean } = { zoom: null, showGrid: true, renderSupported: true };
+
 interface PaletteDrag {
   kind: PanelKind;
   pointerId: number;
@@ -140,14 +146,19 @@ export function EditorPage() {
   const d = useDraft();
   const [wrapEl, setWrapEl] = useState<HTMLDivElement | null>(null);
   const fit = useFitScale(wrapEl);
-  const [zoom, setZoom] = useState<number | null>(null);
-  const [showGrid, setShowGrid] = useState(true);
+  const [zoom, setZoom] = useState<number | null>(view.zoom);
+  const [showGrid, setShowGrid] = useState(view.showGrid);
   const [side, setSide] = useState<'props' | 'live'>(() => (d.appliedAt && Date.now() - d.appliedAt < 15000 ? 'live' : 'props'));
   const [pal, setPal] = useState<PaletteDrag | null>(null);
   const palRef = useRef<PaletteDrag | null>(null);
   const canvasRef = useRef<CanvasHandle>(null);
   const seenApply = useRef(d.appliedSeq);
-  const [renderSupported, setRenderSupported] = useState(true);
+  const [renderSupported, setRenderSupported] = useState(view.renderSupported);
+  useEffect(() => {
+    view.zoom = zoom;
+    view.showGrid = showGrid;
+    view.renderSupported = renderSupported;
+  }, [zoom, showGrid, renderSupported]);
   const [renderOpen, setRenderOpen] = useState(false);
   const [showBusy, setShowBusy] = useState(false);
   useUndoShortcuts();
@@ -157,6 +168,10 @@ export function EditorPage() {
   const issues = useMemo(() => (page ? layoutIssues(page) : []), [page]);
   const scale = zoom ?? fit;
   const errorItems = useMemo(() => d.errors.map((e) => ({ e, at: locateError(d.draft, e.field) })), [d.errors, d.draft]);
+  const hasDemo = useMemo(
+    () => !!page?.panels.some((p) => isVisible(p) && (p.kind === 'card' || p.kind === 'chart' || p.kind === 'table') && panelSeries(d.draft, p, d.observed).demo),
+    [page, d.draft, d.observed],
+  );
 
   // Show the device's real frame next to the canvas after every apply.
   useEffect(() => {
@@ -281,6 +296,7 @@ export function EditorPage() {
       }
     });
     d.setPanelId(null);
+    toast('info', t('editor.panel_deleted'));
   };
   const duplicatePanel = (id: string) => {
     if (!page) return;
@@ -323,6 +339,25 @@ export function EditorPage() {
     else if (st.rect) insertPanel(st.kind, st.rect);
   };
 
+  const panelName = (id: string) => {
+    for (const pg of dash.pages) {
+      const x = pg.panels.find((y) => y.id === id);
+      if (x) return x.title || x.id;
+    }
+    return id;
+  };
+  const pageName = (id: string) => {
+    const i = dash.pages.findIndex((p) => p.id === id);
+    return i < 0 ? id : dash.pages[i].title || t('editor.screen', { n: i + 1 });
+  };
+  const errorTarget = (at: ErrorTarget): string => {
+    if (at.area === 'panel') return `${pageName(at.pageId)} · ${panelName(at.panelId)}`;
+    if (at.area === 'page') return pageName(at.pageId);
+    if (at.area === 'source') return `${t('nav.sources')} · ${at.sourceId}`;
+    if (at.area === 'variable') return `${t('var.title')} · ${at.name}`;
+    if (at.area === 'alert_rule') return `${t('nav.rules')} · ${at.id}`;
+    return '';
+  };
   const pageErrCount = (id: string) => errorItems.filter((x) => (x.at.area === 'page' || x.at.area === 'panel') && x.at.pageId === id).length;
 
   return (
@@ -354,7 +389,6 @@ export function EditorPage() {
               </div>
             ))}
           </div>
-          <p className="dim" style={{ marginTop: 8 }}>{t('editor.palette_hint')}</p>
         </section>
         <section className="ed-rail-sec">
           <Button size="sm" style={{ width: '100%' }} onClick={() => navigate('templates')}>
@@ -385,15 +419,15 @@ export function EditorPage() {
           showBusy={showBusy}
         />
         <div className="ed-toolbar" style={{ minHeight: 44, paddingTop: 6, paddingBottom: 6 }}>
-          <strong className="truncate" style={{ maxWidth: 260 }}>{page?.title || page?.id}</strong>
-          {page && <span className="dim hide-sm">{t('editor.grid_info', { c: columnsOf(page) })}</span>}
+          {hasDemo && (
+            <span className="dim demo-key hide-sm" title={t('editor.demo_hint')}>
+              <i /> {t('editor.demo')}
+            </span>
+          )}
           <span className="spacer" />
-          <span className="dim demo-key hide-sm" title={t('editor.demo_hint')}>
-            <i /> {t('editor.demo')}
-          </span>
           {renderSupported && (
             <Button size="sm" variant="ghost" disabled={!page} onClick={() => setRenderOpen(true)} title={t('editor.render_hint')}>
-              <Icon name="device" size={16} /> <span className="hide-sm">{t('editor.render')}</span>
+              <Icon name="eye" size={16} /> <span className="hide-sm">{t('editor.render')}</span>
             </Button>
           )}
           <Button size="sm" variant="ghost" className={showGrid ? 'on' : ''} onClick={() => setShowGrid(!showGrid)} title={t('editor.grid')}>
@@ -462,11 +496,7 @@ export function EditorPage() {
           />
         </div>
         <div className="ed-side-body">
-          {side === 'live' ? (
-            <LivePreview compact />
-          ) : (
-            <>
-              {(issues.length > 0 || errorItems.length > 0) && (
+          {(issues.length > 0 || errorItems.length > 0) && (
                 <div className="notice danger issues">
                   <Icon name="warn" size={16} />
                   <div className="grow">
@@ -474,18 +504,19 @@ export function EditorPage() {
                     <ul>
                       {issues.map((i, k) => (
                         <li key={`i${k}`}>
-                          <a href="#/editor" onClick={(e) => (e.preventDefault(), d.setPanelId(i.panelId))}>
-                            {i.panelId}
+                          <a href="#/editor" onClick={(e) => (e.preventDefault(), setSide('props'), d.setPanelId(i.panelId))}>
+                            {panelName(i.panelId)}
                           </a>
                           : {t(`editor.layout_issue.${i.message}` as DictKey, { other: i.otherId ?? '' })}
                         </li>
                       ))}
-                      {errorItems.slice(0, 12).map(({ e, at }, k) => (
+                      {errorItems.slice(0, MAX_ERRORS).map(({ e, at }, k) => (
                         <li key={`e${k}`}>
                           <a
                             href="#/editor"
                             onClick={(ev) => {
                               ev.preventDefault();
+                              setSide('props');
                               if (at.area === 'panel') {
                                 d.setPageId(at.pageId);
                                 setTimeout(() => d.setPanelId(at.panelId));
@@ -494,17 +525,22 @@ export function EditorPage() {
                               else if (e.field.includes('alert_rules')) navigate('rules');
                             }}
                           >
-                            {e.field || '/'}
+                            {errorTarget(at) || e.field || '/'}
                           </a>
                           : {e.message}
                         </li>
                       ))}
+                      {errorItems.length > MAX_ERRORS && <li className="dim">+{errorItems.length - MAX_ERRORS}</li>}
                     </ul>
                   </div>
                 </div>
               )}
-              {d.panelId ? <PanelInspector key={d.panelId} panelId={d.panelId} onDelete={deletePanel} onDuplicate={duplicatePanel} /> : <PageInspector />}
-            </>
+          {side === 'live' ? (
+            <LivePreview />
+          ) : d.panelId ? (
+            <PanelInspector key={d.panelId} panelId={d.panelId} onDelete={deletePanel} onDuplicate={duplicatePanel} />
+          ) : (
+            <PageInspector />
           )}
         </div>
       </aside>

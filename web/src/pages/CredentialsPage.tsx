@@ -17,12 +17,24 @@ export function CredentialsPage() {
   const [value, setValue] = useState('');
   const [errs, setErrs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
   const valueRef = useRef<HTMLDivElement>(null);
   const exists = !!list?.some((c) => c.key === key.trim());
 
   const load = useCallback(() => {
-    api.listCredentials().then((r) => setList(r.credentials), (e) => toast('error', errorText(e, t)));
-  }, [toast, t]);
+    setLoading(true);
+    api.listCredentials()
+      .then(
+        (r) => {
+          setList(r.credentials);
+          setLoadErr(null);
+        },
+        (e) => setLoadErr(errorText(e, t)),
+      )
+      .finally(() => setLoading(false));
+  }, [t]);
   useEffect(load, [load]);
 
   const submit = async (e: FormEvent) => {
@@ -47,14 +59,18 @@ export function CredentialsPage() {
       setBusy(false);
     }
   };
-  const remove = async (k: string) => {
-    if (!confirm(t('cred.delete_confirm', { key: k }))) return;
+  const remove = async (k: string, users: string[]) => {
+    if (removing) return;
+    if (!confirm(users.length ? t('cred.delete_confirm_used', { key: k, sources: users.join('、') }) : t('cred.delete_confirm', { key: k }))) return;
+    setRemoving(k);
     try {
       await api.deleteCredential(k);
       toast('ok', t('cred.deleted', { key: k }));
       load();
     } catch (x) {
       toast('error', errorText(x, t));
+    } finally {
+      setRemoving(null);
     }
   };
   const usedBy = (ref: string) =>
@@ -63,32 +79,28 @@ export function CredentialsPage() {
   return (
     <div className="page stack">
       <PageHeader icon="key" title={t('cred.title')} subtitle={t('cred.subtitle')} />
-      <div className="notice">
-        <Icon name="shield" size={16} />
-        <span>{t('cred.note')}</span>
-      </div>
       <Card title={t('cred.write')}>
-        <p className="dim card-lead">{t('cred.write_h')}</p>
         <form className="form-grid two" onSubmit={submit} autoComplete="off">
           <TextInput label={t('auth.key')} value={key} onChange={(v) => setKey(sanitizeCredentialKey(v))} error={errs.key} hint={exists ? t('auth.key_overwrite') : t('auth.key_hint')} maxLength={15} spellCheck={false} required />
           <div ref={valueRef}>
-            <SecretInput label={t('cred.value')} value={value} onChange={setValue} error={errs.value} hint={t('cred.value_h')} maxLength={1024} showLabel={t('auth.show')} hideLabel={t('auth.hide')} placeholder={t('auth.secret_ph')} required />
+            <SecretInput label={t('cred.value')} value={value} onChange={setValue} error={errs.value} maxLength={1024} showLabel={t('auth.show')} hideLabel={t('auth.hide')} placeholder={t('auth.secret_ph')} required />
           </div>
           <div className="wide row">
             <Button type="submit" variant="primary" loading={busy} disabled={!key || !value}>
               <Icon name="key" size={15} /> {exists ? t('cred.overwrite') : t('auth.save_to_device')}
             </Button>
-            {key && (
+            {(key || value) && (
               <Button variant="ghost" onClick={() => { setKey(''); setValue(''); setErrs({}); }}>
-                {t('common.cancel')}
+                {t('common.clear')}
               </Button>
             )}
           </div>
         </form>
       </Card>
-      <Card title={t('cred.list')} actions={<Button size="sm" onClick={load}><Icon name="refresh" size={14} /> {t('common.refresh')}</Button>}>
+      <Card title={t('cred.list')} actions={<Button size="sm" loading={loading} onClick={load}><Icon name="refresh" size={14} /> {t('common.refresh')}</Button>}>
+        {loadErr && <div className="notice warn">{loadErr}</div>}
         {!list ? (
-          <Spinner />
+          !loadErr && <Spinner />
         ) : !list.length ? (
           <EmptyState icon="key" title={t('cred.empty')}>{t('cred.empty_h')}</EmptyState>
         ) : (
@@ -97,7 +109,6 @@ export function CredentialsPage() {
               <thead>
                 <tr>
                   <th>{t('auth.key')}</th>
-                  <th>{t('cred.ref')}</th>
                   <th>{t('cred.used_by')}</th>
                   <th />
                 </tr>
@@ -108,7 +119,6 @@ export function CredentialsPage() {
                   return (
                     <tr key={c.key}>
                       <td className="mono">{c.key}</td>
-                      <td className="mono dim">{c.ref}</td>
                       <td>{users.length ? users.map((u) => <Badge key={u} tone="accent">{u}</Badge>) : <span className="dim">{t('cred.unused')}</span>}</td>
                       <td className="cell-actions">
                         <Button
@@ -116,12 +126,13 @@ export function CredentialsPage() {
                           onClick={() => {
                             setKey(c.key);
                             setValue('');
+                            valueRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
                             valueRef.current?.querySelector('input')?.focus();
                           }}
                         >
-                          {t('cred.overwrite')}
+                          {t('cred.replace')}
                         </Button>
-                        <Button size="sm" variant="danger" onClick={() => void remove(c.key)}>
+                        <Button size="sm" variant="ghost" loading={removing === c.key} disabled={!!removing} onClick={() => void remove(c.key, users)}>
                           {t('common.delete')}
                         </Button>
                       </td>

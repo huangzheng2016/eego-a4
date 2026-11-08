@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Button, Icon } from '../ui';
+import { useI18n } from '../i18n';
 
 export type ToastKind = 'info' | 'ok' | 'warn' | 'error';
 interface Toast {
@@ -11,6 +12,7 @@ type Push = (kind: ToastKind, text: string, ms?: number) => void;
 const Ctx = createContext<Push>(() => undefined);
 
 export function ToastProvider({ children }: { children: ReactNode }) {
+  const { t: tr } = useI18n();
   const [items, setItems] = useState<Toast[]>([]);
   const seq = useRef(0);
   const dismiss = useCallback((id: number) => setItems((l) => l.filter((t) => t.id !== id)), []);
@@ -33,7 +35,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               <Icon name={t.kind === 'ok' ? 'ok' : t.kind === 'error' ? 'error' : t.kind === 'warn' ? 'warn' : 'info'} size={18} />
             </span>
             <div className="grow">{t.text}</div>
-            <Button size="sm" icon variant="ghost" aria-label="close" onClick={() => dismiss(t.id)}>
+            <Button size="sm" icon variant="ghost" aria-label={tr('common.close')} onClick={() => dismiss(t.id)}>
               <Icon name="x" size={15} />
             </Button>
           </div>

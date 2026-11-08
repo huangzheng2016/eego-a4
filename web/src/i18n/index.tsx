@@ -1,7 +1,7 @@
 // Minimal i18n: one flat dictionary per language, Chinese first.
-// Terminology (keep consistent): 仪表盘 dashboard · 页面 page · 面板 panel ·
+// Terminology (keep consistent): 仪表盘 dashboard · 屏 page (one screen) · 面板 panel ·
 // 数据源 source · 指标 metric · 凭据 credential · 草稿 draft · 已应用 applied ·
-// 校验 validate · 应用 apply · 模板 template · 屏 screen.
+// 校验 validate · 应用 apply · 模板 template.
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import { zh } from './zh';
 import { en } from './en';

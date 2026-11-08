@@ -8,7 +8,8 @@ import { navigate } from '../state/router';
 import { addTemplateAsPages, addTemplatePanels, bundleFromPreset, parseBundle, replaceWithTemplate } from '../model/bundle';
 import { columnsOf, isVisible, MAX_SCREENS, panelPixels, SCREEN_H, SCREEN_W } from '../model/grid';
 import type { Bundle, Page } from '../model/types';
-import { Badge, Button, EmptyState, Icon, PageHeader, Segmented, Select, SkeletonCard } from '../ui';
+import { Badge, Button, EmptyState, PageHeader, Segmented, Select, SkeletonCard } from '../ui';
+import { SearchInput } from '../ui/controls';
 import { DevicePanel } from './editor/DevicePanel';
 import type { ObservedMetrics } from '../model/metrics';
 
@@ -63,14 +64,21 @@ export function ScreenThumb({ page, bundle, observed, width = 150 }: { page: Pag
 
 type Filter = 'all' | TemplateEntry['kind'];
 
+/** Gallery filter + search kept across route changes. */
+const view: { filter: Filter; q: string } = { filter: 'all', q: '' };
+
 export function TemplatesPage() {
   const { t } = useI18n();
   const toast = useToast();
   const d = useDraft();
   const [entries, setEntries] = useState<TemplateEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<Filter>('all');
-  const [q, setQ] = useState('');
+  const [filter, setFilter] = useState<Filter>(view.filter);
+  const [q, setQ] = useState(view.q);
+  useEffect(() => {
+    view.filter = filter;
+    view.q = q;
+  }, [filter, q]);
   const [targetPage, setTargetPage] = useState(d.pageId);
 
   useEffect(() => {
@@ -93,6 +101,8 @@ export function TemplatesPage() {
     [entries, filter, q],
   );
 
+  const targetIndex = d.draft.dashboard.pages.findIndex((p) => p.id === targetPage);
+  const targetLabel = targetIndex < 0 ? '' : d.draft.dashboard.pages[targetIndex].title || t('editor.screen', { n: targetIndex + 1 });
   const addAsPage = (e: TemplateEntry) => {
     const { bundle, pageId, added } = addTemplateAsPages(d.draft, e.bundle);
     if (!added) return toast('warn', t('editor.max_screens', { n: MAX_SCREENS }));
@@ -110,7 +120,7 @@ export function TemplatesPage() {
     navigate('editor');
   };
   const replaceAll = (e: TemplateEntry) => {
-    if (!confirm(t('tpl.replace_confirm', { name: e.title }))) return;
+    if (d.dirty && !confirm(t('tpl.replace_confirm', { name: e.title }))) return;
     d.replace(replaceWithTemplate(d.draft, e.bundle));
     toast('ok', t('tpl.replaced'));
     navigate('editor');
@@ -118,19 +128,16 @@ export function TemplatesPage() {
 
   return (
     <div className="page wide">
-      <PageHeader icon="templates" title={t('tpl.title')} subtitle={t('tpl.subtitle')} />
+      <PageHeader icon="templates" title={t('tpl.title')} />
       <div className="row" style={{ marginBottom: 16 }}>
         <Segmented<Filter> value={filter} onChange={setFilter} options={(['all', 'layout', 'panel', 'example'] as Filter[]).map((f) => ({ value: f, label: f === 'all' ? t('tpl.all') : t(`tpl.kind.${f}`) }))} />
         <span className="spacer" />
-        <div style={{ position: 'relative' }}>
-          <input className="input" style={{ width: 200, paddingLeft: 32 }} placeholder={t('tpl.search')} value={q} onChange={(e) => setQ(e.target.value)} aria-label={t('tpl.search')} />
-          <span style={{ position: 'absolute', left: 9, top: 9, color: 'var(--text-3)' }}>
-            <Icon name="search" size={16} />
-          </span>
-        </div>
-        <div style={{ width: 180 }}>
-          <Select aria-label={t('tpl.target_page')} value={targetPage} options={d.draft.dashboard.pages.map((p, i) => ({ value: p.id, label: `${t('tpl.target_page')}: ${t('editor.screen', { n: i + 1 })}${p.title ? ` · ${p.title}` : ''}` }))} onChange={setTargetPage} />
-        </div>
+        <SearchInput value={q} onChange={setQ} placeholder={t('tpl.search')} />
+        {filter === 'panel' && (
+          <div style={{ width: 180 }}>
+            <Select aria-label={t('tpl.target_page')} value={targetPage} options={d.draft.dashboard.pages.map((p, i) => ({ value: p.id, label: `${t('editor.screen', { n: i + 1 })}${p.title ? ` · ${p.title}` : ''}` }))} onChange={setTargetPage} />
+          </div>
+        )}
       </div>
       {error && <div className="notice warn">{error}</div>}
       {!entries && !error && (
@@ -140,7 +147,24 @@ export function TemplatesPage() {
           ))}
         </div>
       )}
-      {entries && !shown.length && <EmptyState icon="search" title={t('common.empty')} />}
+      {entries && !shown.length && (
+        <EmptyState
+          icon="search"
+          title={t('tpl.no_match')}
+          action={
+            q || filter !== 'all' ? (
+              <Button
+                onClick={() => {
+                  setQ('');
+                  setFilter('all');
+                }}
+              >
+                {t('tpl.clear_search')}
+              </Button>
+            ) : undefined
+          }
+        />
+      )}
       <div className="tpl-grid">
         {shown.map((e) => {
           const page = e.bundle.dashboard.pages[0];
@@ -151,27 +175,27 @@ export function TemplatesPage() {
               <div className="tpl-meta">
                 <div className="row">
                   <strong className="grow">{e.title}</strong>
-                  <Badge tone={e.kind === 'example' ? 'accent' : undefined}>{t(`tpl.kind.${e.kind}`)}</Badge>
+                  {filter === 'all' && <Badge tone={e.kind === 'example' ? 'accent' : undefined}>{t(`tpl.kind.${e.kind}`)}</Badge>}
                 </div>
                 {e.description && <div className="dim">{e.description}</div>}
                 {sources.length > 0 && <div className="dim">{t('tpl.sources_note', { list: sources.join(', ') })}</div>}
               </div>
               <div className="tpl-actions">
                 {e.kind === 'panel' ? (
-                  <Button size="sm" variant="primary" onClick={() => addPanels(e)}>
-                    {t('tpl.add_panels')}
+                  <Button size="sm" onClick={() => addPanels(e)}>
+                    {t('tpl.add_panels', { screen: targetLabel })}
                   </Button>
                 ) : (
-                  <Button size="sm" variant="primary" onClick={() => addAsPage(e)}>
+                  <Button size="sm" onClick={() => addAsPage(e)}>
                     {t('tpl.add_page')}
                   </Button>
                 )}
                 {e.kind === 'panel' ? (
-                  <Button size="sm" onClick={() => addAsPage(e)}>
+                  <Button size="sm" variant="ghost" onClick={() => addAsPage(e)}>
                     {t('tpl.add_page')}
                   </Button>
                 ) : (
-                  <Button size="sm" onClick={() => replaceAll(e)}>
+                  <Button size="sm" variant="ghost" onClick={() => replaceAll(e)}>
                     {t('tpl.replace')}
                   </Button>
                 )}

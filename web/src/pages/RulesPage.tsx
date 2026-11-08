@@ -12,6 +12,8 @@ import { metricsForSource } from '../model/metrics';
 import { formatValue, latestValue } from '../model/series';
 import { SEVERITIES, type AlertRule, type AlertSurface, type Bundle, type Severity } from '../model/types';
 import { Badge, Button, EmptyState, Field, Icon, NumberInput, PageHeader, Segmented, Select, Switch, TextArea, TextInput } from '../ui';
+import { severityTone } from '../ui/badges';
+import { IdInput } from '../ui/controls';
 import { DraftToolbar } from './editor/EditorPage';
 
 const SURFACES: AlertSurface[] = ['banner', 'card', 'table_row', 'sparkline'];
@@ -89,7 +91,7 @@ export function RulesPage({ ruleId }: { ruleId: string }) {
         title={t('rules.title')}
         subtitle={t('rules.subtitle')}
         actions={
-          <Button variant="primary" onClick={() => create()}>
+          <Button onClick={() => create()}>
             <Icon name="plus" size={16} /> {t('rules.add')}
           </Button>
         }
@@ -107,15 +109,15 @@ export function RulesPage({ ruleId }: { ruleId: string }) {
         </div>
       )}
       {!rules.length ? (
-        <div className="card">
-          <EmptyState icon="rules" title={t('rules.empty_title')} action={<Button variant="primary" onClick={() => create()}><Icon name="plus" size={16} /> {t('rules.add')}</Button>}>
+        sources.length > 0 && <div className="card">
+          <EmptyState icon="rules" title={t('rules.empty_title')}>
             {t('rules.empty_desc')}
           </EmptyState>
           <div className="card-body border-top">
             <h4 className="mb-3">{t('rules.presets')}</h4>
             <div className="tiles">
               {presets.map((p) => (
-                <button key={p.key} type="button" className="card tile tile-btn" onClick={() => create(p.rule)}>
+                <button key={p.key} type="button" className="tile tile-btn" onClick={() => create(p.rule)}>
                   <span className="tile-label">
                     <Icon name={p.icon} size={15} /> {label('severity', p.rule.style!.severity!)}
                   </span>
@@ -134,18 +136,21 @@ export function RulesPage({ ruleId }: { ruleId: string }) {
               const errs = Object.keys(ruleErrors(d.errors, i)).length;
               const sev = r.style?.severity ?? 'info';
               return (
-                <div key={r.id} className={`card rule${r.id === sel?.id ? ' on' : ''}${r.enabled === false ? ' off' : ''}`} role="button" tabIndex={0} onClick={() => setSelected(r.id)} onKeyDown={(e) => e.key === 'Enter' && setSelected(r.id)}>
+                <div key={r.id} className={`card rule${r.id === sel?.id ? ' on' : ''}${r.enabled === false ? ' off' : ''}`} role="button" tabIndex={0} onClick={() => setSelected(r.id)} onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setSelected(r.id);
+                  }
+                }}>
                   <span className={`rule-strip ${sev}`} />
                   <div className="col gap-xs min-w-0">
                     <div className="row nowrap">
                       <strong className="truncate">{r.title || r.id}</strong>
-                      <Badge tone={sev === 'critical' ? 'danger' : sev === 'warning' ? 'warn' : 'accent'}>{label('severity', sev)}</Badge>
+                      <Badge tone={severityTone(sev)}>{label('severity', sev)}</Badge>
                       {errs > 0 && <Badge tone="danger">{t('rules.errors', { n: errs })}</Badge>}
                     </div>
                     <div className="row nowrap dim min-w-0">
-                      <span className="truncate mono">
-                        {r.source_id || '—'} / {r.metric || '—'}
-                      </span>
+                      <span className="truncate mono">{r.metric || '—'}</span>
                       <code className="expr truncate">{r.expression}</code>
                       {(r.for_ms ?? 0) > 0 && (
                         <span className="row nowrap gap-xs">
@@ -181,7 +186,7 @@ function fmtDuration(ms: number, t: ReturnType<typeof useI18n>['t']): string {
 
 function StatusBadge({ st }: { st: Status }) {
   const { t } = useI18n();
-  if (st.kind === 'off') return <Badge>{t('rules.status.off')}</Badge>;
+  if (st.kind === 'off') return <Badge>{t('common.disabled')}</Badge>;
   if (st.kind === 'error') return <Badge tone="danger">{t('rules.status.error')}</Badge>;
   if (st.kind === 'nodata') return <Badge>{t('rules.status.nodata')}</Badge>;
   return (
@@ -207,6 +212,7 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
   const d = useDraft();
   const exprRef = useRef<HTMLTextAreaElement>(null);
   const [trial, setTrial] = useState<number | undefined>(undefined);
+  const [customFor, setCustomFor] = useState(false);
   const errs = useMemo(() => ruleErrors(d.errors, index), [d.errors, index]);
   const dash = d.draft.dashboard;
   const set = (fn: (x: AlertRule) => void, key = 'x') =>
@@ -253,7 +259,7 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
           <Icon name="rules" size={18} />
         </span>
         <h3 className="grow truncate">{r.title || r.id}</h3>
-        <Switch checked={r.enabled !== false} onChange={(v) => set((x) => (x.enabled = v), 'enabled')} label={r.enabled !== false ? t('rules.enabled') : t('rules.disabled')} />
+        <Switch checked={r.enabled !== false} onChange={(v) => set((x) => (x.enabled = v), 'enabled')} label={r.enabled !== false ? t('common.enabled') : t('common.disabled')} />
         <Button
           size="sm"
           icon
@@ -261,7 +267,7 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
           title={t('common.duplicate')}
           onClick={() => {
             const id = uniqueId(r.id, dash.alert_rules.map((x) => x.id));
-            d.update((b) => b.dashboard.alert_rules.splice(index + 1, 0, { ...structuredClone(r), id, title: `${r.title ?? r.id} 2` }));
+            d.update((b) => b.dashboard.alert_rules.splice(index + 1, 0, { ...structuredClone(r), id, title: t('rules.copy_title', { name: r.title || r.id }) }));
             onSelect(id);
           }}
         >
@@ -273,7 +279,6 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
           variant="ghost"
           title={t('common.delete')}
           onClick={() => {
-            if (!confirm(t('rules.delete_confirm', { name: r.title || r.id }))) return;
             d.update((b) => (b.dashboard.alert_rules = b.dashboard.alert_rules.filter((x) => x.id !== r.id)));
             onSelect(null);
           }}
@@ -285,13 +290,12 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
 
       <div className="form-grid two mt-3">
         <TextInput label={t('rules.name')} value={r.title} onChange={(v) => set((x) => (x.title = v), 'title')} error={errs.title} />
-        <TextInput
-          label="ID"
+        <IdInput
+          label={t('common.id')}
           value={r.id}
           error={errs.id}
-          onChange={(v) => {
-            const id = v.replace(/[^A-Za-z0-9_-]/g, '');
-            if (!id || dash.alert_rules.some((x) => x.id === id)) return;
+          validate={(id) => (!id ? t('common.id_empty') : dash.alert_rules.some((x) => x.id === id) ? t('common.id_taken') : undefined)}
+          onCommit={(id) => {
             set((x) => (x.id = id), 'id');
             onSelect(id);
           }}
@@ -320,15 +324,15 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
       </Group>
 
       <Group title={t('rules.condition')} hint={t('rules.condition_hint')}>
-        <div className="row mb-3">
+        {(simple || !(r.expression ?? '').trim()) && <div className="row mb-3">
           <span className="mono">value</span>
           <Segmented size="sm" value={simple?.op ?? ('' as (typeof OPS)[number])} onChange={(op) => set((x) => (x.expression = `value ${op} ${simple?.n ?? 80}`), 'expr')} options={OPS.map((o) => ({ value: o, label: o }))} label={t('rules.operator')} />
           <div className="w-num">
             <NumberInput aria-label={t('rules.threshold')} value={simple?.n} onChange={(n) => n !== undefined && set((x) => (x.expression = `value ${simple?.op ?? '>'} ${n}`), 'expr')} placeholder="80" />
           </div>
           {latest?.unit && <span className="dim">{latest.unit}</span>}
-        </div>
-        <Field label={t('rules.expression')} error={errs.expression || (syntax ? t('rules.syntax_at', { msg: syntax.message, pos: syntax.offset + 1 }) : undefined)} hint={syntax ? undefined : unknownIds.length ? t('rules.unknown_ids', { list: unknownIds.join(', ') }) : t('rules.syntax_ok')}>
+        </div>}
+        <Field label={t('rules.expression')} error={errs.expression || (syntax ? t('rules.syntax_at', { msg: syntax.message, pos: syntax.offset + 1 }) : undefined)} hint={!syntax && unknownIds.length ? t('rules.unknown_ids', { list: unknownIds.join(', ') }) : undefined}>
           <textarea ref={exprRef} rows={2} spellCheck={false} value={r.expression ?? ''} onChange={(e) => set((x) => (x.expression = e.target.value), 'expr')} className="input expr-input" />
         </Field>
         <div className="chips mt-2">
@@ -375,12 +379,25 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
 
       <Group title={t('rules.for')}>
         <div className="row">
-          <Segmented size="sm" value={DURATIONS.includes(forMs) ? String(forMs) : 'custom'} onChange={(v) => v !== 'custom' && set((x) => (x.for_ms = Number(v)), 'for')} options={[...DURATIONS.map((ms) => ({ value: String(ms), label: fmtDuration(ms, t) })), { value: 'custom', label: t('common.custom') }]} />
-          <div className="w-num">
-            <NumberInput aria-label={t('rules.seconds_label')} min={0} max={604800} value={Math.round(forMs / 1000)} onChange={(v) => v !== undefined && set((x) => (x.for_ms = Math.round(v) * 1000), 'for')} error={errs.for_ms} />
-          </div>
-          <span className="dim">{t('rules.seconds_label')}</span>
+          <Segmented
+            size="sm"
+            value={customFor || !DURATIONS.includes(forMs) ? 'custom' : String(forMs)}
+            onChange={(v) => {
+              setCustomFor(v === 'custom');
+              if (v !== 'custom') set((x) => (x.for_ms = Number(v)), 'for');
+            }}
+            options={[...DURATIONS.map((ms) => ({ value: String(ms), label: fmtDuration(ms, t) })), { value: 'custom', label: t('common.custom') }]}
+          />
+          {(customFor || !DURATIONS.includes(forMs)) && (
+            <>
+              <div className="w-num">
+                <NumberInput aria-label={t('rules.seconds_label')} min={0} max={604800} value={Math.round(forMs / 1000)} onChange={(v) => v !== undefined && set((x) => (x.for_ms = Math.round(v) * 1000), 'for')} error={errs.for_ms} />
+              </div>
+              <span className="dim">{t('rules.seconds_label')}</span>
+            </>
+          )}
         </div>
+        {errs.for_ms && !customFor && DURATIONS.includes(forMs) && <div className="err-text">{errs.for_ms}</div>}
       </Group>
 
       <Group title={t('rules.presentation')}>
@@ -391,9 +408,9 @@ function RuleEditor({ rule: r, index, onSelect }: { rule: AlertRule; index: numb
             <div className="chips">
               {SURFACES.map((s) => {
                 const on = surfaces.includes(s);
+                const last = on && surfaces.length === 1;
                 return (
-                  <button key={s} type="button" className={`chip text${on ? ' on' : ''}`} onClick={() => setStyle({ surfaces: on ? (surfaces.length > 1 ? surfaces.filter((x) => x !== s) : surfaces) : [...surfaces, s] })}>
-                    {on && '✓ '}
+                  <button key={s} type="button" className={`chip text${on ? ' on' : ''}`} disabled={last} title={last ? t('rules.keep_one') : undefined} onClick={() => setStyle({ surfaces: on ? surfaces.filter((x) => x !== s) : [...surfaces, s] })}>
                     {t(`rules.surface.${s}`)}
                   </button>
                 );

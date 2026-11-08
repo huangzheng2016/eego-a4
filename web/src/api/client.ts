@@ -1,8 +1,9 @@
-// Low-level HTTP client for the device REST API (/api/v1, same origin).
+// Low-level client for the device REST API (/api/v1) over the current transport (WiFi or BLE).
 // Error envelope: {"error":{"code","message","fields"?}} (admin_httpd.cpp sendError).
 import { toFieldErrors, type FieldError } from '../model/errors';
+import { getTransport } from './transport';
 
-export const API_BASE = '/api/v1';
+export { API_BASE } from './transport';
 const TOKEN_KEY = 'eego_admin_token'; // shared with the embedded admin page
 
 export class ApiError extends Error {
@@ -82,22 +83,26 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
 }
 
 async function requestOnce<T>(path: string, opts: RequestOptions): Promise<T> {
+  const transport = getTransport();
   const headers: Record<string, string> = { Accept: 'application/json' };
   const token = getToken() || memoryToken;
-  if (token) headers.Authorization = `Bearer ${token}`;
+  // Over BLE the bridge authorizes the paired link itself and strips Authorization.
+  if (token && transport.kind === 'http') headers.Authorization = `Bearer ${token}`;
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
   if (opts.ifMatch !== undefined) headers['If-Match'] = String(opts.ifMatch);
+  const timeoutMs = (opts.timeoutMs ?? 20000) * transport.timeoutScale;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 20000);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   opts.signal?.addEventListener('abort', () => ctrl.abort());
   let res: Response;
   try {
-    res = await fetch(API_BASE + path, {
+    res = await transport.send({
       method: opts.method ?? 'GET',
+      path,
       headers,
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
       signal: ctrl.signal,
-      cache: 'no-store',
+      timeoutMs,
     });
   } catch (e) {
     connectivityListeners.forEach((fn) => fn(false));

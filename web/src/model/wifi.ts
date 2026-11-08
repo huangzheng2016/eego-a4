@@ -98,3 +98,23 @@ export function disconnectReasonText(code: number): string {
   if (!code) return '—';
   return `${code} · ${REASONS[code] ?? 'other'}`;
 }
+
+/** Groups reason codes into a few user-facing causes (i18n key suffix `wifi.reason.<cause>`). */
+export type DisconnectCause = 'auth' | 'assoc' | 'handshake' | 'beacon' | 'not_found' | 'connect' | 'other';
+const CAUSES: Record<number, DisconnectCause> = {
+  2: 'auth',
+  3: 'auth',
+  202: 'auth',
+  4: 'assoc',
+  8: 'assoc',
+  203: 'assoc',
+  15: 'handshake',
+  204: 'handshake',
+  200: 'beacon',
+  201: 'not_found',
+  205: 'connect',
+};
+export function disconnectCause(code: number): DisconnectCause | null {
+  if (!code) return null;
+  return CAUSES[code] ?? 'other';
+}

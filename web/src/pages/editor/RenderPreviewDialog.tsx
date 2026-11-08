@@ -12,6 +12,7 @@ import { useDraft } from '../../state/draft';
 import { errorText } from '../../state/errors';
 import { serializeBundle } from '../../model/bundle';
 import { Badge, Button, Icon, Modal, Segmented } from '../../ui';
+import { Pager } from '../../ui/controls';
 
 const DATA_TONE: Record<string, 'ok' | 'warn' | 'accent' | undefined> = { live: 'ok', mixed: 'accent', bundle: 'accent', placeholder: 'warn', none: 'warn' };
 
@@ -71,9 +72,10 @@ export function RenderPreviewDialog({ pageId, pageTitle, onClose, onUnsupported 
   const title = result ? d.draft.dashboard.pages.find((p) => p.id === result.page)?.title || result.page : pageTitle;
 
   return (
-    <Modal title={t('editor.render_title', { page: `${t('editor.screen', { n: screen + 1 })} · ${title}` })} onClose={onClose}>
+    <Modal title={t('editor.render_title', { page: title })} onClose={onClose}>
       <div className="col" style={{ gap: 12 }}>
         <div className="row">
+          <div style={busy ? { pointerEvents: 'none', opacity: 0.6 } : undefined} aria-disabled={busy}>
           <Segmented<api.PreviewRefresh>
             size="sm"
             value={refresh}
@@ -86,6 +88,7 @@ export function RenderPreviewDialog({ pageId, pageTitle, onClose, onUnsupported 
               { value: 'fast', label: t('editor.render_fast'), title: t('editor.render_fast_hint') },
             ]}
           />
+          </div>
           <span className="spacer" />
           {result && (
             <Badge tone={DATA_TONE[result.data]} dot>
@@ -96,22 +99,20 @@ export function RenderPreviewDialog({ pageId, pageTitle, onClose, onUnsupported 
         <div className="live-frame" style={{ maxWidth: 400, margin: '0 auto', width: '100%', opacity: busy ? 0.6 : 1 }}>
           {result ? <img src={result.url} width={552} height={768} alt={t('editor.render')} /> : <div className="live-ph">{busy ? <span className="spin" /> : error}</div>}
         </div>
-        <div className="row" style={{ justifyContent: 'center' }}>
-          <Button size="sm" icon disabled={busy || screen <= 0} onClick={() => go(screen - 1)} aria-label={t('editor.render_prev')}>
-            <Icon name="chevl" size={16} />
-          </Button>
-          <span className="muted" style={{ minWidth: 90, textAlign: 'center' }}>
-            {t('editor.render_screen', { n: screen + 1, total: screens })}
-          </span>
-          <Button size="sm" icon disabled={busy || screen >= screens - 1} onClick={() => go(screen + 1)} aria-label={t('editor.render_next')}>
-            <Icon name="chevr" size={16} />
-          </Button>
+        <Pager
+          label={t('editor.render_screen', { n: screen + 1, total: screens })}
+          prevLabel={t('editor.render_prev')}
+          nextLabel={t('editor.render_next')}
+          prevDisabled={busy || screen <= 0}
+          nextDisabled={busy || screen >= screens - 1}
+          onPrev={() => go(screen - 1)}
+          onNext={() => go(screen + 1)}
+        >
           <Button size="sm" loading={busy} onClick={() => go(screen)}>
             {!busy && <Icon name="refresh" size={15} />} {t('editor.render_again')}
           </Button>
-        </div>
+        </Pager>
         {error && result && <div className="notice warn">{error}</div>}
-        {error && !result && !busy && <div className="notice danger">{error}</div>}
         <p className="dim">{t('editor.render_note')}</p>
       </div>
     </Modal>

@@ -2,7 +2,7 @@
 // each page IS one device screen. Tabs "第 n 屏" (device order = visible pages
 // in array order), drag to reorder, double-click to rename, plus add /
 // duplicate / delete and "show this screen on the device".
-import { useState, type DragEvent } from 'react';
+import { useRef, useState, type DragEvent } from 'react';
 import { useI18n } from '../../i18n';
 import { MAX_SCREENS } from '../../model/grid';
 import type { Page } from '../../model/types';
@@ -29,6 +29,7 @@ export function ScreenStrip({ pages, currentId, defaultId, errorCount, onSelect,
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const [dropAt, setDropAt] = useState<number | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
+  const cancelRename = useRef(false);
   const full = pages.length >= MAX_SCREENS;
   let visibleNo = 0;
 
@@ -55,7 +56,7 @@ export function ScreenStrip({ pages, currentId, defaultId, errorCount, onSelect,
               tabIndex={0}
               draggable={editing !== p.id}
               className={['screen-tab', on ? 'on' : '', hidden ? 'hidden' : '', dropAt === i && dragFrom !== i ? 'drop' : ''].filter(Boolean).join(' ')}
-              title={`${p.id} · ${t('editor.screen_drag_hint')}`}
+              title={t('editor.screen_drag_hint')}
               onClick={() => onSelect(p.id)}
               onDoubleClick={() => setEditing(p.id)}
               onKeyDown={(e) => {
@@ -82,7 +83,9 @@ export function ScreenStrip({ pages, currentId, defaultId, errorCount, onSelect,
                 setDropAt(null);
               }}
             >
-              <span className="screen-tab-no">{hidden ? t('editor.screen_hidden') : t('editor.screen', { n: no })}</span>
+              <span className="screen-tab-no" title={hidden ? t('editor.screen_hidden') : undefined}>
+                {hidden ? <Icon name="eyeoff" size={13} /> : t('editor.screen', { n: no })}
+              </span>
               {editing === p.id ? (
                 <input
                   className="input screen-tab-input"
@@ -91,18 +94,21 @@ export function ScreenStrip({ pages, currentId, defaultId, errorCount, onSelect,
                   aria-label={t('editor.screen_rename')}
                   onClick={(e) => e.stopPropagation()}
                   onBlur={(e) => {
-                    onRename(p.id, e.currentTarget.value.trim());
+                    if (!cancelRename.current) onRename(p.id, e.currentTarget.value.trim());
+                    cancelRename.current = false;
                     setEditing(null);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') e.currentTarget.blur();
-                    else if (e.key === 'Escape') setEditing(null);
+                    else if (e.key === 'Escape') {
+                      cancelRename.current = true;
+                      e.currentTarget.blur();
+                    }
                   }}
                 />
               ) : (
                 <span className="screen-tab-title truncate">{p.title || p.id}</span>
               )}
-              {hidden && <Icon name="eyeoff" size={13} />}
               {defaultId === p.id && <span title={t('editor.default_page')}>★</span>}
               {errs > 0 && <Badge tone="danger">{errs}</Badge>}
             </div>
@@ -113,9 +119,8 @@ export function ScreenStrip({ pages, currentId, defaultId, errorCount, onSelect,
         </Button>
       </div>
       <div className="screen-actions">
-        <span className="dim hide-sm">{t('editor.screen_count', { n: pages.length, max: MAX_SCREENS })}</span>
         <Button size="sm" icon variant="ghost" title={t('editor.screen_rename')} onClick={() => setEditing(currentId)}>
-          <Icon name="sliders" size={15} />
+          <Icon name="edit" size={15} />
         </Button>
         <Button size="sm" icon variant="ghost" disabled={full} title={full ? t('editor.max_screens', { n: MAX_SCREENS }) : t('editor.screen_duplicate')} onClick={onDuplicate}>
           <Icon name="copy" size={15} />
@@ -125,7 +130,7 @@ export function ScreenStrip({ pages, currentId, defaultId, errorCount, onSelect,
         </Button>
         {onShowOnDevice && (
           <Button size="sm" variant="ghost" loading={showBusy} title={t('editor.show_on_device_hint')} onClick={onShowOnDevice}>
-            {!showBusy && <Icon name="device" size={15} />} <span className="hide-sm">{t('editor.show_on_device')}</span>
+            {!showBusy && <Icon name="cast" size={15} />} <span className="hide-sm">{t('editor.show_on_device')}</span>
           </Button>
         )}
       </div>

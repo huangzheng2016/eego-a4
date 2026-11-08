@@ -9,16 +9,24 @@ import { useI18n } from '../i18n';
 import { useDraft } from '../state/draft';
 import { errorText } from '../state/errors';
 import { Badge, Button, Icon, Switch } from '../ui';
+import { Pager } from '../ui/controls';
 
 const AFTER_APPLY_S = [4, 12];
 
-export function LivePreview({ compact }: { compact?: boolean }) {
+/** Auto-refresh preference kept across route changes. */
+let autoPref = false;
+
+export function LivePreview() {
   const { t } = useI18n();
   const { appliedAt } = useDraft();
   const [url, setUrl] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [auto, setAuto] = useState(false);
+  const [auto, setAutoState] = useState(autoPref);
+  const setAuto = (v: boolean) => {
+    autoPref = v;
+    setAutoState(v);
+  };
   const [at, setAt] = useState<Date | null>(null);
   const [countdown, setCountdown] = useState<{ left: number; total: number } | null>(null);
   const urlRef = useRef<string | null>(null);
@@ -95,9 +103,8 @@ export function LivePreview({ compact }: { compact?: boolean }) {
   return (
     <div className="live">
       <div className="row nowrap">
-        {!compact && <h3 className="grow">{t('preview.title')}</h3>}
-        <span className={compact ? 'grow dim' : 'dim'}>{at ? t('preview.updated', { time: at.toLocaleTimeString() }) : ''}</span>
-        <Button size="sm" loading={busy} onClick={() => void load()} title={t('common.refresh')}>
+        <span className="grow dim">{at ? t('preview.updated', { time: at.toLocaleTimeString() }) : ''}</span>
+        <Button size="sm" loading={busy} onClick={() => void load()}>
           {!busy && <Icon name="refresh" size={15} />} {t('common.refresh')}
         </Button>
       </div>
@@ -119,34 +126,28 @@ export function LivePreview({ compact }: { compact?: boolean }) {
             ) : busy ? (
               <span className="spin" />
             ) : (
-              <Button onClick={() => void load()}>
-                <Icon name="refresh" size={15} /> {t('preview.load')}
-              </Button>
+              <span className="dim">{t('preview.load')}</span>
             )}
           </div>
         )}
         {url && err && (
-          <span className="live-badge">
+          <span className="live-badge" title={err}>
             <Badge tone="warn">{t('preview.stale')}</Badge>
           </span>
         )}
       </div>
       {screen?.available && screen.count > 1 && (
-        <div className="row" style={{ justifyContent: 'center' }}>
-          <Button size="sm" icon disabled={paging} onClick={() => void page(-1)} aria-label={t('editor.render_prev')} title={t('editor.render_prev')}>
-            <Icon name="chevl" size={16} />
-          </Button>
-          <span className="muted" style={{ minWidth: 90, textAlign: 'center' }}>
-            {t('editor.render_screen', { n: screen.index + 1, total: screen.count })}
-          </span>
-          <Button size="sm" icon disabled={paging} onClick={() => void page(1)} aria-label={t('editor.render_next')} title={t('editor.render_next')}>
-            <Icon name="chevr" size={16} />
-          </Button>
-        </div>
+        <Pager
+          label={t('editor.render_screen', { n: screen.index + 1, total: screen.count })}
+          prevLabel={t('preview.device_prev')}
+          nextLabel={t('preview.device_next')}
+          prevDisabled={paging}
+          nextDisabled={paging}
+          onPrev={() => void page(-1)}
+          onNext={() => void page(1)}
+        />
       )}
-      {url && err && <div className="dim">{err}</div>}
       <Switch checked={auto} onChange={setAuto} label={t('preview.auto')} />
-      <div className="dim">{t('preview.hint')}</div>
     </div>
   );
 }

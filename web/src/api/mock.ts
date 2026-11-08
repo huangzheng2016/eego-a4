@@ -13,7 +13,8 @@ const presetFiles = import.meta.glob('../../../firmware/presets/{panels,layouts,
 >;
 
 const PASSWORD = 'admin';
-const TOKEN = 'mock-token-0123456789';
+/** Also used by the mock BLE link, which authorizes the paired link like the firmware bridge. */
+export const TOKEN = 'mock-token-0123456789';
 
 const SETTINGS_SCHEMA = {
   schema_version: 1,
@@ -113,7 +114,7 @@ const capabilities = () => ({
   frontlight: state.settings.frontlight_hardware === 'present',
   battery: true,
   bluetooth: true,
-  ble_provisioning: true,
+  ble_admin: true,
   ble_observer: true,
   display: true,
   sd: true,
@@ -317,7 +318,7 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
     case 'GET settings/schema':
       return json(200, SETTINGS_SCHEMA);
     case 'GET settings':
-      return json(200, { schema_version: 1, revision: 1, settings: state.settings, capabilities: capabilities(), power: { last_wake_reason: 'power_on', recovery_ap_active: false }, ble: { compiled: true, role: 'off', provisioning_state: 'idle' } });
+      return json(200, { schema_version: 1, revision: 1, settings: state.settings, capabilities: capabilities(), power: { last_wake_reason: 'power_on', recovery_ap_active: false }, ble: { compiled: true, role: 'off', admin_enabled: true, link: 'none', bonds: 0 } });
     case 'PUT settings': {
       const fields: Record<string, string> = {};
       for (const [k, v] of Object.entries(b)) {

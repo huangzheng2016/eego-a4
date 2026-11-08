@@ -1112,7 +1112,7 @@ export const DevicePanel = memo(function DevicePanel({
   w,
   h,
   showDemoTag = true,
-  demoTitle = '示例数据',
+  demoTitle,
 }: {
   panel: Panel;
   bundle: Bundle | null;

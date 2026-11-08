@@ -10,11 +10,18 @@ import { canPlace, columnsOf, findFreeSpot, fitsScreen, MAX_COLUMNS, ROWS_PER_SC
 import { applyPlacement, defaultSize, resolvePlacement } from '../../model/layout';
 import { ACTION_KINDS, CHART_KINDS, IMAGE_FITS, PANEL_KINDS, SEVERITIES, VARIANTS, type Action, type Bundle, type GridRect, type Panel, type PanelKind } from '../../model/types';
 import { Button, Checkbox, Icon, NumberInput, Select, Switch, TextArea, TextInput, type Option } from '../../ui';
+import { IdInput } from '../../ui/controls';
 import { useToast } from '../../state/toast';
 import { navigate } from '../../state/router';
 
 /** Fill kind-specific sub-objects the firmware expects for a kind. */
-export function normalizeForKind(p: Panel, kind: PanelKind): Panel {
+export interface DefaultLabels {
+  value: string;
+  refresh: string;
+}
+const EN_LABELS: DefaultLabels = { value: 'Value', refresh: 'Refresh' };
+
+export function normalizeForKind(p: Panel, kind: PanelKind, labels: DefaultLabels = EN_LABELS): Panel {
   const next: Panel = { ...p, kind, style: { ...(p.style ?? {}), variant: VARIANTS[kind].includes(p.style?.variant ?? 'default') ? p.style?.variant ?? 'default' : 'default' } };
   delete next.text;
   delete next.chart;
@@ -22,20 +29,20 @@ export function normalizeForKind(p: Panel, kind: PanelKind): Panel {
   delete next.image;
   if (kind === 'text' || kind === 'card' || kind === 'alert') next.text = p.text ?? { content: '', multiline: false, max_lines: 1 };
   if (kind === 'chart') next.chart = p.chart ?? { kind: 'line', show_points: false, fill: false, y_min: null, y_max: null };
-  if (kind === 'table') next.columns = p.columns?.length ? p.columns : [{ key: 'value', title: 'Value', unit: '', width: 6 }];
+  if (kind === 'table') next.columns = p.columns?.length ? p.columns : [{ key: 'value', title: labels.value, unit: '', width: 6 }];
   if (kind === 'image') next.image = p.image ?? { asset_id: '', alt_text: '', fit: 'contain' };
-  if (kind === 'button' && !next.actions?.length) next.actions = [{ id: 'refresh', kind: 'refresh', label: 'Refresh', target: 'current', value: '', confirm: false }];
+  if (kind === 'button' && !next.actions?.length) next.actions = [{ id: 'refresh', kind: 'refresh', label: labels.refresh, target: 'current', value: '', confirm: false }];
   return next;
 }
 
-export function newPanel(b: Bundle, pageId: string, kind: PanelKind, title: string, at?: GridRect): Panel | null {
+export function newPanel(b: Bundle, pageId: string, kind: PanelKind, title: string, at?: GridRect, labels?: DefaultLabels): Panel | null {
   const page = b.dashboard.pages.find((p) => p.id === pageId);
   if (!page) return null;
   const cols = columnsOf(page);
   const size = defaultSize(kind, cols);
   const spot = at ?? findFreeSpot(page, size.w, size.h) ?? findFreeSpot(page, Math.max(1, Math.round(cols / 4)), 1);
   if (!spot) return null;
-  return normalizeForKind({ id: uniqueId(kind, allPanelIds(b.dashboard)), kind, grid: spot, title, visible: true, refresh_ms: 60000, style: { variant: 'default', precision: 1 } }, kind);
+  return normalizeForKind({ id: uniqueId(kind, allPanelIds(b.dashboard)), kind, grid: spot, title, visible: true, refresh_ms: 60000, style: { variant: 'default', precision: 1 } }, kind, labels);
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -70,6 +77,7 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
   const samePagePanels = page.panels.filter((x) => x.id !== p.id);
   const variant = p.style?.variant ?? 'default';
   const columns = columnsOf(page);
+  const labels: DefaultLabels = { value: t('panel.column_value'), refresh: t('action.refresh') };
 
   const setGrid = (k: 'x' | 'y' | 'w' | 'h', v: number | undefined) => {
     if (v === undefined) return;
@@ -86,25 +94,20 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
 
   const actionTargets = (a: Action): Option[] | null => {
     if (a.kind === 'goto_page') return d.draft.dashboard.pages.map((x) => ({ value: x.id, label: x.title || x.id }));
-    if (a.kind === 'goto_panel') return d.draft.dashboard.pages.flatMap((pg) => pg.panels.map((x) => ({ value: x.id, label: `${pg.id} / ${x.id}` })));
+    if (a.kind === 'goto_panel') return d.draft.dashboard.pages.flatMap((pg, pi) => pg.panels.map((x) => ({ value: x.id, label: `${pg.title || t('editor.screen', { n: pi + 1 })} / ${x.title || x.id}` })));
     if (a.kind === 'set_variable') return d.draft.dashboard.variables.map((v) => ({ value: v.name, label: v.label || v.name }));
-    if (a.kind === 'refresh') return [{ value: 'all', label: 'all' }, { value: 'current', label: 'current' }, ...d.draft.dashboard.sources.map((s) => ({ value: s.id, label: s.id }))];
-    if (a.kind === 'ack_alert') return [{ value: 'current', label: 'current' }, { value: 'focused', label: 'focused' }];
+    if (a.kind === 'refresh') return [{ value: 'all', label: t('panel.target.all') }, { value: 'current', label: t('panel.target.current') }, ...d.draft.dashboard.sources.map((s) => ({ value: s.id, label: s.id }))];
+    if (a.kind === 'ack_alert') return [{ value: 'current', label: t('panel.target.current_alert') }, { value: 'focused', label: t('panel.target.focused') }];
     return null;
   };
 
   return (
     <div className="col">
       <div className="row nowrap">
-        <span className="page-icon" style={{ width: 34, height: 34, borderRadius: 9 }}>
+        <span className="page-icon sm">
           <Icon name={`k-${p.kind}`} size={18} />
         </span>
-        <div className="grow">
-          <h3 className="truncate">{p.title || p.id}</h3>
-          <div className="dim">
-            {label('kind', p.kind)} · {t('editor.size', { w: p.grid.w, h: p.grid.h })}
-          </div>
-        </div>
+        <h3 className="grow truncate">{p.title || p.id}</h3>
         <Button size="sm" icon variant="ghost" title={`${t('panel.duplicate')} (Ctrl+D)`} onClick={() => onDuplicate(p.id)}>
           <Icon name="copy" size={16} />
         </Button>
@@ -121,18 +124,16 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
           const hit = findPanel(b.dashboard, panelId);
           if (!hit) return;
           const i = hit.page.panels.indexOf(hit.panel);
-          hit.page.panels[i] = normalizeForKind(hit.panel, v as PanelKind);
+          hit.page.panels[i] = normalizeForKind(hit.panel, v as PanelKind, labels);
         })} error={err('kind')} />
         <Select label={t('panel.variant')} value={variant} options={VARIANTS[p.kind].map((v) => ({ value: v, label: label('variant', v) }))} onChange={(v) => set((x) => (x.style = { ...x.style, variant: v }), 'variant')} error={err('style.variant') || err('style')} />
         <TextInput wide label={t('panel.title')} value={p.title} onChange={(v) => set((x) => (x.title = v), 'title')} error={err('title')} />
-        <TextInput
+        <IdInput
           label={t('panel.id')}
           value={p.id}
           error={err('id')}
-          pattern="[A-Za-z0-9_-]+"
-          onChange={(v) => {
-            const id = v.replace(/[^A-Za-z0-9_-]/g, '');
-            if (!id || allPanelIds(d.draft.dashboard).includes(id)) return;
+          validate={(id) => (!id ? t('common.id_empty') : allPanelIds(d.draft.dashboard).includes(id) ? t('common.id_taken') : undefined)}
+          onCommit={(id) => {
             d.update((b) => {
               for (const pg of b.dashboard.pages)
                 for (const x of pg.panels) {
@@ -155,10 +156,10 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
 
       <Section title={t('panel.position')}>
         <div className="form-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
-          <NumberInput label="x" min={0} max={columns - 1} value={p.grid.x} onChange={(v) => setGrid('x', v)} />
-          <NumberInput label="y" min={0} max={ROWS_PER_SCREEN - 1} value={p.grid.y} onChange={(v) => setGrid('y', v)} />
-          <NumberInput label="w" min={1} max={columns} value={p.grid.w} onChange={(v) => setGrid('w', v)} />
-          <NumberInput label="h" min={1} max={ROWS_PER_SCREEN} value={p.grid.h} onChange={(v) => setGrid('h', v)} />
+          <NumberInput label={t('panel.pos_x')} min={0} max={columns - 1} value={p.grid.x} onChange={(v) => setGrid('x', v)} />
+          <NumberInput label={t('panel.pos_y')} min={0} max={ROWS_PER_SCREEN - 1} value={p.grid.y} onChange={(v) => setGrid('y', v)} />
+          <NumberInput label={t('panel.pos_w')} min={1} max={columns} value={p.grid.w} onChange={(v) => setGrid('w', v)} />
+          <NumberInput label={t('panel.pos_h')} min={1} max={ROWS_PER_SCREEN} value={p.grid.h} onChange={(v) => setGrid('h', v)} />
         </div>
         {err('grid') && <div className="err-text">{err('grid')}</div>}
       </Section>
@@ -167,7 +168,7 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
         <Section title={t('panel.source')}>
           <div className="form-grid two">
             <Select label={t('panel.source')} value={p.source_id ?? ''} options={sources} onChange={(v) => set((x) => (x.source_id = v || undefined), 'source')} error={err('source_id')} />
-            <TextInput label={t('panel.metric')} hint={metrics.length ? t('panel.metric_hint') : undefined} list={listId} value={p.metric} onChange={(v) => set((x) => (x.metric = v), 'metric')} error={err('metric')} />
+            <TextInput label={t('panel.metric')} list={listId} value={p.metric} onChange={(v) => set((x) => (x.metric = v), 'metric')} error={err('metric')} />
             <datalist id={listId}>
               {metrics.map((m) => (
                 <option key={m.name} value={m.name}>
@@ -176,18 +177,19 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
               ))}
             </datalist>
             {p.source_id && (
-              <div className="wide">
-                <Button size="sm" variant="ghost" onClick={() => navigate('sources', p.source_id)}>
-                  {t('nav.sources')} → {p.source_id}
-                </Button>
-              </div>
+              <>
+                <div className="wide">
+                  <Button size="sm" variant="ghost" onClick={() => navigate('sources', p.source_id)}>
+                    {t('nav.sources')} → {p.source_id}
+                  </Button>
+                </div>
+                <TextInput label={t('panel.value_path')} value={p.value_path} onChange={(v) => set((x) => (x.value_path = v || undefined), 'value_path')} error={err('value_path')} />
+                <TextInput label={t('panel.value_expression')} value={p.value_expression} onChange={(v) => set((x) => (x.value_expression = v || undefined), 'expr')} error={err('value_expression')} />
+                <NumberInput wide label={t('panel.refresh_ms')} min={0} step={1} value={(p.refresh_ms ?? 60000) / 1000} onChange={(v) => v !== undefined && v >= 0 && set((x) => (x.refresh_ms = Math.round(v * 1000)), 'refresh')} error={err('refresh_ms')} />
+                <TextInput label={t('panel.time_from')} placeholder="-1h" value={p.time_window?.from} onChange={(v) => set((x) => (x.time_window = { from: v || '-1h', to: x.time_window?.to ?? 'now' }), 'tw')} error={err('time_window')} />
+                <TextInput label={t('panel.time_to')} placeholder="now" value={p.time_window?.to} onChange={(v) => set((x) => (x.time_window = { from: x.time_window?.from ?? '-1h', to: v || 'now' }), 'tw2')} />
+              </>
             )}
-            <TextInput label={t('panel.value_path')} value={p.value_path} onChange={(v) => set((x) => (x.value_path = v || undefined), 'value_path')} error={err('value_path')} />
-            <TextInput label={t('panel.value_expression')} value={p.value_expression} onChange={(v) => set((x) => (x.value_expression = v || undefined), 'expr')} error={err('value_expression')} />
-            <NumberInput label={t('panel.refresh_ms')} min={0} step={1} value={(p.refresh_ms ?? 60000) / 1000} onChange={(v) => v !== undefined && v >= 0 && set((x) => (x.refresh_ms = Math.round(v * 1000)), 'refresh')} error={err('refresh_ms')} />
-            <div />
-            <TextInput label={t('panel.time_from')} value={p.time_window?.from ?? '-1h'} onChange={(v) => set((x) => (x.time_window = { from: v, to: x.time_window?.to ?? 'now' }), 'tw')} error={err('time_window')} />
-            <TextInput label={t('panel.time_to')} value={p.time_window?.to ?? 'now'} onChange={(v) => set((x) => (x.time_window = { from: x.time_window?.from ?? '-1h', to: v }), 'tw2')} />
           </div>
         </Section>
       )}
@@ -218,7 +220,7 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
                 <div className="grow">
                   <TextInput label={t('panel.label')} value={th.label} onChange={(v) => set((x) => (x.thresholds![i].label = v), `thl${i}`)} />
                 </div>
-                <Button icon onClick={() => set((x) => x.thresholds!.splice(i, 1))} aria-label={t('common.delete')}>
+                <Button icon variant="ghost" onClick={() => set((x) => x.thresholds!.splice(i, 1))} aria-label={t('common.delete')} title={t('common.delete')}>
                   <Icon name="x" />
                 </Button>
               </div>
@@ -235,12 +237,12 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
 
       {p.kind === 'card' && (
         <Section title={t('panel.linked')}>
-          <div className="dim">{t('panel.linked_hint')}</div>
+          {(variant === 'dual' || variant === 'triple') && <div className="dim">{t('panel.linked_hint', { n: variant === 'dual' ? 1 : 2 })}</div>}
           <div className="col" style={{ marginTop: 6 }}>
             {samePagePanels.filter((x) => x.kind === 'card').map((x) => (
               <Checkbox
                 key={x.id}
-                label={`${x.title || x.id} (${x.id})${x.visible === false ? ' · hidden' : ''}`}
+                label={x.visible === false ? `${x.title || x.id} ${t('panel.hidden_suffix')}` : x.title || x.id}
                 checked={(p.linked_panel_ids ?? []).includes(x.id)}
                 onChange={(on) => set((y) => (y.linked_panel_ids = on ? [...(y.linked_panel_ids ?? []), x.id] : (y.linked_panel_ids ?? []).filter((id) => id !== x.id)))}
               />
@@ -252,12 +254,12 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
                   d.update((b) => {
                     const hit = findPanel(b.dashboard, panelId)!;
                     const id = uniqueId(`${p.id}_linked`, allPanelIds(b.dashboard));
-                    hit.page.panels.push({ id, kind: 'card', grid: { x: 0, y: 0, w: 1, h: 1 }, title: 'Linked', visible: false, source_id: p.source_id, metric: '', style: { variant: 'default', precision: p.style?.precision ?? 1 } });
+                    hit.page.panels.push({ id, kind: 'card', grid: { x: 0, y: 0, w: 1, h: 1 }, title: t('panel.linked_title'), visible: false, source_id: p.source_id, metric: '', style: { variant: 'default', precision: p.style?.precision ?? 1 } });
                     hit.panel.linked_panel_ids = [...(hit.panel.linked_panel_ids ?? []), id];
                   })
                 }
               >
-                <Icon name="plus" /> {t('editor.hidden_panels')}
+                <Icon name="plus" /> {t('panel.add_linked')}
               </Button>
             )}
             {err('linked_panel_ids') && <div className="err-text">{err('linked_panel_ids')}</div>}
@@ -278,8 +280,7 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
       {p.chart && (
         <Section title={t('panel.chart')}>
           <div className="form-grid two">
-            <Select label={t('panel.chart_kind')} value={p.chart.kind} options={CHART_KINDS.map((k) => ({ value: k, label: label('chart', k) }))} onChange={(v) => set((x) => (x.chart = { ...x.chart!, kind: v as typeof p.chart.kind }))} />
-            <div />
+            <Select wide label={t('panel.chart_kind')} value={p.chart.kind} options={CHART_KINDS.map((k) => ({ value: k, label: label('chart', k) }))} onChange={(v) => set((x) => (x.chart = { ...x.chart!, kind: v as typeof p.chart.kind }))} />
             <Checkbox label={t('panel.show_points')} checked={!!p.chart.show_points} onChange={(v) => set((x) => (x.chart = { ...x.chart!, show_points: v }))} />
             <Checkbox label={t('panel.fill')} checked={!!p.chart.fill} onChange={(v) => set((x) => (x.chart = { ...x.chart!, fill: v }))} />
             <NumberInput allowEmpty placeholder={t('panel.auto')} label={t('panel.y_min')} value={p.chart.y_min} onChange={(v) => set((x) => (x.chart = { ...x.chart!, y_min: v ?? null }), 'ymin')} error={err('chart.y_min')} />
@@ -300,7 +301,7 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
                   <div className="grow">
                     <NumberInput label={t('panel.column_width')} min={1} value={c.width ?? 4} onChange={(v) => v !== undefined && set((x) => (x.columns![i].width = v), `cw${i}`)} />
                   </div>
-                  <Button icon onClick={() => set((x) => x.columns!.splice(i, 1))} aria-label={t('common.delete')}>
+                  <Button icon variant="ghost" onClick={() => set((x) => x.columns!.splice(i, 1))} aria-label={t('common.delete')} title={t('common.delete')}>
                     <Icon name="x" />
                   </Button>
                 </div>
@@ -343,15 +344,15 @@ export function PanelInspector({ panelId, onDelete, onDuplicate }: { panelId: st
                 {a.kind === 'set_variable' && <TextInput label={t('panel.action_value')} value={a.value} onChange={(v) => set((x) => (x.actions![i].value = v), `av${i}`)} />}
                 <Checkbox label={t('panel.action_confirm')} checked={!!a.confirm} onChange={(v) => set((x) => (x.actions![i].confirm = v))} />
                 <div className="row" style={{ justifyContent: 'flex-end' }}>
-                  <Button size="sm" variant="danger" onClick={() => set((x) => x.actions!.splice(i, 1))}>
-                    {t('common.delete')}
+                  <Button size="sm" icon variant="ghost" onClick={() => set((x) => x.actions!.splice(i, 1))} aria-label={t('common.delete')} title={t('common.delete')}>
+                    <Icon name="trash" size={15} />
                   </Button>
                 </div>
               </div>
             );
           })}
           <div>
-            <Button size="sm" onClick={() => set((x) => (x.actions = [...(x.actions ?? []), { id: uniqueId('action', (x.actions ?? []).map((y) => y.id)), kind: 'refresh', label: 'Refresh', target: 'current', value: '', confirm: false }]))}>
+            <Button size="sm" onClick={() => set((x) => (x.actions = [...(x.actions ?? []), { id: uniqueId('action', (x.actions ?? []).map((y) => y.id)), kind: 'refresh', label: labels.refresh, target: 'current', value: '', confirm: false }]))}>
               <Icon name="plus" /> {t('panel.add_action')}
             </Button>
           </div>
@@ -370,48 +371,20 @@ export function PageInspector() {
   const pageErr = (f: string) => dashErrors.find((x) => x.at.area === 'page' && x.at.pageId === page?.id && x.at.field === f)?.e.message;
   const dashErr = (f: string) => dashErrors.find((x) => x.at.area === 'dashboard' && x.at.field === f)?.e.message;
   const hidden = page?.panels.filter((p) => p.visible === false) ?? [];
-  const pageIndex = page ? dash.pages.indexOf(page) : -1;
-  const movePage = (dir: -1 | 1) =>
-    d.update((b) => {
-      const ps = b.dashboard.pages;
-      const j = pageIndex + dir;
-      if (pageIndex < 0 || j < 0 || j >= ps.length) return;
-      [ps[pageIndex], ps[j]] = [ps[j], ps[pageIndex]];
-    });
-  const deletePage = () => {
-    if (!page || dash.pages.length <= 1) return;
-    if (!confirm(t('editor.delete_page_confirm', { name: page.title || page.id }))) return;
-    d.update((b) => {
-      b.dashboard.pages = b.dashboard.pages.filter((p) => p.id !== page.id);
-      if (b.dashboard.default_page_id === page.id) b.dashboard.default_page_id = b.dashboard.pages[0].id;
-    });
-  };
   return (
     <div className="col">
-      <div className="dim">{t('editor.no_selection')}</div>
+      <div className="dim" title={t('editor.shortcuts')}>{t('editor.no_selection')}</div>
       {page && (
         <div className="section">
-          <div className="row" style={{ marginBottom: 8 }}>
-            <h4 className="grow">{t('editor.page_settings')}</h4>
-            <Button size="sm" icon title={t('editor.move_up')} disabled={pageIndex === 0} onClick={() => movePage(-1)}>
-              <Icon name="up" />
-            </Button>
-            <Button size="sm" icon title={t('editor.move_down')} disabled={pageIndex === dash.pages.length - 1} onClick={() => movePage(1)}>
-              <Icon name="down" />
-            </Button>
-            <Button size="sm" icon variant="danger" title={t('editor.delete_page')} disabled={dash.pages.length <= 1} onClick={deletePage}>
-              <Icon name="trash" />
-            </Button>
-          </div>
+          <h4>{t('editor.page_settings')}</h4>
+          {pageErr('title') && <div className="err-text">{pageErr('title')}</div>}
           <div className="form-grid two">
-            <TextInput wide label={t('editor.page_title')} value={page.title} onChange={(v) => d.update((b) => (b.dashboard.pages.find((p) => p.id === page.id)!.title = v), `page:${page.id}:title`)} error={pageErr('title')} />
-            <TextInput
+            <IdInput
               label={t('editor.page_id')}
               value={page.id}
               error={pageErr('id')}
-              onChange={(v) => {
-                const id = v.replace(/[^A-Za-z0-9_-]/g, '');
-                if (!id || dash.pages.some((p) => p.id === id)) return;
+              validate={(id) => (!id ? t('common.id_empty') : dash.pages.some((p) => p.id === id) ? t('common.id_taken') : undefined)}
+              onCommit={(id) => {
                 d.update((b) => {
                   const pg = b.dashboard.pages.find((p) => p.id === page.id)!;
                   pg.id = id;
@@ -442,7 +415,7 @@ export function PageInspector() {
                 }, `page:${page.id}:cols`);
               }}
             />
-            <Checkbox label={t('editor.visible')} checked={page.visible !== false} onChange={(v) => d.update((b) => (b.dashboard.pages.find((p) => p.id === page.id)!.visible = v))} />
+            <Switch label={t('editor.visible')} checked={page.visible !== false} onChange={(v) => d.update((b) => (b.dashboard.pages.find((p) => p.id === page.id)!.visible = v))} />
             <Checkbox label={t('editor.default_page')} checked={dash.default_page_id === page.id} onChange={(v) => v && d.update((b) => (b.dashboard.default_page_id = page.id))} />
           </div>
           {hidden.length > 0 && (
@@ -451,7 +424,7 @@ export function PageInspector() {
               <div className="col">
                 {hidden.map((p) => (
                   <Button key={p.id} size="sm" variant="ghost" onClick={() => d.setPanelId(p.id)}>
-                    {p.title || p.id} <span className="dim">({p.id})</span>
+                    {p.title || p.id}
                   </Button>
                 ))}
               </div>
@@ -472,15 +445,6 @@ export function PageInspector() {
             error={dashErr('refresh_ms')}
           />
           <TextInput wide label={t('editor.dashboard_title')} value={dash.title} onChange={(v) => d.update((b) => (b.dashboard.title = v), 'dash:title')} error={dashErr('title')} />
-        </div>
-      </div>
-      <div className="section">
-        <h4>{t('editor.variables')}</h4>
-        <div className="row">
-          <span className="dim grow">{t('editor.variables_count', { n: dash.variables.length })}</span>
-          <Button size="sm" variant="ghost" onClick={() => navigate('sources')}>
-            {t('editor.variables_moved')} <Icon name="chevr" size={14} />
-          </Button>
         </div>
       </div>
     </div>

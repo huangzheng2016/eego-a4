@@ -59,7 +59,7 @@ export function WelcomePage() {
 
   const skip = () => {
     try {
-      sessionStorage.setItem(WELCOME_SKIP_KEY, '1');
+      localStorage.setItem(WELCOME_SKIP_KEY, '1');
     } catch {
       /* ignore */
     }
@@ -178,22 +178,34 @@ export function WelcomePage() {
     setObserved((o) => ({ ...o, [sourceId]: [...(o[sourceId] ?? []).filter((m) => m.metric !== name), { metric: name, value }] }));
   };
 
-  const finish = async (applyNow: boolean) => {
-    if (!wb) return;
+  const finish = async (applyNow: boolean, bundle = wb) => {
+    if (!bundle) return;
     try {
-      sessionStorage.setItem(WELCOME_SKIP_KEY, '1');
+      localStorage.setItem(WELCOME_SKIP_KEY, '1');
     } catch {
       /* ignore */
     }
     for (const [id, list] of Object.entries(observed)) d.recordObserved(id, list);
     if (!applyNow) {
-      d.replace(wb);
+      d.replace(bundle);
       navigate('editor');
       return;
     }
-    const ok = await d.apply(wb);
+    const ok = await d.apply(bundle);
     navigate('editor');
     if (!ok) toast('warn', t('wz.apply_failed'));
+  };
+
+  const isBlank = picked?.id === 'blank' && picked.kind === 'layout';
+  const next = () => {
+    if (step === 0 && isBlank) return void finish(false);
+    if (step === 1) {
+      // Fetch every not-yet-probed HTTP source so step 3 has responses to click.
+      void (async () => {
+        for (const p of plans) if (p.kind === 'http' && !probes[p.id]) await probe(p);
+      })();
+    }
+    setStep((s) => (s + 1) as Step);
   };
 
   const steps = [t('wz.step.template'), t('wz.step.source'), t('wz.step.map'), t('wz.step.apply')];
@@ -204,11 +216,7 @@ export function WelcomePage() {
   return (
     <div className="wizard">
       <div className="wz-hero">
-        <div className="empty-icon" style={{ margin: '0 auto 12px' }}>
-          <Icon name="wand" size={26} />
-        </div>
         <h1>{t('wz.title')}</h1>
-        <p>{t('wz.subtitle')}</p>
       </div>
       <ol className="steps" style={{ padding: 0, listStyle: 'none' }}>
         {steps.map((s, i) => (
@@ -227,13 +235,16 @@ export function WelcomePage() {
               const page = e.bundle.dashboard.pages[0];
               const on = picked?.id === e.id && picked.kind === e.kind;
               return (
-                <button key={`${e.kind}:${e.id}`} type="button" className={`card tpl-card${on ? ' picked' : ''}`} style={{ textAlign: 'left', padding: 0, cursor: 'pointer' }} onClick={() => choose(e)}>
-                  <div className="tpl-thumb">{page && page.panels.length ? <ScreenThumb page={page} bundle={e.bundle} width={150} /> : <div className="thumb" style={{ width: 150, height: 209, display: 'grid', placeItems: 'center', color: '#999' }}><Icon name="plus" size={28} /></div>}</div>
+                <button key={`${e.kind}:${e.id}`} type="button" className={`card tpl-card${on ? ' picked' : ''}`} style={{ textAlign: 'left', padding: 0, cursor: 'pointer' }} onClick={() => choose(e)} onDoubleClick={() => {
+                  if (e.id === 'blank' && e.kind === 'layout') void finish(false, replaceWithTemplate(d.draft, e.bundle));
+                  else {
+                    choose(e);
+                    setStep(1);
+                  }
+                }}>
+                  <div className="tpl-thumb">{page && page.panels.length ? <ScreenThumb page={page} bundle={e.bundle} width={150} /> : <div className="thumb" style={{ width: 150, height: 209, display: 'grid', placeItems: 'center', color: 'var(--text-3)' }}><Icon name="plus" size={28} /></div>}</div>
                   <div className="tpl-meta">
-                    <div className="row nowrap">
-                      <strong className="grow truncate">{e.title}</strong>
-                      {on && <Badge tone="accent">✓</Badge>}
-                    </div>
+                    <strong className="truncate">{e.title}</strong>
                     {e.description && <div className="dim">{e.description}</div>}
                     <div className="dim">{t('wz.tpl_meta', { p: e.bundle.dashboard.pages.length, n: e.bundle.dashboard.pages.reduce((n, p) => n + p.panels.length, 0), s: e.bundle.dashboard.sources.length })}</div>
                   </div>
@@ -269,7 +280,7 @@ export function WelcomePage() {
                     <>
                       <div className="wz-url-row">
                         <TextInput label={t('src.url')} value={p.url} onChange={(v) => setPlan(p.id, (x) => (x.url = v))} inputMode="url" spellCheck={false} />
-                        <Button variant="primary" loading={busy === `probe:${p.id}`} onClick={() => void probe(p)}>
+                        <Button loading={busy === `probe:${p.id}`} onClick={() => void probe(p)}>
                           <Icon name="fetch" size={16} /> {t('wz.probe')}
                         </Button>
                       </div>
@@ -399,35 +410,14 @@ export function WelcomePage() {
       {step === 3 && wb && (
         <div className="src-split">
           <div className="card card-body col" style={{ gap: 14 }}>
-            <h3>{t('wz.summary')}</h3>
-            <div className="tiles">
-              <div className="card tile">
-                <span className="tile-label"><Icon name="layout" size={14} /> {t('editor.pages')}</span>
-                <span className="tile-value">{wb.dashboard.pages.length}</span>
-              </div>
-              <div className="card tile">
-                <span className="tile-label"><Icon name="k-card" size={14} /> {t('wz.panels')}</span>
-                <span className="tile-value">{wb.dashboard.pages.reduce((n, p) => n + p.panels.length, 0)}</span>
-              </div>
-              <div className="card tile">
-                <span className="tile-label"><Icon name="db" size={14} /> {t('nav.sources')}</span>
-                <span className="tile-value">{wb.dashboard.sources.length}</span>
-              </div>
-              <div className="card tile">
-                <span className="tile-label"><Icon name="rules" size={14} /> {t('nav.rules')}</span>
-                <span className="tile-value">{wb.dashboard.alert_rules.length}</span>
-              </div>
-            </div>
+            <strong>{picked?.title}</strong>
+            <p className="dim">{t('wz.tpl_meta', { p: wb.dashboard.pages.length, n: wb.dashboard.pages.reduce((n, p) => n + p.panels.length, 0), s: wb.dashboard.sources.length })}</p>
             {mapped < panels.length && (
               <div className="notice warn">
                 <Icon name="warn" size={16} />
                 <span>{t('wz.unmapped', { n: panels.length - mapped })}</span>
               </div>
             )}
-            <div className="notice">
-              <Icon name="device" size={16} />
-              <span>{t('wz.apply_note')}</span>
-            </div>
           </div>
           <div className="card card-body" style={{ display: 'flex', justifyContent: 'center', background: 'var(--desk)' }}>
             {firstPage && <ScreenThumb page={firstPage} bundle={wb} observed={observed} width={280} />}
@@ -449,7 +439,7 @@ export function WelcomePage() {
         </div>
         <div className="row">
           {step < 3 ? (
-            <Button variant="primary" disabled={!wb} onClick={() => setStep((s) => (s + 1) as Step)}>
+            <Button variant="primary" disabled={!wb} onClick={next}>
               {t('wz.next')} <Icon name="chevr" size={16} />
             </Button>
           ) : (

@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import { useI18n, type DictKey } from '../i18n';
 import { useToast } from '../state/toast';
 import { errorText } from '../state/errors';
 import { Badge, Button, Card, Checkbox, Empty, Icon, Modal, PageHeader, Spinner, TextInput } from '../ui';
-import { disconnectReasonText, moveItem, rowsFromNetworks, signalBars, signalQuality, toEdits, validateRow, type WifiRow } from '../model/wifi';
+import { disconnectCause, moveItem, rowsFromNetworks, signalBars, signalQuality, toEdits, validateRow, type WifiRow } from '../model/wifi';
 
 interface EditState {
   /** Row index being edited, -1 for a new network. */
@@ -26,21 +26,36 @@ export function WifiPage() {
   const [edit, setEdit] = useState<EditState | null>(null);
   const [remove, setRemove] = useState<number | null>(null);
   const [drag, setDrag] = useState<number | null>(null);
+  const [loadErr, setLoadErr] = useState('');
+  const [loading, setLoading] = useState(false);
+  const reorderTimer = useRef<ReturnType<typeof setTimeout>>();
 
   const apply = useCallback((r: api.WifiList) => {
     setData(r);
     setRows(rowsFromNetworks(r.networks));
   }, []);
   const load = useCallback(() => {
-    api.getWifi().then(apply, (e) => toast('error', errorText(e, t)));
-  }, [apply, toast, t]);
+    setLoading(true);
+    api
+      .getWifi()
+      .then(
+        (r) => {
+          setLoadErr('');
+          apply(r);
+        },
+        (e) => setLoadErr(errorText(e, t)),
+      )
+      .finally(() => setLoading(false));
+  }, [apply, t]);
   useEffect(load, [load]);
+  useEffect(() => () => clearTimeout(reorderTimer.current), []);
 
-  const save = async (next: WifiRow[], okKey: DictKey, vars?: Record<string, string>) => {
+  const save = async (next: WifiRow[], okKey?: DictKey, vars?: Record<string, string>) => {
+    clearTimeout(reorderTimer.current);
     setBusy(true);
     try {
       apply(await api.putWifi(toEdits(next)));
-      toast('ok', t(okKey, vars));
+      if (okKey) toast('ok', t(okKey, vars));
       return true;
     } catch (e) {
       toast('error', errorText(e, t));
@@ -59,7 +74,9 @@ export function WifiPage() {
     if (from === to || to < 0 || to >= rows.length) return;
     const next = moveItem(rows, from, to);
     setRows(next);
-    void save(next, 'wifi.reordered');
+    // Batch quick successive moves into one write; the list itself is the feedback.
+    clearTimeout(reorderTimer.current);
+    reorderTimer.current = setTimeout(() => void save(next), 800);
   };
 
   const openAdd = () => setEdit({ index: -1, ssid: '', password: '', open: false, errors: {} });
@@ -102,13 +119,22 @@ export function WifiPage() {
 
   return (
     <div className="page stack">
-      <PageHeader icon="wifi" title={t('wifi.title')} subtitle={t('wifi.subtitle')} />
-      <div className="notice">{t('wifi.note')}</div>
+      <PageHeader icon="wifi" title={t('wifi.title')} />
+      {loadErr && (
+        <div className="notice danger">
+          <Icon name="warn" size={16} />
+          <span className="grow">{loadErr}</span>
+          <Button size="sm" loading={loading} onClick={load}>
+            {t('common.retry')}
+          </Button>
+        </div>
+      )}
 
-      <Card title={t('wifi.status')} actions={<Button size="sm" onClick={load}>{t('common.refresh')}</Button>}>
+      <Card title={t('wifi.status')} actions={<Button size="sm" loading={loading} onClick={load}>{t('common.refresh')}</Button>}>
         {!current ? (
-          <Spinner />
+          loadErr ? <span className="dim">—</span> : <Spinner />
         ) : (
+          <>
           <table className="table">
             <tbody>
               <tr>
@@ -141,25 +167,6 @@ export function WifiPage() {
                       <td className="warn-text">{t('wifi.signal_hint')}</td>
                     </tr>
                   )}
-                  {current.rssi_min_10m !== undefined && current.rssi_min_10m !== 0 && (
-                    <tr>
-                      <th>{t('wifi.link')}</th>
-                      <td className="dim">
-                        {t('wifi.link_value', {
-                          min: String(current.rssi_min_10m),
-                          avg: String(current.rssi_avg_10m ?? 0),
-                          bt: String(current.beacon_timeouts ?? 0),
-                          roams: String(current.roams ?? 0),
-                        })}
-                      </td>
-                    </tr>
-                  )}
-                  {current.last_dhcp_ms !== undefined && current.last_dhcp_ms >= 0 && (
-                    <tr>
-                      <th>{t('wifi.dhcp')}</th>
-                      <td className="mono">{(current.last_dhcp_ms / 1000).toFixed(1)} s</td>
-                    </tr>
-                  )}
                   <tr>
                     <th>{t('wifi.ip')}</th>
                     <td className="mono">{current.ip || '—'}</td>
@@ -174,18 +181,57 @@ export function WifiPage() {
                   </td>
                 </tr>
               )}
-              <tr>
-                <th>{t('wifi.last_reason')}</th>
-                <td className="mono">{disconnectReasonText(current.last_disconnect_reason ?? 0)}</td>
-              </tr>
-              <tr>
-                <th>{t('wifi.reconnects')}</th>
-                <td className="mono">
-                  {current.reconnect_attempts ?? 0} / {current.disconnects ?? 0}
-                </td>
-              </tr>
             </tbody>
           </table>
+          <details className="form-details">
+            <summary>{t('wifi.diag')}</summary>
+            <table className="table">
+              <tbody>
+                {current.rssi_min_10m !== undefined && current.rssi_min_10m !== 0 && (
+                  <tr>
+                    <th>{t('wifi.link')}</th>
+                    <td className="dim">
+                      {t('wifi.link_value', {
+                        min: String(current.rssi_min_10m),
+                        avg: String(current.rssi_avg_10m ?? 0),
+                        bt: String(current.beacon_timeouts ?? 0),
+                        roams: String(current.roams ?? 0),
+                      })}
+                    </td>
+                  </tr>
+                )}
+                {current.last_dhcp_ms !== undefined && current.last_dhcp_ms >= 0 && (
+                  <tr>
+                    <th>{t('wifi.dhcp')}</th>
+                    <td className="mono">{(current.last_dhcp_ms / 1000).toFixed(1)} s</td>
+                  </tr>
+                )}
+                <tr>
+                  <th>{t('wifi.last_reason')}</th>
+                  <td>
+                    {(() => {
+                      const code = current.last_disconnect_reason ?? 0;
+                      const cause = disconnectCause(code);
+                      return cause ? (
+                        <>
+                          {t(`wifi.reason.${cause}` as DictKey)} <span className="mono dim">{code}</span>
+                        </>
+                      ) : (
+                        '—'
+                      );
+                    })()}
+                  </td>
+                </tr>
+                <tr>
+                  <th>{t('wifi.reconnects')}</th>
+                  <td className="mono">
+                    {current.reconnect_attempts ?? 0} / {current.disconnects ?? 0}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </details>
+          </>
         )}
       </Card>
 
@@ -198,17 +244,16 @@ export function WifiPage() {
         }
       >
         {!data ? (
-          <Spinner />
+          loadErr ? <span className="dim">—</span> : <Spinner />
         ) : !rows.length ? (
           <Empty>{t('wifi.empty')}</Empty>
         ) : (
           <>
-            <p className="dim card-lead">{t('wifi.list_hint')}</p>
             <table className="table stack-sm">
               <thead>
                 <tr>
-                  <th className="col-narrow">{t('wifi.priority')}</th>
-                  <th>SSID</th>
+                  <th className="col-narrow">#</th>
+                  <th>{t('wifi.ssid')}</th>
                   <th>{t('wifi.security')}</th>
                   <th />
                 </tr>
@@ -218,7 +263,6 @@ export function WifiPage() {
                   <tr
                     key={r.ssid}
                     draggable={!busy}
-                    title={t('wifi.drag')}
                     onDragStart={(e) => {
                       setDrag(i);
                       e.dataTransfer.effectAllowed = 'move';
@@ -232,7 +276,7 @@ export function WifiPage() {
                     onDragEnd={() => setDrag(null)}
                     className={[drag === i ? 'faded' : '', busy ? '' : 'draggable'].filter(Boolean).join(' ') || undefined}
                   >
-                    <td className="mono">
+                    <td className="mono" title={t('wifi.drag')}>
                       <Icon name="move" size={14} /> {i + 1}
                     </td>
                     <td>
