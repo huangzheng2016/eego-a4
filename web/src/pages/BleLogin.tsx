@@ -34,7 +34,7 @@ export function BleEntry({ primary }: { primary: boolean }) {
       await connectBle();
     } catch (e) {
       // NotFoundError: the user closed the device chooser.
-      if ((e as Error).name !== 'NotFoundError') setErr(t('bt.failed'));
+      if ((e as Error).name !== 'NotFoundError') setErr(`${t('bt.failed')}（${(e as Error).message || (e as Error).name}）`);
     } finally {
       setBusy(false);
     }
@@ -93,7 +93,8 @@ export function BleSetup() {
     try {
       await api.bleSetup(pw, ssid.trim() ? [{ ssid: ssid.trim(), password: wpw }] : []);
       setDone(true);
-    } catch {
+    } catch (e) {
+      console.warn('[eego ble] setup failed:', e);
       setErr(t('bt.setup_failed'));
     } finally {
       setBusy(false);

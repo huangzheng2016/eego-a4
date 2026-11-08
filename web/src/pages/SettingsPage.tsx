@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import * as api from '../api';
 import { useEnumLabel, useI18n, type DictKey } from '../i18n';
 import { useToast } from '../state/toast';
+import { useReconnect } from '../state/session';
 import { errorText, fieldMap } from '../state/errors';
 import { Button, Card, Checkbox, NumberInput, Select, TextArea, TextInput, PageHeader, SkeletonCard, useConfirm } from '../ui';
 
@@ -62,6 +63,9 @@ export function SettingsPage() {
       toast('error', errorText(e, t));
     }
   }, [adopt, toast, t]);
+  useReconnect(() => {
+    if (!schema || !data) void load();
+  });
   useEffect(() => {
     void load();
   }, [load]);

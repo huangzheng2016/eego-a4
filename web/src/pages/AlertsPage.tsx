@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useReconnect } from '../state/session';
 import * as api from '../api';
 import { useI18n, type DictKey } from '../i18n';
 import { useToast } from '../state/toast';
@@ -28,6 +29,9 @@ export function AlertsPage() {
       )
       .finally(() => setLoading(false));
   }, [t]);
+  useReconnect(() => {
+    if (err) void load();
+  });
   useEffect(load, [load]);  // once per visit; the Refresh button re-fetches
 
   const act = async (id: string, fn: () => Promise<unknown>) => {

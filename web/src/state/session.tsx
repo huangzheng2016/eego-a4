@@ -36,6 +36,8 @@ interface SessionCtx {
   login: (password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshStatus: () => Promise<void>;
+  /** Increments each time the device becomes reachable again after being offline. */
+  reconnects: number;
   ble: BleView | null;
   /** Pick a device and connect over Web Bluetooth (call from a click). */
   connectBle: () => Promise<void>;
@@ -50,6 +52,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [connection, setConnection] = useState<Connection>('unknown');
   const [status, setStatus] = useState<api.DeviceStatus | null>(null);
   const [statusAt, setStatusAt] = useState(0);
+  const [reconnects, setReconnects] = useState(0);
   const [ble, setBle] = useState<BleView | null>(null);
   const link = useRef<BleLink | null>(null);
   const timeSynced = useRef(false);
@@ -62,6 +65,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setBle(null);
     setAuthed(!!api.getToken());
     setStatus(null);
+  }, []);
+
+  // Release the link when the tab goes away: the device takes one connection at a time
+  // and does not advertise while it is held, so a stale link blocks the next connect.
+  useEffect(() => {
+    const drop = () => link.current?.close();
+    window.addEventListener('pagehide', drop);
+    return () => window.removeEventListener('pagehide', drop);
   }, []);
 
   const connectBle = useCallback(async () => {
@@ -85,6 +96,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       timeSynced.current = false;
       sync();
     } catch (e) {
+      console.warn('[eego ble] connect failed:', e);
       l.close();
       if (link.current === l) link.current = null;
       setTransport(null);
@@ -107,12 +119,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }),
     [disconnectBle],
   );
-  useEffect(() => api.onConnectivity((ok) => setConnection(ok ? 'online' : 'offline')), []);
+  useEffect(
+    () =>
+      api.onConnectivity((ok) =>
+        setConnection((prev) => {
+          const next = ok ? 'online' : 'offline';
+          if (prev === 'offline' && next === 'online') setReconnects((n) => n + 1);
+          return next;
+        }),
+      ),
+    [],
+  );
 
   const refreshStatus = useCallback(async () => {
     try {
       const next = await api.getStatus();
       setStatus(next);
+      api.setFirmwareId(next.device?.fw_sha256 ?? '');
       setStatusAt(performance.now());
       // A device without SNTP (no internet, or BLE only) takes the time from this computer once.
       if (!timeSynced.current && needsTimeSync(next.time, Date.now())) {
@@ -130,6 +153,28 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (authed) void refreshStatus();
   }, [authed, refreshStatus]);
+
+  // While offline, probe the device with backoff (3 s → 30 s) so the UI recovers by
+  // itself once the link is back; pages refetch through useReconnect().
+  useEffect(() => {
+    if (!authed || connection !== 'offline') return;
+    let delay = 3000;
+    let timer = 0;
+    let stopped = false;
+    const probe = () => {
+      timer = window.setTimeout(async () => {
+        if (stopped) return;
+        if (document.visibilityState === 'visible') await refreshStatus();
+        delay = Math.min(delay * 2, 30000);
+        if (!stopped) probe();
+      }, delay);
+    };
+    probe();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [authed, connection, refreshStatus]);
 
   const login = useCallback(async (password: string) => {
     await api.login(password);
@@ -157,8 +202,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ authed, expired, connection, status, statusAt, setKeepAwake, login, logout, refreshStatus, ble, connectBle, disconnectBle }),
-    [authed, expired, connection, status, statusAt, setKeepAwake, login, logout, refreshStatus, ble, connectBle, disconnectBle],
+    () => ({ authed, expired, connection, status, statusAt, setKeepAwake, login, logout, refreshStatus, reconnects, ble, connectBle, disconnectBle }),
+    [authed, expired, connection, status, statusAt, setKeepAwake, login, logout, refreshStatus, reconnects, ble, connectBle, disconnectBle],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
@@ -167,4 +212,14 @@ export function useSession(): SessionCtx {
   const c = useContext(Ctx);
   if (!c) throw new Error('SessionProvider missing');
   return c;
+}
+
+/** Run `fn` whenever the device becomes reachable again (e.g. to reload a page that failed). */
+export function useReconnect(fn: () => void): void {
+  const { reconnects } = useSession();
+  const ref = useRef(fn);
+  ref.current = fn;
+  useEffect(() => {
+    if (reconnects > 0) ref.current();
+  }, [reconnects]);
 }

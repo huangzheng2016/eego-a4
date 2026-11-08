@@ -49,13 +49,19 @@ function load(v){
  var s=document.createElement('script');s.type='module';s.src=BASE+'/assets/app.js'+q;s.onerror=fail;
  document.body.appendChild(s);
 }
-// Fallback cache-bust changes hourly when version.json is unreachable.
+// Start at once with the version seen last time (no wait on Pages); version.json is
+// refreshed in the background and takes effect on the next load.
+var KEY='eego_app_version',cached=null;
+try{cached=localStorage.getItem(KEY);}catch(e){}
 var d=new Date(),fallback='t'+d.getUTCFullYear()+(d.getUTCMonth()+1)+'-'+d.getUTCDate()+'-'+d.getUTCHours();
-var timer=setTimeout(function(){load(fallback);},3000);
-function version(j){var v=j&&(j.version||j.build||j.hash);return v?String(v):fallback;}
+if(cached)load(cached);
+var timer=cached?0:setTimeout(function(){load(fallback);},3000);
+function version(j){var v=j&&(j.version||j.build||j.hash);return v?String(v):null;}
 if(window.fetch){
  fetch(BASE+'/version.json',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;})
- .then(function(j){clearTimeout(timer);load(version(j));})
+ .then(function(j){var v=version(j);clearTimeout(timer);
+  if(v){try{localStorage.setItem(KEY,v);}catch(e){}}
+  load(v||fallback);})
  .catch(function(){clearTimeout(timer);load(fallback);});
 }else{clearTimeout(timer);load(fallback);}
 setTimeout(fail,8000);

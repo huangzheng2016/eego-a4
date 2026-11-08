@@ -111,7 +111,7 @@ add_executable(firmware_host_tests
 target_include_directories(firmware_host_tests PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${FW_ROOT}/main  # refresh_policy.h
-  ${C}/admin/src  # dashboard_templates.inc (generated preset library)
+  ${C}/admin/src  # probe_mask.h
 )
 target_compile_definitions(firmware_host_tests PRIVATE EEGO_FIRMWARE_ROOT="${FW_ROOT}")
 target_compile_options(firmware_host_tests PRIVATE ${HT_WARN} ${HT_SAN})

@@ -230,7 +230,7 @@ function validate(b: Bundle): { field: string; message: string }[] {
   return errors;
 }
 
-function templates() {
+export function templateLibrary() {
   return {
     schema: 'eego.dashboard-template-library/1',
     schema_version: 1,
@@ -391,8 +391,6 @@ async function handle(method: string, path: string, headers: Headers, body: unkn
     }
     case 'GET dashboard/sample':
       return json(200, parseBundle(presetsByDir('examples')[0][1]));
-    case 'GET dashboard/templates':
-      return json(200, templates());
     case 'POST dashboard/sources/probe': {
       const plan = b.plan as SourcePlan;
       const doc = mockBody(plan?.url ?? '');

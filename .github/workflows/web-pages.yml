@@ -9,6 +9,9 @@ on:
     branches: [main]
     paths:
       - 'web/**'
+      - 'firmware/presets/**'
+      - 'firmware/tools/preset_tool.py'
+      - 'firmware/tools/dashboard_validation.py'
       - '.github/workflows/web-pages.yml'
   workflow_dispatch:
 

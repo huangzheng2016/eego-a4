@@ -78,6 +78,7 @@ export function DraftToolbar({ compact }: { compact?: boolean }) {
       )}
       {!compact && <span className="dim hide-sm">{t('draft.revision', { rev: d.draft.revision })}</span>}
       {d.validity === 'invalid' && <Badge tone="danger">{t('draft.invalid', { n: d.errors.length })}</Badge>}
+      {d.queued && <Badge tone="warn">{t('draft.queued')}</Badge>}
       <span className="spacer" />
       <input ref={fileRef} type="file" accept=".json,application/json" hidden onChange={onImport} />
       <Button size="sm" icon variant="ghost" className="hide-sm" title={t('draft.import')} onClick={() => fileRef.current?.click()}>

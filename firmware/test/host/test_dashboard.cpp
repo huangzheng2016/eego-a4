@@ -8,7 +8,6 @@
 #include "test_util.h"
 
 namespace {
-#include "dashboard_templates.inc"
 }  // namespace
 
 using namespace eego::dashboard;
@@ -114,28 +113,21 @@ TEST(dashboard, serialize_round_trip_is_stable) {
   }
 }
 
-TEST(dashboard, embedded_template_library_matches_presets_index) {
-  JsonValue library;
+// Every catalogued preset (the web app's templates.json) must parse on the device.
+TEST(dashboard, preset_catalog_parses_on_device) {
   std::string error;
-  REQUIRE(hosttest::parseJson(kDashboardTemplatesJson, library, &error));
-  const JsonValue* rows = library.find("grid_rows_per_screen");
-  REQUIRE(rows != nullptr);
-  CHECK_EQ(rows->intValue(), static_cast<int64_t>(kGridRowsPerScreen));
-
   JsonValue index;
   REQUIRE(hosttest::parseJson(hosttest::slurp(hosttest::firmwareRoot() / "presets/index.json"),
                               index, &error));
-  std::set<std::string> want, got;
-  for (const JsonValue& entry : index.find("presets")->arrayItems())
-    want.insert(entry.find("id")->stringValue());
-  for (const JsonValue& preset : library.find("presets")->arrayItems()) {
-    const std::string id = preset.find("id")->stringValue();
-    got.insert(id);
-    const NamedBundle bundle = hosttest::bundleFromPreset("embedded:" + id, preset);
+  for (const JsonValue& entry : index.find("presets")->arrayItems()) {
+    JsonValue preset;
+    const std::string file = entry.find("file")->stringValue();
+    REQUIRE(hosttest::parseJson(hosttest::slurp(hosttest::firmwareRoot() / "presets" / file),
+                                preset, &error));
+    const NamedBundle bundle = hosttest::bundleFromPreset("preset:" + file, preset);
     const ParseResult result = dashboardFromJson(bundle.dashboard);
     CHECK_MSG(result.ok(), bundle.name << describe(result.errors));
   }
-  CHECK(want == got);
 }
 
 TEST(dashboard, base_fixture_is_valid) {

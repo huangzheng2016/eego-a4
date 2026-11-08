@@ -11,6 +11,7 @@ import type { Bundle } from '../model/types';
 import { useI18n } from '../i18n';
 import { useToast } from './toast';
 import { errorText } from './errors';
+import { useReconnect } from './session';
 import { commit, initHistory, redo as redoH, reset, undo as undoH, type History } from './history';
 
 const LOCAL_KEY = 'eego_dashboard_draft';
@@ -32,6 +33,8 @@ export interface DraftCtx {
   errors: FieldError[];
   validity: 'unknown' | 'valid' | 'invalid';
   busy: 'validate' | 'apply' | null;
+  /** An apply failed because the device was unreachable; it is retried on reconnect. */
+  queued: boolean;
   conflict: { remoteRevision: number } | null;
   restorable: Saved | null;
   canUndo: boolean;
@@ -96,6 +99,7 @@ export function DraftProvider({ children }: { children: ReactNode }) {
   const [validity, setValidity] = useState<DraftCtx['validity']>('unknown');
   const [busy, setBusy] = useState<DraftCtx['busy']>(null);
   const [conflict, setConflict] = useState<DraftCtx['conflict']>(null);
+  const [queued, setQueued] = useState(false);
   const [restorable, setRestorable] = useState<Saved | null>(null);
   const [observed, setObserved] = useState<ObservedMetrics>({});
   const [pageId, setPageIdState] = useState('');
@@ -215,9 +219,13 @@ export function DraftProvider({ children }: { children: ReactNode }) {
     setBusy('apply');
     try {
       await doApply(revision, override);
+      setQueued(false);
       return true;
     } catch (e) {
-      if (e instanceof ApiError && e.status === 409) {
+      setQueued(e instanceof ApiError && e.status === 0);
+      if (e instanceof ApiError && e.status === 0) {
+        toast('warn', t('draft.apply_queued'));
+      } else if (e instanceof ApiError && e.status === 409) {
         let remote = revision;
         try {
           remote = (await api.getDashboard()).revision;
@@ -237,6 +245,13 @@ export function DraftProvider({ children }: { children: ReactNode }) {
       setBusy(null);
     }
   }, [doApply, revision, toast, t]);
+
+  // Back online: load what failed to load, and send the apply that could not reach the device
+  // (If-Match still guards against overwriting a newer device version).
+  useReconnect(() => {
+    if (loadError) void reload();
+    else if (queued && !busy) void apply();
+  });
 
   const resolveConflict = useCallback(
     async (choice: 'reload' | 'overwrite' | 'cancel') => {
@@ -323,6 +338,7 @@ export function DraftProvider({ children }: { children: ReactNode }) {
       reload,
       validate,
       apply,
+      queued,
       discard,
       resolveConflict,
       restore,
@@ -331,7 +347,7 @@ export function DraftProvider({ children }: { children: ReactNode }) {
       appliedAt,
       reportErrors,
     }),
-    [loading, loadError, applied, draft, dirty, errors, validity, busy, conflict, restorable, hist.past.length, hist.future.length, observed, pageId, panelId, setPageId, update, replace, reload, validate, apply, discard, resolveConflict, restore, recordObserved, appliedSeq, appliedAt, reportErrors],
+    [loading, loadError, applied, draft, dirty, errors, validity, busy, queued, conflict, restorable, hist.past.length, hist.future.length, observed, pageId, panelId, setPageId, update, replace, reload, validate, apply, discard, resolveConflict, restore, recordObserved, appliedSeq, appliedAt, reportErrors],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

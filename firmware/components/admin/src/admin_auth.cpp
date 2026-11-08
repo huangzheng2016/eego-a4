@@ -3,12 +3,15 @@
 #include "admin/admin_auth.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <vector>
 
 #include "admin/admin_log.h"
+#include "esp_attr.h"
 #include "esp_random.h"
+#include "esp_rtc_time.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -37,13 +40,62 @@ const char kNvsIngestKey[] = "ingest_key";
 
 int64_t nowMs() { return esp_timer_get_time() / 1000; }
 
-// ---- RAM-only 会话/限速存储（文件作用域静态：重启即清，天然 RAM-only）----
+// ---- 会话：RAM 中维护，镜像到 RTC 内存 ----
+// 深睡、软件重启后会话仍有效（网页不必重新登录）；断电即清。时间用 RTC 计时器，
+// 它跨深睡和软件复位连续计数。
 struct SessionRec {
   std::string token;
   int64_t created_ms = 0;
   int64_t last_used_ms = 0;
 };
 std::vector<SessionRec> g_sessions;
+
+int64_t sessionNowMs() { return static_cast<int64_t>(esp_rtc_get_time_us() / 1000); }
+
+constexpr uint32_t kRtcSessionMagic = 0x45534531;  // "ESE1"
+struct RtcSessionRec {
+  char token[44];
+  int64_t created_ms;
+  int64_t last_used_ms;
+};
+struct RtcSessions {
+  uint32_t magic;
+  uint32_t count;
+  RtcSessionRec recs[kMaxSessions];
+  uint32_t check;
+};
+RTC_NOINIT_ATTR RtcSessions g_rtc_sessions;
+
+uint32_t rtcCheck(const RtcSessions& r) {
+  uint32_t h = 2166136261u;  // FNV-1a over everything except `check`
+  const auto* b = reinterpret_cast<const uint8_t*>(&r);
+  for (size_t i = 0; i < offsetof(RtcSessions, check); i++) h = (h ^ b[i]) * 16777619u;
+  return h;
+}
+
+void persistSessionsLocked() {
+  RtcSessions r{};
+  r.magic = kRtcSessionMagic;
+  r.count = static_cast<uint32_t>(std::min(g_sessions.size(), kMaxSessions));
+  for (uint32_t i = 0; i < r.count; i++) {
+    std::snprintf(r.recs[i].token, sizeof(r.recs[i].token), "%s", g_sessions[i].token.c_str());
+    r.recs[i].created_ms = g_sessions[i].created_ms;
+    r.recs[i].last_used_ms = g_sessions[i].last_used_ms;
+  }
+  r.check = rtcCheck(r);
+  g_rtc_sessions = r;
+}
+
+void restoreSessionsLocked() {
+  const RtcSessions& r = g_rtc_sessions;
+  if (r.magic != kRtcSessionMagic || r.count > kMaxSessions || r.check != rtcCheck(r)) return;
+  const int64_t now = sessionNowMs();
+  for (uint32_t i = 0; i < r.count; i++) {
+    const RtcSessionRec& rec = r.recs[i];
+    if (strnlen(rec.token, sizeof(rec.token)) != 43 || rec.created_ms > now) continue;
+    g_sessions.push_back({std::string(rec.token, 43), rec.created_ms, rec.last_used_ms});
+  }
+}
 
 struct LoginTrack {
   std::string ip;
@@ -164,6 +216,7 @@ esp_err_t AuthManager::init() {
   esp_err_t err = net::CredentialStore::ensureNvs();
   if (err != ESP_OK) return err;
   xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex_), portMAX_DELAY);
+  if (g_sessions.empty()) restoreSessionsLocked();
   if (ingest_key_cache_.empty()) {
     ingest_key_cache_ = net::CredentialStore::resolveToken("nvs:ingest_key");
   }
@@ -238,7 +291,7 @@ std::string AuthManager::createSession() {
   const std::string token = base64UrlEncode(raw, sizeof(raw));
 
   xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex_), portMAX_DELAY);
-  const int64_t now = nowMs();
+  const int64_t now = sessionNowMs();
   const int64_t ttl_ms = static_cast<int64_t>(session_ttl_s_) * 1000;
   g_sessions.erase(std::remove_if(g_sessions.begin(), g_sessions.end(),
                                   [&](const SessionRec& s) {
@@ -253,6 +306,7 @@ std::string AuthManager::createSession() {
     g_sessions.erase(oldest);  // LRU 驱逐
   }
   g_sessions.push_back({token, now, now});
+  persistSessionsLocked();
   xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
   return token;
 }
@@ -260,7 +314,7 @@ std::string AuthManager::createSession() {
 bool AuthManager::verifyToken(const std::string& token) {
   if (mutex_ == nullptr || token.size() != 43) return false;
   xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex_), portMAX_DELAY);
-  const int64_t now = nowMs();
+  const int64_t now = sessionNowMs();
   const int64_t ttl_ms = static_cast<int64_t>(session_ttl_s_) * 1000;
   bool ok = false;
   for (auto& s : g_sessions) {
@@ -268,6 +322,7 @@ bool AuthManager::verifyToken(const std::string& token) {
       if (now - s.created_ms <= ttl_ms) {
         s.last_used_ms = now;
         ok = true;
+        persistSessionsLocked();
       }
       break;
     }
@@ -282,6 +337,7 @@ void AuthManager::revokeSession(const std::string& token) {
   for (auto it = g_sessions.begin(); it != g_sessions.end(); ++it) {
     if (constTimeEqual(it->token, token)) {
       g_sessions.erase(it);
+      persistSessionsLocked();
       break;
     }
   }
@@ -292,6 +348,7 @@ void AuthManager::revokeAllSessions() {
   if (mutex_ == nullptr) return;
   xSemaphoreTake(static_cast<SemaphoreHandle_t>(mutex_), portMAX_DELAY);
   g_sessions.clear();
+  persistSessionsLocked();
   xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
 }
 

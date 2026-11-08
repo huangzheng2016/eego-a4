@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useReconnect } from '../state/session';
 import * as api from '../api';
 import { useI18n } from '../i18n';
 import { useToast } from '../state/toast';
@@ -35,6 +36,9 @@ export function CredentialsPage() {
       )
       .finally(() => setLoading(false));
   }, [t]);
+  useReconnect(() => {
+    if (loadErr) void load();
+  });
   useEffect(load, [load]);
 
   const submit = async (e: FormEvent) => {

@@ -589,8 +589,8 @@ int BleManager::onConnEvent(struct ble_gap_event* event, void* arg) {
       params.supervision_timeout = BLE_GAP_SUPERVISION_TIMEOUT_MS(4000);
       ble_gap_update_params(conn, &params);
       // 主动请求安全：已绑定的对端直接重新加密，新对端触发配对码。
-      ble_gap_security_initiate(conn);
-      ESP_LOGI(kTag, "link connected");
+      const int sec_rc = ble_gap_security_initiate(conn);
+      ESP_LOGI(kTag, "link connected (security initiate rc=%d)", sec_rc);
       return 0;
     }
     case BLE_GAP_EVENT_DISCONNECT:
@@ -610,6 +610,8 @@ int BleManager::onConnEvent(struct ble_gap_event* event, void* arg) {
       io.action = event->passkey.params.action;
       const int64_t now = nowMs();
       if (now < self->pair_lock_until_ms_.load()) {
+        ESP_LOGW(kTag, "pairing refused: locked for %lld s",
+                 static_cast<long long>((self->pair_lock_until_ms_.load() - now) / 1000));
         ble_gap_terminate(event->passkey.conn_handle, BLE_ERR_AUTH_FAIL);
         return 0;
       }
@@ -631,10 +633,14 @@ int BleManager::onConnEvent(struct ble_gap_event* event, void* arg) {
       return 0;
     }
     case BLE_GAP_EVENT_ENC_CHANGE: {
-      self->passkey_valid_ = false;
+      const bool pairing_attempt = self->passkey_valid_.exchange(false);
       const uint16_t conn = event->enc_change.conn_handle;
       ble_gap_conn_desc desc = {};
       const bool found = ble_gap_conn_find(conn, &desc) == 0;
+      ESP_LOGI(kTag, "enc change status=%d encrypted=%d authenticated=%d bonded=%d key_size=%d",
+               event->enc_change.status, found && desc.sec_state.encrypted ? 1 : 0,
+               found && desc.sec_state.authenticated ? 1 : 0, found && desc.sec_state.bonded ? 1 : 0,
+               found ? desc.sec_state.key_size : 0);
       const bool ok = event->enc_change.status == 0 && found && desc.sec_state.encrypted &&
                       desc.sec_state.authenticated && desc.sec_state.key_size == 16;
       if (ok) {
@@ -651,6 +657,23 @@ int BleManager::onConnEvent(struct ble_gap_event* event, void* arg) {
           handler.onLinkUp(handler.ctx);
         }
         ESP_LOGI(kTag, "link authenticated (bonded=%d)", desc.sec_state.bonded ? 1 : 0);
+      } else if (found && !pairing_attempt &&
+                 event->enc_change.status == BLE_HS_HCI_ERR(BLE_ERR_PINKEY_MISSING)) {
+        // 对端（电脑）已删除配对而本机仍有旧绑定：删掉旧绑定并重新发起配对，
+        // 否则每次重连都会在这里失败。
+        ESP_LOGW(kTag, "peer lost its bond; deleting ours and re-pairing");
+        ble_store_util_delete_peer(&desc.peer_id_addr);
+        self->link_ = LinkState::Connected;
+        const int rc = ble_gap_security_initiate(conn);
+        if (rc != 0) {
+          ESP_LOGW(kTag, "security initiate rc=%d", rc);
+          ble_gap_terminate(conn, BLE_ERR_AUTH_FAIL);
+        }
+      } else if (!pairing_attempt) {
+        // 未显示配对码就失败（加密恢复中断等）：不计入锁定次数，断开让浏览器重试。
+        self->link_ = LinkState::Connected;
+        ESP_LOGW(kTag, "link encryption failed status=%d (no pairing attempt)", event->enc_change.status);
+        ble_gap_terminate(conn, BLE_ERR_AUTH_FAIL);
       } else {
         const int64_t now = nowMs();
         if (now - self->pair_fail_window_ms_ > kPairFailWindowMs) {

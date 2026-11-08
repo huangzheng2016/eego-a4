@@ -66,19 +66,21 @@ export interface RequestOptions {
   timeoutMs?: number;
 }
 
-// Reads are retried once after a network error/timeout: on a weak WiFi link a single
-// dropped packet should not surface as "device unreachable". Writes are never
-// retried here — a PUT whose response was lost may already have been applied.
-const RETRY_DELAY_MS = 800;
+// Reads are retried after a network error/timeout: on a weak WiFi link a dropped packet
+// should not surface as "device unreachable". Writes are never retried here — a PUT
+// whose response was lost may already have been applied.
+const RETRY_DELAYS_MS = [800, 2500];
 
 export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const read = (opts.method ?? 'GET') === 'GET';
-  try {
-    return await requestOnce<T>(path, opts);
-  } catch (e) {
-    if (!read || !(e instanceof ApiError) || e.status !== 0 || opts.signal?.aborted) throw e;
-    await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
-    return requestOnce<T>(path, opts);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await requestOnce<T>(path, opts);
+    } catch (e) {
+      const retry = read && e instanceof ApiError && e.status === 0 && !opts.signal?.aborted;
+      if (!retry || attempt >= RETRY_DELAYS_MS.length) throw e;
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+    }
   }
 }
 
@@ -107,6 +109,7 @@ async function requestOnce<T>(path: string, opts: RequestOptions): Promise<T> {
   } catch (e) {
     connectivityListeners.forEach((fn) => fn(false));
     const aborted = (e as Error).name === 'AbortError';
+    console.warn(`[eego api] ${opts.method ?? 'GET'} ${path} via ${transport.kind}: ${aborted ? `timed out after ${timeoutMs} ms` : 'unreachable'}`, e);
     throw new ApiError(0, aborted ? 'timeout' : 'network', aborted ? 'request timed out' : 'device unreachable');
   } finally {
     clearTimeout(timer);
@@ -127,6 +130,7 @@ async function requestOnce<T>(path: string, opts: RequestOptions): Promise<T> {
   if (!res.ok) {
     const err = (body as { error?: { code?: string; message?: string; fields?: unknown } } | null)?.error;
     const e = new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `HTTP ${res.status}`, toFieldErrors(err?.fields), body);
+    console.warn(`[eego api] ${opts.method ?? 'GET'} ${path} → ${res.status} ${e.code}: ${e.message}`, body);
     const ra = res.headers.get('Retry-After');
     if (ra) e.retryAfter = Number(ra);
     throw e;

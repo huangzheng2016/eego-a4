@@ -1,7 +1,8 @@
 // Typed endpoint catalogue. ALL device REST access goes through this module so
 // endpoint changes stay in one place. Shapes follow
 // firmware/components/admin/src/{admin_httpd,dashboard_api}.cpp.
-import { request, setToken, getToken } from './client';
+import { ApiError, request, setToken, getToken } from './client';
+import { PAGES_URL } from '../model/origin';
 import type { Bundle, PresetDoc, SourcePlan } from '../model/types';
 import type { FieldError } from '../model/errors';
 import type { KeepAwakeState, PowerState } from '../model/power';
@@ -10,6 +11,44 @@ import type { WifiNetworkEdit } from '../model/wifi';
 export { ApiError, getToken, setToken, onUnauthorized, onConnectivity } from './client';
 
 /** Memoise a static read for the lifetime of the page; a failure is not cached. */
+let firmwareId = '';
+/** Set from /status (device.fw_sha256): keys localStorage caches of firmware-static data. */
+export function setFirmwareId(id: string): void {
+  firmwareId = id;
+}
+
+/**
+ * Like once(), but also kept in localStorage per firmware build: data that only changes
+ * with the firmware is downloaded from the device once, not on every page load.
+ */
+function firmwareCached<T>(name: string, fn: () => Promise<T>): () => Promise<T> {
+  const load = once(async () => {
+    const key = firmwareId ? `eego_fw_cache:${name}:${firmwareId}` : '';
+    if (key) {
+      try {
+        const hit = localStorage.getItem(key);
+        if (hit) return JSON.parse(hit) as T;
+      } catch {
+        /* storage unavailable or corrupt: fetch */
+      }
+    }
+    const value = await fn();
+    if (key) {
+      try {
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const k = localStorage.key(i);
+          if (k?.startsWith(`eego_fw_cache:${name}:`)) localStorage.removeItem(k);
+        }
+        localStorage.setItem(key, JSON.stringify(value));
+      } catch {
+        /* quota: cache for this page only */
+      }
+    }
+    return value;
+  });
+  return load;
+}
+
 function once<T>(fn: () => Promise<T>): () => Promise<T> {
   let pending: Promise<T> | null = null;
   return () => {
@@ -167,7 +206,7 @@ export interface SettingsResponse {
 }
 export const getSettings = () => request<SettingsResponse>('/settings');
 /** Built into the firmware: fetched once per page load. */
-export const getSettingsSchema = once(() => request<SettingsSchema>('/settings/schema'));
+export const getSettingsSchema = firmwareCached('settings_schema', () => request<SettingsSchema>('/settings/schema'));
 export const putSettings = (patch: Record<string, unknown>) =>
   request<SettingsResponse>('/settings', { method: 'PUT', body: patch });
 export const bleUnbind = () => request<unknown>('/settings/ble/unbind', { method: 'POST', body: {} });
@@ -299,8 +338,26 @@ export interface TemplateLibrary {
   presets: PresetDoc[];
   examples: { id: string; title: string; bundle: Bundle }[];
 }
-/** Built into the firmware: fetched once per page load. */
-export const getTemplates = once(() => request<TemplateLibrary>('/dashboard/templates', { timeoutMs: 30000 }));
+/**
+ * Preset library, published next to the app on GitHub Pages (scripts/postbuild.mjs runs
+ * preset_tool.py library). Never fetched from the device.
+ */
+export const getTemplates = once(async (): Promise<TemplateLibrary> => {
+  if (import.meta.env.VITE_MOCK === '1') return (await import('./mock')).templateLibrary() as TemplateLibrary;
+  const url = import.meta.env.PROD ? new URL('../templates.json', import.meta.url) : new URL('templates.json', PAGES_URL);
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch (e) {
+    console.warn('[eego] templates: GitHub Pages unreachable', url.href, e);
+    throw new ApiError(0, 'pages_unreachable', 'GitHub Pages unreachable');
+  }
+  if (!res.ok) {
+    console.warn('[eego] templates: HTTP', res.status, url.href);
+    throw new ApiError(res.status, 'pages_unreachable', `HTTP ${res.status}`);
+  }
+  return (await res.json()) as TemplateLibrary;
+});
 
 export type PreviewRefresh = 'full' | 'fast';
 export type PreviewData = 'bundle' | 'live' | 'mixed' | 'placeholder' | 'none';

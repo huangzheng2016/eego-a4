@@ -5,6 +5,7 @@ import type { TFn } from '../i18n';
 export function errorText(e: unknown, t: TFn): string {
   if (e instanceof ApiError) {
     // Unreachable: the PowerBanner already explains a sleeping device, so keep this short.
+    if (e.code === 'pages_unreachable') return t('err.pages');
     if (e.status === 0) return t(e.code === 'timeout' ? 'err.timeout' : 'err.network');
     if (e.status === 409) return t('err.conflict');
     if (e.status === 429) return t('err.rate') + (e.retryAfter ? ` (${e.retryAfter}s)` : '');

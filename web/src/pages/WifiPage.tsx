@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useReconnect } from '../state/session';
 import * as api from '../api';
 import { useI18n, type DictKey } from '../i18n';
 import { useToast } from '../state/toast';
@@ -47,6 +48,9 @@ export function WifiPage() {
       )
       .finally(() => setLoading(false));
   }, [apply, t]);
+  useReconnect(() => {
+    if (loadErr) void load();
+  });
   useEffect(load, [load]);
   useEffect(() => () => clearTimeout(reorderTimer.current), []);
 

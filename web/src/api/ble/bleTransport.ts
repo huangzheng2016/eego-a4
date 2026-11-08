@@ -62,6 +62,8 @@ interface Pending {
   reject: (e: Error) => void;
 }
 
+const ABORT_REASONS: Record<number, string> = { 1: 'busy', 2: 'too large', 3: 'sequence gap', 4: 'crc', 5: 'timeout', 6: 'cancelled' };
+
 export class BleLink implements Transport {
   readonly kind = 'ble' as const;
   readonly timeoutScale = 2.5;
@@ -86,6 +88,7 @@ export class BleLink implements Transport {
 
   private setState(s: BleState): void {
     if (this.state === s) return;
+    log(`state ${this.state} → ${s}`);
     this.state = s;
     this.listeners.forEach((fn) => fn(s));
   }
@@ -105,6 +108,7 @@ export class BleLink implements Transport {
     ch.onDisconnect(() => this.onDisconnect());
     const raw = await ch.readInfo();
     this.info = JSON.parse(new TextDecoder().decode(raw)) as BleInfo;
+    log('device info', this.info);
     this.reasm = new Reassembler(this.info.max_resp ?? DEFAULT_MAX_RESP);
     this.setState('ready');
     return this.info;
@@ -167,6 +171,7 @@ export class BleLink implements Transport {
   private failPending(e: Error, id?: number): void {
     const p = this.pending;
     if (!p || (id !== undefined && p.id !== id)) return;
+    if (e.name !== 'AbortError') warn(`request #${p.id} failed:`, e.message);
     this.pending = null;
     this.reasm.reset();
     p.wake?.();
@@ -194,6 +199,7 @@ export class BleLink implements Transport {
       p.wake = null;
       w?.();
     } else if (h.type === TYPE_ABORT) {
+      warn(`device aborted request #${p.id}, reason ${h.seq} (${ABORT_REASONS[h.seq] ?? 'unknown'})`);
       this.failPending(networkError(`ble abort ${h.seq}`), p.id);
     } else if (h.type === TYPE_DATA) {
       const res = this.reasm.feed(f, Date.now());
@@ -227,13 +233,15 @@ export class BleLink implements Transport {
     if (this.reconnecting) return false;
     this.reconnecting = true;
     try {
-      for (const ms of RECONNECT_DELAYS_MS) {
+      for (const [i, ms] of RECONNECT_DELAYS_MS.entries()) {
         await new Promise((r) => setTimeout(r, ms));
         if (this.closed) return false;
+        log(`reconnect attempt ${i + 1}/${RECONNECT_DELAYS_MS.length}`);
         try {
           await this.open();
           return true;
-        } catch {
+        } catch (e) {
+          warn('reconnect failed:', describe(e));
           this.channel?.close();
           this.channel = null;
           this.setState('lost');
@@ -256,43 +264,75 @@ export function requestBleDevice(): Promise<BluetoothDevice> {
 
 const bytes = (v: DataView) => new Uint8Array(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
 
+const log = (...a: unknown[]) => console.info('[eego ble]', ...a);
+const warn = (...a: unknown[]) => console.warn('[eego ble]', ...a);
+const describe = (e: unknown) => (e instanceof Error ? `${e.name}: ${e.message}` : String(e));
+
+/**
+ * Encrypted characteristics race the link encryption on a reconnect (the device asks for
+ * security right after connecting): the first access can fail while the bond is being
+ * restored, so retry a few times before giving up.
+ */
+async function withRetry<T>(what: string, fn: () => Promise<T>, attempts = 4): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      warn(`${what} failed (attempt ${i}/${attempts}):`, describe(e));
+      if (i >= attempts) throw e;
+      await new Promise((r) => setTimeout(r, 400 * i));
+    }
+  }
+}
+
 export function gattConnector(device: BluetoothDevice): Connector {
   return async () => {
     const gatt = device.gatt;
     if (!gatt) throw new Error('no gatt');
-    const server = await gatt.connect();
-    const svc = await server.getPrimaryService(SERVICE_UUID);
-    const [info, rx, tx] = await Promise.all([svc.getCharacteristic(INFO_UUID), svc.getCharacteristic(RX_UUID), svc.getCharacteristic(TX_UUID)]);
-    let notify: ((f: Uint8Array) => void) | null = null;
-    let lost: (() => void) | null = null;
-    const onValue = (e: Event) => {
-      const v = (e.target as BluetoothRemoteGATTCharacteristic).value;
-      if (v) notify?.(bytes(v));
-    };
-    const onGone = () => {
-      tx.removeEventListener('characteristicvaluechanged', onValue);
-      device.removeEventListener('gattserverdisconnected', onGone);
-      lost?.();
-    };
-    tx.addEventListener('characteristicvaluechanged', onValue);
-    device.addEventListener('gattserverdisconnected', onGone);
-    // Encrypted+authenticated characteristics: the OS pairing prompt (passkey on the device screen) appears here.
-    await tx.startNotifications();
-    const write = (f: Uint8Array): Promise<void> => {
-      const buf = f as unknown as BufferSource;
-      if (rx.writeValueWithoutResponse) return rx.writeValueWithoutResponse(buf);
-      if (rx.writeValueWithResponse) return rx.writeValueWithResponse(buf);
-      return rx.writeValue ? rx.writeValue(buf) : Promise.reject(new Error('no write'));
-    };
-    return {
-      readInfo: async () => bytes(await info.readValue()),
-      write,
-      onNotify: (fn) => (notify = fn),
-      onDisconnect: (fn) => (lost = fn),
-      close: () => {
-        lost = null;
-        if (server.connected) server.disconnect();
-      },
-    };
+    log('connecting to', device.name ?? device.id);
+    const server = await withRetry('gatt.connect', () => gatt.connect(), 3);
+    try {
+      const svc = await withRetry('getPrimaryService', () => server.getPrimaryService(SERVICE_UUID));
+      const [info, rx, tx] = await Promise.all([svc.getCharacteristic(INFO_UUID), svc.getCharacteristic(RX_UUID), svc.getCharacteristic(TX_UUID)]);
+      let notify: ((f: Uint8Array) => void) | null = null;
+      let lost: (() => void) | null = null;
+      const onValue = (e: Event) => {
+        const v = (e.target as BluetoothRemoteGATTCharacteristic).value;
+        if (v) notify?.(bytes(v));
+      };
+      const onGone = () => {
+        warn('gatt server disconnected');
+        tx.removeEventListener('characteristicvaluechanged', onValue);
+        device.removeEventListener('gattserverdisconnected', onGone);
+        lost?.();
+      };
+      tx.addEventListener('characteristicvaluechanged', onValue);
+      device.addEventListener('gattserverdisconnected', onGone);
+      // Encrypted+authenticated characteristics: the OS pairing prompt (passkey on the device screen) appears here.
+      await withRetry('startNotifications', () => tx.startNotifications());
+      log('connected; notifications on');
+      const write = (f: Uint8Array): Promise<void> => {
+        const buf = f as unknown as BufferSource;
+        if (rx.writeValueWithoutResponse) return rx.writeValueWithoutResponse(buf);
+        if (rx.writeValueWithResponse) return rx.writeValueWithResponse(buf);
+        return rx.writeValue ? rx.writeValue(buf) : Promise.reject(new Error('no write'));
+      };
+      return {
+        readInfo: () => withRetry('read INFO', async () => bytes(await info.readValue())),
+        write,
+        onNotify: (fn) => (notify = fn),
+        onDisconnect: (fn) => (lost = fn),
+        close: () => {
+          lost = null;
+          if (server.connected) server.disconnect();
+        },
+      };
+    } catch (e) {
+      // Do not leave a half-open link behind: the device accepts one connection and
+      // stops advertising while it is held, which blocks the next attempt.
+      warn('connect failed, dropping link:', describe(e));
+      if (server.connected) server.disconnect();
+      throw e;
+    }
   };
 }

@@ -47,6 +47,7 @@ export const zh = {
   'login.logout': '退出登录',
 
   'err.network': '无法连接设备',
+  'err.pages': '无法从 GitHub Pages 加载模板，请检查网络',
   'err.timeout': '请求超时',
   'err.conflict': '配置已被其他会话修改（版本冲突）',
   'err.validation': '校验未通过，请检查标红的字段',
@@ -65,6 +66,8 @@ export const zh = {
   'draft.redo': '重做',
   'draft.valid': '校验通过',
   'draft.invalid': '校验失败：{n} 个问题',
+  'draft.apply_queued': '设备暂时连不上，恢复后自动应用',
+  'draft.queued': '待应用',
   'draft.applied': '已应用到设备（版本 {rev}）',
   'draft.not_configured': '设备尚未配置仪表盘，以下为空白草稿；应用后生效。',
   'draft.import': '导入 JSON',

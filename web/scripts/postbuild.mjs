@@ -41,6 +41,10 @@ const info = {
   assets: { js: files[0], css: files[1] },
 };
 writeFileSync(join(dist, 'version.json'), JSON.stringify(info, null, 2) + '\n');
+// Preset library (templates.json): the app loads it from Pages, never from the device.
+execSync(`python3 ${JSON.stringify(join(root, '../firmware/tools/preset_tool.py'))} library --output ${JSON.stringify(join(dist, 'templates.json'))}`, {
+  stdio: 'inherit',
+});
 // GitHub Pages: skip Jekyll processing.
 writeFileSync(join(dist, '.nojekyll'), '');
 console.log(`postbuild: version.json hash=${digest} build=${info.build}`);
