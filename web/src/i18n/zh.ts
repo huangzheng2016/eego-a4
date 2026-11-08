@@ -856,6 +856,7 @@ export const zh = {
   'bt.pairing': '如有弹窗，输入设备屏幕上的 6 位配对码',
   'bt.unsupported': '此浏览器不支持蓝牙，请使用电脑版 Chrome / Edge 或安卓 Chrome',
   'bt.failed': '蓝牙连接失败',
+  'bt.stale_pairing': '电脑上的配对已失效。请在系统设置 → 蓝牙中删除该设备，再重新连接并输入设备屏幕上的配对码。',
   'bt.badge': '蓝牙',
   'bt.lost': '蓝牙已断开，正在重连…',
   'bt.asleep': '设备已休眠，按设备按键唤醒',

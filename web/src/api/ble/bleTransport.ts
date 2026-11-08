@@ -273,13 +273,17 @@ const describe = (e: unknown) => (e instanceof Error ? `${e.name}: ${e.message}`
  * security right after connecting): the first access can fail while the bond is being
  * restored, so retry a few times before giving up.
  */
+/** macOS/Chrome report a stale OS-level pairing (device lost its bond) this way; retrying cannot help. */
+export const isStalePairing = (e: unknown) => e instanceof Error && /unsupported device/i.test(e.message);
+
 async function withRetry<T>(what: string, fn: () => Promise<T>, attempts = 4): Promise<T> {
   for (let i = 1; ; i++) {
     try {
       return await fn();
     } catch (e) {
       warn(`${what} failed (attempt ${i}/${attempts}):`, describe(e));
-      if (i >= attempts) throw e;
+      if (isStalePairing(e)) warn('the computer holds a pairing the device no longer has; remove the device in the OS Bluetooth settings and connect again');
+      if (i >= attempts || isStalePairing(e)) throw e;
       await new Promise((r) => setTimeout(r, 400 * i));
     }
   }

@@ -5,6 +5,7 @@ import { useI18n } from '../i18n';
 import { useSession } from '../state/session';
 import { Button, Icon, Logo, Spinner, TextInput } from '../ui';
 import { bleSupported, PAGES_URL } from '../model/origin';
+import { isStalePairing } from '../api/ble/bleTransport';
 
 /** `primary`: the only way in (Pages origin); otherwise a secondary option under the password form. */
 export function BleEntry({ primary }: { primary: boolean }) {
@@ -34,7 +35,8 @@ export function BleEntry({ primary }: { primary: boolean }) {
       await connectBle();
     } catch (e) {
       // NotFoundError: the user closed the device chooser.
-      if ((e as Error).name !== 'NotFoundError') setErr(`${t('bt.failed')}（${(e as Error).message || (e as Error).name}）`);
+      if (isStalePairing(e)) setErr(t('bt.stale_pairing'));
+      else if ((e as Error).name !== 'NotFoundError') setErr(`${t('bt.failed')}（${(e as Error).message || (e as Error).name}）`);
     } finally {
       setBusy(false);
     }

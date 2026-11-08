@@ -842,6 +842,7 @@ export const en: Record<keyof typeof zh, string> = {
   "bt.pairing": "If prompted, enter the 6-digit code shown on the device",
   "bt.unsupported": "This browser has no Bluetooth support. Use desktop Chrome / Edge or Chrome on Android.",
   "bt.failed": "Bluetooth connection failed",
+  "bt.stale_pairing": "The pairing saved on this computer is no longer valid. Remove the device in the system Bluetooth settings, then connect again and enter the code shown on the device.",
   "bt.badge": "Bluetooth",
   "bt.lost": "Bluetooth disconnected, reconnecting…",
   "bt.asleep": "Device is asleep. Press a device key to wake it.",

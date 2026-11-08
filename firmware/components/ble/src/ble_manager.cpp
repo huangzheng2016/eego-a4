@@ -651,14 +651,14 @@ int BleManager::onConnEvent(struct ble_gap_event* event, void* arg) {
         ESP_LOGI(kTag, "link authenticated (bonded=%d)", desc.sec_state.bonded ? 1 : 0);
       } else if (found && !pairing_attempt &&
                  event->enc_change.status == BLE_HS_HCI_ERR(BLE_ERR_PINKEY_MISSING)) {
-        ESP_LOGW(kTag, "peer lost its bond; deleting ours and re-pairing");
+        // The peer encrypted with a key this device does not have (stale pairing on the
+        // computer, e.g. after a reflash or bond reset). Only the peer can fix that, so drop
+        // any leftover record and disconnect instead of retrying in a loop.
+        ESP_LOGW(kTag, "peer used an unknown bond key: remove this device from the computer's "
+                       "Bluetooth settings, then pair again");
         ble_store_util_delete_peer(&desc.peer_id_addr);
         self->link_ = LinkState::Connected;
-        const int rc = ble_gap_security_initiate(conn);
-        if (rc != 0) {
-          ESP_LOGW(kTag, "security initiate rc=%d", rc);
-          ble_gap_terminate(conn, BLE_ERR_AUTH_FAIL);
-        }
+        ble_gap_terminate(conn, BLE_ERR_AUTH_FAIL);
       } else if (!pairing_attempt) {
         self->link_ = LinkState::Connected;
         ESP_LOGW(kTag, "link encryption failed status=%d (no pairing attempt)", event->enc_change.status);
