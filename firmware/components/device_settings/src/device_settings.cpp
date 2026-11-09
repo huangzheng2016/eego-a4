@@ -86,7 +86,49 @@ bool loadRecord(Settings& values, uint32_t& revision) {
   return true;
 }
 
+constexpr char kPowerDefaultsKey[] = "pwr_defs";
+
+uint8_t powerDefaultsVersion() {
+  nvs_handle_t handle;
+  if (nvs_open(kNvsNamespace, NVS_READONLY, &handle) != ESP_OK) return 0;
+  uint8_t v = 0;
+  if (nvs_get_u8(handle, kPowerDefaultsKey, &v) != ESP_OK) v = 0;
+  nvs_close(handle);
+  return v;
+}
+
+void markPowerDefaults() {
+  nvs_handle_t handle;
+  if (nvs_open(kNvsNamespace, NVS_READWRITE, &handle) != ESP_OK) return;
+  if (nvs_set_u8(handle, kPowerDefaultsKey, kPowerDefaultsVersion) == ESP_OK) nvs_commit(handle);
+  nvs_close(handle);
+}
+
 }  // namespace
+
+void DeviceSettings::migratePowerDefaultsLocked() {
+  if (powerDefaultsVersion() >= kPowerDefaultsVersion) return;
+  Settings next = values_;
+  if (migratePowerDefaults(next)) {
+    FieldErrors errors;
+    validate(next, errors);
+    std::string error;
+    if (!errors.empty()) {
+      ESP_LOGW(kTag, "power defaults migration skipped: %s", errors.front().message.c_str());
+    } else if (saveRecord(next, revision_ + 1, error) == ESP_OK) {
+      values_ = next;
+      ++revision_;
+      ESP_LOGI(kTag, "battery defaults updated: refresh=%umin stale=%umin awake=%us night=%d-%d",
+               (unsigned)next.battery_refresh_min, (unsigned)next.battery_max_stale_min,
+               (unsigned)next.battery_interactive_timeout_s, next.sleep_start_min,
+               next.sleep_end_min);
+    } else {
+      ESP_LOGW(kTag, "power defaults migration save failed: %s", error.c_str());
+      return;
+    }
+  }
+  markPowerDefaults();
+}
 
 DeviceSettings& DeviceSettings::instance() {
   static DeviceSettings instance;
@@ -116,6 +158,7 @@ esp_err_t DeviceSettings::init() {
     values_ = loaded_values;
     revision_ = loaded_revision;
     loaded_ = true;
+    migratePowerDefaultsLocked();
     xSemaphoreGive(static_cast<SemaphoreHandle_t>(mutex_));
     return ESP_OK;
   }
@@ -127,6 +170,7 @@ esp_err_t DeviceSettings::init() {
   const esp_err_t err = saveRecord(values_, revision_, error);
   if (err == ESP_OK) {
     loaded_ = true;
+    markPowerDefaults();
     ESP_LOGI(kTag, "device settings initialized with defaults");
   } else {
     ESP_LOGE(kTag, "settings defaults persist failed: %s", error.c_str());

@@ -105,11 +105,11 @@ struct Settings {
   PowerMode power_mode = PowerMode::Auto;
   ChargeSignal charge_signal = ChargeSignal::Auto;
   uint32_t data_refresh_s = 0;
-  uint32_t battery_refresh_min = 15;
-  uint32_t battery_max_stale_min = 60;
-  uint32_t battery_interactive_timeout_s = 60;
-  int sleep_start_min = -1;
-  int sleep_end_min = -1;
+  uint32_t battery_refresh_min = 30;
+  uint32_t battery_max_stale_min = 120;
+  uint32_t battery_interactive_timeout_s = 30;
+  int sleep_start_min = 0;       // 00:00-06:00 night pause
+  int sleep_end_min = 6 * 60;
   int timezone_offset_min = 480;
   bool frontlight_enabled = false;
   uint8_t frontlight_brightness = 60;
@@ -163,6 +163,13 @@ bool mergePatch(const Settings& current, const alert_core::JsonValue& patch,
                 Settings& out, FieldErrors& errors);
 
 uint32_t changedFields(const Settings& before, const Settings& after);
+
+// Battery defaults moved to longer intervals (15→30 min refresh, 60→120 min max stale,
+// 60→30 s awake after a key wake, night pause 00:00-06:00). Records saved before that
+// still hold the old defaults; this moves only fields that still equal an old default,
+// so user choices are kept. Returns true when anything changed.
+inline constexpr uint8_t kPowerDefaultsVersion = 1;
+bool migratePowerDefaults(Settings& settings);
 
 bool validIdleRefreshMin(uint32_t minutes);
 bool validKeepAwakeMin(uint32_t minutes);

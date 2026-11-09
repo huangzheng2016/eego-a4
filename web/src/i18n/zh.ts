@@ -453,7 +453,7 @@ export const zh = {
   'set.f.power_mode': '供电模式',
   'set.f.charge_signal': '充电信号',
   'set.h.power_mode': '自动：充电或连接电脑时为外接电源，否则为电池。',
-  'set.h.charge_signal': '插着充电器却显示电池时，改选另一项。',
+  'set.h.charge_signal': '充电状态显示反了（插着充电器显示电池，或没插却显示充电）时，改选另一项。',
   'set.f.data_refresh_s': '数据刷新间隔（秒）',
   'set.f.battery_refresh_min': '电池唤醒间隔',
   'set.f.battery_max_stale_min': '内容不变时最长不刷屏',

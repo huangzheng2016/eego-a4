@@ -287,6 +287,11 @@ TEST(battery_policy, rtc_state_checksum) {
   CHECK(!rtcValid(s));
   rtcSeal(s);
   CHECK(rtcValid(s));
+  CHECK_EQ(s.charge_suspect, 0);
+  s.charge_suspect = 1;
+  CHECK(!rtcValid(s));
+  rtcSeal(s);
+  CHECK(rtcValid(s));
   CHECK_EQ(crc32(reinterpret_cast<const uint8_t*>("123456789"), 9), 0xCBF43926u);
 }
 

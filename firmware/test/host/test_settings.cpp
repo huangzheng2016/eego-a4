@@ -45,6 +45,35 @@ TEST(settings, defaults_are_valid) {
   CHECK_EQ(s.timezone_offset_min, 480);  // UTC+8 default
 }
 
+TEST(settings, power_defaults_migration_keeps_user_choices) {
+  Settings old;
+  old.battery_refresh_min = 15;
+  old.battery_max_stale_min = 60;
+  old.battery_interactive_timeout_s = 60;
+  old.sleep_start_min = -1;
+  old.sleep_end_min = -1;
+  CHECK(migratePowerDefaults(old));
+  CHECK_EQ(old.battery_refresh_min, 30u);
+  CHECK_EQ(old.battery_max_stale_min, 120u);
+  CHECK_EQ(old.battery_interactive_timeout_s, 30u);
+  CHECK_EQ(old.sleep_start_min, 0);
+  CHECK_EQ(old.sleep_end_min, 360);
+  FieldErrors errors;
+  validate(old, errors);
+  CHECK(errors.empty());
+  CHECK(!migratePowerDefaults(old));  // idempotent on the new defaults
+
+  Settings mine;
+  mine.battery_refresh_min = 5;
+  mine.battery_max_stale_min = 30;
+  mine.battery_interactive_timeout_s = 120;
+  mine.sleep_start_min = 22 * 60;
+  mine.sleep_end_min = 6 * 60;
+  const Settings before = mine;
+  CHECK(!migratePowerDefaults(mine));
+  CHECK(changedFields(before, mine) == 0);
+}
+
 TEST(settings, frontlight_hardware_names) {
   for (auto mode : {FrontlightHardware::Auto, FrontlightHardware::Present, FrontlightHardware::Absent}) {
     FrontlightHardware back = FrontlightHardware::Auto;
@@ -104,7 +133,7 @@ TEST(settings, json_round_trip) {
   CHECK_EQ(changedFields(s, decoded), 0u);
   // Byte-identical to the output before toJson was rewritten for a small stack frame.
   CHECK_EQ(encoded.toString(), std::string(R"JSON({"schema_version":1,"language":"en","power_mode":"battery","charge_signal":"auto","data_refresh_s":120,"battery_refresh_min":30,"battery_max_stale_min":120,"battery_interactive_timeout_s":90,"sleep_start_min":1380,"sleep_end_min":420,"timezone_offset_min":-330,"frontlight_enabled":true,"frontlight_brightness":33,"frontlight_warmth":80,"frontlight_hardware":"absent","epd_full_refresh_s":7200,"idle_after_min":30,"idle_refresh_min":15,"idle_critical_immediate":false,"keep_awake_min":30,"screen_rotate_min":0,"diagnostics_enabled":false,"ble_admin_enabled":false,"uplink":"auto","ble_observer_enabled":true,"ble_observer_window_s":10,"ble_observer_interval_s":300,"ble_observer_dedup_ms":5000,"ble_observer_rules":[{"id":"temp1","event_type":"ble.sensor","title":"BLE sensor","payload_offset":0,"payload_match":"9904","fields":[{"name":"temperature","offset":2,"type":"i16le","scale":0.01}],"ttl_s":86400,"manufacturer_id":1177}]})JSON"));
-  CHECK_EQ(toJson(Settings{}).toString(), std::string(R"JSON({"schema_version":1,"language":"zh","power_mode":"auto","charge_signal":"auto","data_refresh_s":0,"battery_refresh_min":15,"battery_max_stale_min":60,"battery_interactive_timeout_s":60,"sleep_start_min":-1,"sleep_end_min":-1,"timezone_offset_min":480,"frontlight_enabled":false,"frontlight_brightness":60,"frontlight_warmth":50,"frontlight_hardware":"auto","epd_full_refresh_s":86400,"idle_after_min":10,"idle_refresh_min":5,"idle_critical_immediate":true,"keep_awake_min":30,"screen_rotate_min":0,"diagnostics_enabled":true,"ble_admin_enabled":true,"uplink":"auto","ble_observer_enabled":false,"ble_observer_window_s":10,"ble_observer_interval_s":300,"ble_observer_dedup_ms":5000,"ble_observer_rules":[]})JSON"));
+  CHECK_EQ(toJson(Settings{}).toString(), std::string(R"JSON({"schema_version":1,"language":"zh","power_mode":"auto","charge_signal":"auto","data_refresh_s":0,"battery_refresh_min":30,"battery_max_stale_min":120,"battery_interactive_timeout_s":30,"sleep_start_min":0,"sleep_end_min":360,"timezone_offset_min":480,"frontlight_enabled":false,"frontlight_brightness":60,"frontlight_warmth":50,"frontlight_hardware":"auto","epd_full_refresh_s":86400,"idle_after_min":10,"idle_refresh_min":5,"idle_critical_immediate":true,"keep_awake_min":30,"screen_rotate_min":0,"diagnostics_enabled":true,"ble_admin_enabled":true,"uplink":"auto","ble_observer_enabled":false,"ble_observer_window_s":10,"ble_observer_interval_s":300,"ble_observer_dedup_ms":5000,"ble_observer_rules":[]})JSON"));
 }
 
 TEST(settings, patch_frontlight_hardware) {
@@ -199,7 +228,7 @@ TEST(settings, patch_rejects_bad_values) {
       {R"({"idle_refresh_min":0})", "idle_refresh_min"},
       {R"({"idle_refresh_min":"5"})", "idle_refresh_min"},
       {R"({"idle_critical_immediate":1})", "idle_critical_immediate"},
-      {R"({"sleep_start_min":60})", "sleep_start_min"},  // end still -1
+      {R"({"sleep_start_min":60,"sleep_end_min":-1})", "sleep_start_min"},
       {R"({"sleep_start_min":60,"sleep_end_min":60})", "sleep_end_min"},
       {R"({"schema_version":2})", "schema_version"},
       {R"({"unknown_key":1})", "unknown_key"},
@@ -236,6 +265,10 @@ TEST(settings, scheduled_sleep_window) {
   uint64_t wake = 0;
   uint32_t remaining = 0;
   const uint64_t midnight = 1767225600ULL;  // 2026-01-01T00:00Z
+  CHECK(scheduledSleep(s, midnight, wake, remaining));  // default 00:00-06:00 night pause
+  CHECK_EQ(wake, midnight + 6 * 3600);
+  s.sleep_start_min = -1;
+  s.sleep_end_min = -1;
   CHECK(!scheduledSleep(s, midnight, wake, remaining));  // disabled
   s.sleep_start_min = 23 * 60;
   s.sleep_end_min = 7 * 60;  // overnight
@@ -301,9 +334,11 @@ TEST(settings, keep_awake_minutes) {
 
 TEST(settings, battery_fields) {
   const Settings base;
-  CHECK_EQ(base.battery_refresh_min, 15u);
-  CHECK_EQ(base.battery_max_stale_min, 60u);
-  CHECK_EQ(base.battery_interactive_timeout_s, 60u);
+  CHECK_EQ(base.battery_refresh_min, 30u);
+  CHECK_EQ(base.battery_max_stale_min, 120u);
+  CHECK_EQ(base.battery_interactive_timeout_s, 30u);
+  CHECK_EQ(base.sleep_start_min, 0);
+  CHECK_EQ(base.sleep_end_min, 360);
   Settings out;
   FieldErrors errors;
   for (uint32_t minutes : {5u, 10u, 15u, 30u, 60u}) {
@@ -316,7 +351,7 @@ TEST(settings, battery_fields) {
             describe(errors));
   CHECK_EQ(changedFields(base, out), static_cast<uint32_t>(kChangedBattery));
   CHECK((kChangedAll & kChangedBattery) != 0);
-  CHECK_MSG(patchOk(base, R"({"sleep_start_min":0,"sleep_end_min":360})", out, errors),
+  CHECK_MSG(patchOk(base, R"({"sleep_start_min":-1,"sleep_end_min":-1})", out, errors),
             describe(errors));
   CHECK_EQ(changedFields(base, out), static_cast<uint32_t>(kChangedSleep));
   const std::string schema = schemaJson();

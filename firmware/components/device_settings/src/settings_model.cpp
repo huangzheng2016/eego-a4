@@ -810,6 +810,29 @@ bool scheduledSleep(const Settings& settings, uint64_t now_unix, uint64_t& wake_
   return true;
 }
 
+bool migratePowerDefaults(Settings& s) {
+  const Settings next_defaults;
+  bool changed = false;
+  if (s.battery_refresh_min == 15) {
+    s.battery_refresh_min = next_defaults.battery_refresh_min;
+    changed = true;
+  }
+  if (s.battery_max_stale_min == 60 && s.battery_refresh_min <= next_defaults.battery_max_stale_min) {
+    s.battery_max_stale_min = next_defaults.battery_max_stale_min;
+    changed = true;
+  }
+  if (s.battery_interactive_timeout_s == 60) {
+    s.battery_interactive_timeout_s = next_defaults.battery_interactive_timeout_s;
+    changed = true;
+  }
+  if (s.sleep_start_min == -1 && s.sleep_end_min == -1) {
+    s.sleep_start_min = next_defaults.sleep_start_min;
+    s.sleep_end_min = next_defaults.sleep_end_min;
+    changed = true;
+  }
+  return changed;
+}
+
 const char* schemaJson() {
   return R"JSON({
   "schema_version": 1,
@@ -819,11 +842,11 @@ const char* schemaJson() {
     "power_mode": {"type":"string","enum":["auto","mains","battery"],"default":"auto","group":"power"},
     "charge_signal": {"type":"string","enum":["auto","high","low"],"default":"auto","note":"GPIO11 charge-status polarity; auto infers it from LM3630A presence. Pick the other value if charging and battery read inverted","group":"power"},
     "data_refresh_s": {"type":"int","range":[0,86400],"minimum_nonzero":30,"default":0,"group":"refresh"},
-    "battery_refresh_min": {"type":"int","enum":[5,10,15,30,60],"default":15,"note":"battery mode wakes on local wall-clock multiples of this interval (doubled below 20% battery)","group":"battery"},
-    "battery_max_stale_min": {"type":"int","enum":[15,30,60,120,240,480],"default":60,"note":"unchanged frames are not redrawn until this age; must be >= battery_refresh_min","group":"battery"},
-    "battery_interactive_timeout_s": {"type":"int","range":[20,600],"default":60,"note":"after a button wake, return to deep sleep after this long without interaction","group":"battery"},
-    "sleep_start_min": {"type":"int","range":[-1,1439],"default":-1,"note":"night pause: no wakes and no network inside the window","group":"battery"},
-    "sleep_end_min": {"type":"int","range":[-1,1439],"default":-1,"group":"battery"},
+    "battery_refresh_min": {"type":"int","enum":[5,10,15,30,60],"default":30,"note":"battery mode wakes on local wall-clock multiples of this interval (doubled below 20% battery)","group":"battery"},
+    "battery_max_stale_min": {"type":"int","enum":[15,30,60,120,240,480],"default":120,"note":"unchanged frames are not redrawn until this age; must be >= battery_refresh_min","group":"battery"},
+    "battery_interactive_timeout_s": {"type":"int","range":[20,600],"default":30,"note":"after a button wake, return to deep sleep after this long without interaction","group":"battery"},
+    "sleep_start_min": {"type":"int","range":[-1,1439],"default":0,"note":"night pause: no wakes and no network inside the window","group":"battery"},
+    "sleep_end_min": {"type":"int","range":[-1,1439],"default":360,"group":"battery"},
     "timezone_offset_min": {"type":"int","range":[-840,840],"step":15,"default":480,"group":"time_language"},
     "frontlight_enabled": {"type":"bool","default":false,"capability":"frontlight","group":"display"},
     "frontlight_brightness": {"type":"int","range":[1,100],"default":60,"capability":"frontlight","group":"display"},

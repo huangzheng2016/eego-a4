@@ -300,6 +300,72 @@ TEST(power_source, boot_does_not_latch_from_voltage_alone) {
   CHECK(charged.reason() == bat::PowerReason::FullHold);
 }
 
+TEST(power_source, charge_pin_stuck_on_while_draining_falls_back_to_battery) {
+  // Wrong charge-pin polarity: the pin reads "charging" with no charger plugged in and
+  // the battery drains ~10 mV/min (WiFi on). Must go to battery within minutes.
+  bat::MainsDetector d;
+  bat::PowerSample s;
+  s.charging = true;
+  const int64_t found = runUntilBattery(d, s, 0, 60 * kMin, 10 * kSec, [](int64_t t) {
+    return noisy(3950 - static_cast<int>(t / 6000), t);
+  });
+  CHECK(found > 0);
+  CHECK(found <= 6 * kMin);
+  CHECK(d.reason() == bat::PowerReason::ChargeSuspect);
+  CHECK(d.chargeSuspect());
+  CHECK(!d.wantsFastSamples());
+  // Stays on battery while the pin keeps claiming charging.
+  s.battery_mv = 3800;
+  s.battery_read_ms = found + 60 * kSec;
+  CHECK(!d.update(0, s, found + 60 * kSec));
+  // The pin really changes state (charger behaviour observed): trusted again.
+  s.charging = false;
+  d.update(0, s, found + 70 * kSec);
+  d.update(0, s, found + 90 * kSec);
+  CHECK(!d.chargeSuspect());
+  s.charging = true;
+  CHECK(d.update(0, s, found + 100 * kSec));
+  CHECK(d.reason() == bat::PowerReason::Charging);
+}
+
+TEST(power_source, real_charging_is_never_suspect) {
+  // CC phase: voltage rises with noise; CV phase: flat at 4.2 V with noise.
+  bat::MainsDetector d;
+  bat::PowerSample s;
+  s.charging = true;
+  CHECK(runUntilBattery(d, s, 0, 3 * 60 * kMin, 10 * kSec, [](int64_t t) {
+          const int v = 3700 + static_cast<int>(t / 20000);
+          return noisy(v > 4200 ? 4200 : v, t);
+        }) < 0);
+  CHECK(!d.chargeSuspect());
+  // A short dip (e.g. a WiFi burst on a weak charger) does not trip it.
+  bat::MainsDetector e;
+  CHECK(runUntilBattery(e, s, 0, 10 * kMin, 10 * kSec, [](int64_t t) -> uint16_t {
+          return (t >= 5 * kMin && t < 5 * kMin + 20 * kSec) ? 4100 : noisy(4180, t);
+        }) < 0);
+  CHECK(!e.chargeSuspect());
+}
+
+TEST(power_source, seeded_suspect_survives_deep_sleep_wake) {
+  bat::MainsDetector d;
+  d.seedChargeSuspect(true);
+  bat::PowerSample s;
+  s.charging = true;
+  s.battery_mv = 3800;
+  CHECK(!d.update(0, s, 0));
+  CHECK(d.reason() == bat::PowerReason::ChargeSuspect);
+  // USB host (computer) is still external power.
+  s.usb_host = true;
+  CHECK(d.update(0, s, 1000));
+  // Seed cleared when the pin reads not-charging at boot.
+  bat::MainsDetector e;
+  e.seedChargeSuspect(true);
+  s.usb_host = false;
+  s.charging = false;
+  CHECK(!e.update(0, s, 0));
+  CHECK(!e.chargeSuspect());
+}
+
 // ---- Multi-screen dashboard: remote screen target + carousel timing ----
 
 TEST(device_screen, resolve_index_and_wrapping_step) {

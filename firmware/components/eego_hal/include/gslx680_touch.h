@@ -24,6 +24,9 @@ public:
 
     esp_err_t begin(i2c_port_t port = I2C_NUM_0);
     void end();
+    // Stops polling and holds the controller's MCU in reset for deep sleep; the next
+    // begin() reloads its firmware.
+    void sleep();
 
     esp_err_t startPolling(SemaphoreHandle_t wake = nullptr);
     bool stopPolling();

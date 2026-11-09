@@ -434,7 +434,10 @@ extern "C" void app_main(void) {
 #endif
   if (fastWake && panel::battery::rtcState().manual_sleep == 0) {
     const eego::BatteryInfo bat = eego::PowerManager::instance().readBattery();
-    const bool charging = eego::PowerManager::instance().isCharging() || bat.charging;
+    // A charge pin caught reporting charging on battery stays untrusted while it reads
+    // charging, so the wake does not bounce into the always-on mains app.
+    const bool charging = (eego::PowerManager::instance().isCharging() || bat.charging) &&
+                          panel::battery::rtcState().charge_suspect == 0;
     if (panel::battery::mainsPowered(
             static_cast<uint8_t>(deviceSettings.snapshot().values.power_mode), charging,
             bat.millivolts)) {

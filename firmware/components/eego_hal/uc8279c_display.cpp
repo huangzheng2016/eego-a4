@@ -110,6 +110,10 @@ esp_err_t Uc8279cDisplay::begin(bool deferController) {
 }
 
 void Uc8279cDisplay::powerUpController() {
+    gpio_hold_dis(gn(EPD_POWER_ENABLE));
+    gpio_pullup_en(gn(EPD_BUSY));
+    gpio_set_level(gn(EPD_CS), 1);
+    gpio_set_level(gn(EPD_DC), 1);
     gpio_set_level(gn(EPD_POWER_ENABLE), 1);
     vTaskDelay(pdMS_TO_TICKS(100));
     hardwareReset();
@@ -449,14 +453,26 @@ void Uc8279cDisplay::deepSleep() {
     if (offscreen_) return;
     fastRefreshesSinceFull_ = 0;
     prevFrame_ = nullptr;
-    if (controllerPending_) return;
-    if (screenOn_) {
-        sendCmd(CMD_POWER_OFF);
-        waitBusy("power-off");
-        screenOn_ = false;
+    if (!controllerPending_) {
+        if (screenOn_) {
+            sendCmd(CMD_POWER_OFF);
+            waitBusy("power-off");
+            screenOn_ = false;
+        }
+        const uint8_t check = 0xa5;
+        cmdData(CMD_DEEP_SLEEP, &check, 1);
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
-    const uint8_t check = 0xa5;
-    cmdData(CMD_DEEP_SLEEP, &check, 1);
+    // E-ink keeps the image unpowered: cut the panel supply for the whole sleep. Control
+    // lines go low and BUSY loses its pull-up so nothing back-feeds the unpowered chip
+    // (the pads are held through deep sleep). powerUpController() restores everything.
+    gpio_set_level(gn(EPD_CS), 0);
+    gpio_set_level(gn(EPD_DC), 0);
+    gpio_set_level(gn(EPD_RESET), 0);
+    gpio_pullup_dis(gn(EPD_BUSY));
+    gpio_set_level(gn(EPD_POWER_ENABLE), 0);
+    gpio_hold_en(gn(EPD_POWER_ENABLE));
+    controllerPending_ = true;
 }
 
 void Uc8279cDisplay::waitBusy(const char* tag) {

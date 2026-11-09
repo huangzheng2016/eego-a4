@@ -442,7 +442,7 @@ export const en: Record<keyof typeof zh, string> = {
   "set.f.power_mode": "Power mode",
   "set.f.charge_signal": "Charge signal",
   "set.h.power_mode": "Auto: mains while charging or connected to a computer, otherwise battery.",
-  "set.h.charge_signal": "If it shows battery while charging, pick the other value.",
+  "set.h.charge_signal": "If the charging state is inverted (battery while plugged in, or charging while unplugged), pick the other value.",
   "set.f.data_refresh_s": "Data refresh interval (s)",
   "set.f.battery_refresh_min": "Battery wake interval",
   "set.f.battery_max_stale_min": "Max time without redraw",

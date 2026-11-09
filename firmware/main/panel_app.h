@@ -200,6 +200,11 @@ class PanelApp {
       __attribute__((format(printf, 3, 4)));
 
   bool computeMains();
+  // What the UI and the wake planner treat as charging: the raw charge pin, unless the
+  // detector has caught it reporting charging while the battery drains.
+  bool chargingShown() const {
+    return (charging_ || batCache_.charging) && !mainsDetector_.chargeSuspect();
+  }
   void onModeChange(bool mains);
   void applyWifiPowerSave();
   bool dashboardLive() const { return mains_ || battPhase_ == BattPhase::Interactive; }

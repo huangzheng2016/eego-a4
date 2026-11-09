@@ -59,6 +59,7 @@ class DeviceSettings {
  private:
   DeviceSettings() = default;
   void ensureMutex() const;
+  void migratePowerDefaultsLocked();
 
   mutable void* mutex_ = nullptr;
   Settings values_;

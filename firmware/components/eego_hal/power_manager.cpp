@@ -85,7 +85,9 @@ void PowerManager::configureChargePin() {
     switch (chargePolarity_) {
         case ChargePolarity::ActiveHigh: chargeActiveHigh_ = true; break;
         case ChargePolarity::ActiveLow: chargeActiveHigh_ = false; break;
-        case ChargePolarity::Auto: chargeActiveHigh_ = lm3630aPresent_; break;
+        // Measured on real hardware: the old mapping (LM3630A present → active-high)
+        // read "charging" on battery and never let the panel deep-sleep.
+        case ChargePolarity::Auto: chargeActiveHigh_ = !lm3630aPresent_; break;
     }
 
     gpio_config_t io_conf;

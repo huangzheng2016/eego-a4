@@ -185,6 +185,13 @@ void Gslx680Touch::end() {
     pressed_.store(false);
 }
 
+void Gslx680Touch::sleep() {
+    const bool wasEnabled = enabled_;
+    end();
+    if (!initialized_ || !wasEnabled) return;
+    writeReg32(0xe0, 0x00000088);
+}
+
 std::vector<TouchEvent> Gslx680Touch::sampleFrame() {
     const int64_t now = esp_timer_get_time();
     uint8_t frame[24] = {};

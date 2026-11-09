@@ -114,6 +114,9 @@ void PanelApp::begin(const Deps& deps) {
     rtc.manual_sleep = 0;
     battery::commitRtcState();
   }
+  if (battery::deepSleepWake(wakeSource_) && rtc.charge_suspect != 0) {
+    mainsDetector_.seedChargeSuspect(true);
+  }
   mains_ = computeMains() && !manualSleep_;
   ESP_LOGI(TAG, "power source: %s (reason: %s, %umV, charging=%d, usb=%d)",
            mains_ ? "mains" : "battery", battery::powerReasonName(mainsDetector_.reason()),
@@ -250,7 +253,7 @@ battery::WakeInputs PanelApp::wakeInputs(uint64_t now_unix) const {
   in.night.end_min = settings_.sleep_end_min;
   in.battery_known = !mains_ && batCache_.millivolts > 0;
   in.battery_pct = batCache_.percent;
-  in.charging = charging_ || batCache_.charging;
+  in.charging = chargingShown();
   in.consecutive_failures = battery::rtcState().consecutive_failures;
   return in;
 }
@@ -287,6 +290,15 @@ void PanelApp::serviceApFallback(int64_t now) {
   eego::net::WifiManager& wifi = eego::net::WifiManager::instance();
   const bool connected = wifi.isConnected();
   if (portal.isApFallbackActive()) {
+    // On battery an open hotspot blocks deep sleep; the automatic one must not
+    // drain the battery while nobody uses it.
+    if (apFallbackAuto_ && !mains_ && portal.apClientCount() == 0) {
+      ESP_LOGI(TAG, "on battery: closing automatic AP fallback");
+      portal.closeApFallback("battery");
+      apFallbackAuto_ = false;
+      apConnectedSinceMs_ = -1;
+      return;
+    }
     if (!apFallbackAuto_ || !connected) {
       apConnectedSinceMs_ = -1;
       return;
@@ -309,6 +321,7 @@ void PanelApp::serviceApFallback(int64_t now) {
   }
   if (fallbackArmed_ || portal.apActive() || !admin::adminApiRunning()) return;
   if (!admin::ConfigStore::instance().admin().auto_ap_fallback) return;
+  if (!mains_) return;  // battery: sleep instead; the hotspot can be opened from Settings
   if (!wifi.apFallbackDue(now)) return;
   fallbackArmed_ = true;
   ESP_LOGW(TAG, "wifi offline after %u failed passes: opening AP fallback",
@@ -2198,6 +2211,10 @@ void PanelApp::onModeChange(bool mains) {
   ESP_LOGI(TAG, "power mode -> %s (reason: %s, %umV, charging=%d, usb=%d)",
            mains ? "mains" : "battery", battery::powerReasonName(mainsDetector_.reason()),
            batCache_.millivolts, (charging_ || batCache_.charging) ? 1 : 0, usbHost_ ? 1 : 0);
+  if (mainsDetector_.reason() == battery::PowerReason::ChargeSuspect) {
+    ESP_LOGW(TAG, "charge pin reports charging but the battery is draining: running on "
+                  "battery (check Settings > Charge signal)");
+  }
   eego::ble::BleManager::instance().onPowerMode(mains);
   eego::ble::BleManager::instance().setBatteryScanWindow(false);
   if (mains) {
@@ -2400,7 +2417,9 @@ void PanelApp::sleepNow() {
   rtc.last_wake_unix = now_unix;
   ++rtc.wakes;
   rtc.manual_sleep = manualSleep_ ? 1 : 0;
+  rtc.charge_suspect = mainsDetector_.chargeSuspect() ? 1 : 0;
   battery::commitRtcState();
+  if (deps_.touch != nullptr) deps_.touch->sleep();
   if (deps_.boot.displayReady && deps_.display != nullptr) deps_.display->deepSleep();
 
   ESP_LOGI(TAG, "deep sleep: kind=%d interval=%umin wake=%llu failures=%u",
@@ -2441,6 +2460,7 @@ void PanelApp::shutdownNow() {
   rtc.manual_sleep = 0;
   rtc.frame.valid = 0;
   battery::commitRtcState();
+  if (deps_.touch != nullptr) deps_.touch->sleep();
 
   if (deps_.boot.displayReady && deps_.canvas != nullptr && deps_.display != nullptr) {
     eego::PortraitCanvas& c = *deps_.canvas;
@@ -2799,7 +2819,7 @@ void PanelApp::publishPowerState(int64_t now) {
   p.mode = deviceStateApiName(deviceState_.state);
   p.battery_mv = batCache_.millivolts;
   p.battery_pct = batCache_.millivolts > 0 ? batCache_.percent : -1;
-  p.charging = charging_ || batCache_.charging;
+  p.charging = chargingShown();
   p.usb_host = usbHost_;
   p.next_wake = plannedWakeAt();
   p.next_refresh = deviceState_.state == DeviceState::Idle ? deviceState_.next_unix : 0;
@@ -3158,7 +3178,7 @@ void PanelApp::buildStatusBar(StatusBarModel& m) {
   if (labels.size() > 1) snprintf(m.stateShort, sizeof(m.stateShort), "%s", labels[1].c_str());
   m.batPercent = batCache_.percent;
   m.batMv = batCache_.millivolts;
-  m.charging = charging_ || batCache_.charging;
+  m.charging = chargingShown();
   m.wifiState = wifiState_.load();
   m.mains = mains_;
   m.portalOpen = admin::ProvisionPortal::instance().isOpen();
@@ -3343,7 +3363,7 @@ void PanelApp::buildStatus(KvModel& m) {
     PowerStatusInput in;
     in.external = mains_;
     in.detail = powerDetail();
-    in.charging = charging_ || batCache_.charging;
+    in.charging = chargingShown();
     in.battery_mv = batCache_.millivolts;
     in.battery_pct = batCache_.percent;
     in.state = deviceState_;

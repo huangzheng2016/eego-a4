@@ -131,11 +131,12 @@ struct RtcState {
   char ap_ssid[33] = {0};
   uint8_t low_battery_shown = 0;
   uint8_t manual_sleep = 0;
+  uint8_t charge_suspect = 0;
   uint32_t checksum = 0;
 };
 
 inline constexpr uint32_t kRtcMagic = 0x45424154u;  // "TABE"
-inline constexpr uint32_t kRtcVersion = 2;
+inline constexpr uint32_t kRtcVersion = 3;
 
 void rtcReset(RtcState& state);
 void rtcSeal(RtcState& state);
@@ -153,6 +154,11 @@ inline constexpr int64_t kSettleMs = 120000;
 inline constexpr int64_t kChargeRecentMs = 20 * 60000;
 inline constexpr int64_t kChargeOffDebounceMs = 10000;
 inline constexpr int64_t kFastBatterySampleMs = 10000;
+// The charge pin says "charging" but the filtered battery voltage sits this far below
+// its peak since charging began, for kChargeSuspectSamples fresh readings in a row:
+// the pin polarity is wrong (or the charger cannot keep up), so run on battery.
+inline constexpr uint16_t kChargeSuspectDropMv = 40;
+inline constexpr uint32_t kChargeSuspectSamples = 3;
 
 enum class PowerReason : uint8_t {
   ForcedMains = 0,
@@ -164,6 +170,7 @@ enum class PowerReason : uint8_t {
   VoltageDrop,
   BelowHold,
   Battery,
+  ChargeSuspect,
 };
 const char* powerReasonName(PowerReason reason);
 
@@ -181,6 +188,10 @@ class MainsDetector {
   PowerReason reason() const { return reason_; }
   bool latched() const { return latched_; }
   bool wantsFastSamples() const { return armed_; }
+  // The charge pin is not trusted: it reports charging while the battery drains.
+  bool chargeSuspect() const { return charge_suspect_; }
+  // Restores the flag after deep sleep (the voltage history is lost on wake).
+  void seedChargeSuspect(bool suspect) { charge_suspect_ = suspect; }
 
  private:
   struct Point {
@@ -203,6 +214,9 @@ class MainsDetector {
   bool latched_ = false;
   int64_t settle_until_ms_ = 0;
   int64_t last_read_ms_ = -1;
+  bool charge_suspect_ = false;
+  uint16_t charge_peak_mv_ = 0;
+  uint32_t charge_low_count_ = 0;
   uint16_t raw_[3] = {0, 0, 0};
   size_t raw_count_ = 0;
   Point history_[kHistoryCap] = {};

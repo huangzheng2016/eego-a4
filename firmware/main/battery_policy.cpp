@@ -342,6 +342,7 @@ uint32_t rtcChecksum(const RtcState& s) {
   h = fnv1a64(reinterpret_cast<const uint8_t*>(s.ap_ssid), sizeof(s.ap_ssid), h);
   h = mix(h, s.low_battery_shown);
   h = mix(h, s.manual_sleep);
+  h = mix(h, s.charge_suspect);
   return static_cast<uint32_t>(h ^ (h >> 32));
 }
 
@@ -382,6 +383,7 @@ const char* powerReasonName(PowerReason reason) {
     case PowerReason::VoltageDrop: return "voltage_drop";
     case PowerReason::BelowHold: return "below_hold";
     case PowerReason::Battery: return "battery";
+    case PowerReason::ChargeSuspect: return "charge_suspect";
   }
   return "battery";
 }
@@ -432,7 +434,14 @@ bool MainsDetector::update(uint8_t power_mode, const PowerSample& s, int64_t now
       if (now_ms - charge_off_since_ms_ >= kChargeOffDebounceMs) charging_ = false;
     }
   }
-  if (charging_) last_charge_ms_ = now_ms;
+  if (charging_) {
+    last_charge_ms_ = now_ms;
+  } else {
+    // The pin really changed state: trust it again from scratch.
+    charge_suspect_ = false;
+    charge_peak_mv_ = 0;
+    charge_low_count_ = 0;
+  }
 
   const int64_t read_ms = s.battery_read_ms >= 0 ? s.battery_read_ms : now_ms;
   const bool fresh = s.battery_mv > 0 && read_ms != last_read_ms_;
@@ -458,6 +467,21 @@ bool MainsDetector::update(uint8_t power_mode, const PowerSample& s, int64_t now
   }
   if (s.battery_mv == 0) {
     decide(true, PowerReason::NoBattery);
+    return mains_;
+  }
+  if (charging_ && !s.usb_host && fresh && raw_count_ == 3) {
+    if (filtered > charge_peak_mv_) charge_peak_mv_ = filtered;
+    if (filtered + kChargeSuspectDropMv <= charge_peak_mv_) {
+      if (++charge_low_count_ >= kChargeSuspectSamples) charge_suspect_ = true;
+    } else {
+      charge_low_count_ = 0;
+    }
+  }
+  if (charging_ && charge_suspect_ && !s.usb_host) {
+    armed_ = false;
+    latched_ = false;
+    history_count_ = 0;
+    decide(false, PowerReason::ChargeSuspect);
     return mains_;
   }
   if (charging_) {
