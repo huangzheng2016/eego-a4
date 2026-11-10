@@ -155,7 +155,8 @@ void Uc8279cDisplay::end() {
 void Uc8279cDisplay::gpioInit() {
     gpio_hold_dis(gn(EPD_POWER_ENABLE));
 
-    gpio_set_direction(gn(EPD_POWER_ENABLE), GPIO_MODE_OUTPUT);
+    // Input enabled too, so PowerManager can read back whether the panel rail is on.
+    gpio_set_direction(gn(EPD_POWER_ENABLE), GPIO_MODE_INPUT_OUTPUT);
     gpio_set_direction(gn(EPD_CS), GPIO_MODE_OUTPUT);
     gpio_set_direction(gn(EPD_DC), GPIO_MODE_OUTPUT);
     gpio_set_direction(gn(EPD_RESET), GPIO_MODE_OUTPUT);

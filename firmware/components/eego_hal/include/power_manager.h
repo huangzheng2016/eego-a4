@@ -40,6 +40,8 @@ private:
     void detectLm3630a();
     void configureChargePin();
     void ensureInitialized();
+    int sampleMillivolts();
+    static constexpr uint32_t kRailSettleMs = 50;
 
 public:
     static uint8_t percentFromMillivolts(uint16_t mv);

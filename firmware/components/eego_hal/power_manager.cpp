@@ -152,6 +152,29 @@ uint8_t PowerManager::percentFromMillivolts(uint16_t mv) {
     return 100;
 }
 
+int PowerManager::sampleMillivolts() {
+    // 16 samples, the 4 highest and 4 lowest dropped: one noisy sample (radio burst,
+    // panel charge pump) must not swing the reading toward a false low battery.
+    constexpr int kSamples = 16;
+    constexpr int kTrim = 4;
+    int raws[kSamples];
+    for (int i = 0; i < kSamples; i++) {
+        if (adc_oneshot_read(adcUnit_, ADC_CHANNEL_9, &raws[i]) != ESP_OK) return -1;
+    }
+    std::sort(raws, raws + kSamples);
+    int rawSum = 0;
+    for (int i = kTrim; i < kSamples - kTrim; i++) rawSum += raws[i];
+    const int avgRaw = rawSum / (kSamples - 2 * kTrim);
+
+    int adcMv = 0;
+    if (adcCali_) {
+        adc_cali_raw_to_voltage(adcCali_, avgRaw, &adcMv);
+    } else {
+        adcMv = static_cast<int>(static_cast<float>(avgRaw) * 3300.0f / 4095.0f);
+    }
+    return static_cast<int>(static_cast<float>(adcMv) * BATTERY_DIVIDER);
+}
+
 BatteryInfo PowerManager::readBattery() {
     ensureInitialized();
 
@@ -162,35 +185,31 @@ BatteryInfo PowerManager::readBattery() {
 
     if (!adcUnit_) return info;
 
-    // 16 samples, the 4 highest and 4 lowest dropped: one noisy sample (radio burst,
-    // panel charge pump) must not swing the reading toward a false low battery.
-    constexpr int kSamples = 16;
-    constexpr int kTrim = 4;
-    int raws[kSamples];
-    for (int i = 0; i < kSamples; i++) {
-        if (adc_oneshot_read(adcUnit_, ADC_CHANNEL_9, &raws[i]) != ESP_OK) {
-            return info;
-        }
+    // The battery sense divider reads near zero while the panel rail (EPD_POWER_ENABLE)
+    // is off: interactive wakes (rail on) read 94% while timer wakes (rail off until a
+    // redraw) read 0% and entered critical sleep. Read with the rail on; switch it on
+    // briefly when the panel is unpowered and restore it afterwards.
+    const gpio_num_t rail = static_cast<gpio_num_t>(EPD_POWER_ENABLE);
+    const bool railOff = gpio_get_level(rail) == 0;
+    int offMv = -1;
+    if (railOff) {
+        offMv = sampleMillivolts();
+        gpio_hold_dis(rail);
+        gpio_set_level(rail, 1);
+        vTaskDelay(pdMS_TO_TICKS(kRailSettleMs));
     }
-    std::sort(raws, raws + kSamples);
-    int rawSum = 0;
-    for (int i = kTrim; i < kSamples - kTrim; i++) rawSum += raws[i];
-    int avgRaw = rawSum / (kSamples - 2 * kTrim);
-
-    int adcMv = 0;
-    if (adcCali_) {
-        adc_cali_raw_to_voltage(adcCali_, avgRaw, &adcMv);
-    } else {
-        adcMv = static_cast<int>(static_cast<float>(avgRaw) * 3300.0f / 4095.0f);
+    const int mv = sampleMillivolts();
+    if (railOff) {
+        gpio_set_level(rail, 0);
+        ESP_LOGI(PM_TAG, "battery: %dmV with panel rail on (%dmV with it off)", mv, offMv);
     }
+    if (mv < 0) return info;
 
-    info.millivolts = static_cast<uint16_t>(
-        static_cast<float>(adcMv) * BATTERY_DIVIDER);
+    info.millivolts = static_cast<uint16_t>(mv);
     info.percent = percentFromMillivolts(info.millivolts);
     info.charging = isCharging();
 
-    ESP_LOGD(PM_TAG, "Battery: %umV → %u%%, raw=%d, adcMv=%d",
-             info.millivolts, info.percent, avgRaw, adcMv);
+    ESP_LOGD(PM_TAG, "Battery: %umV → %u%%", info.millivolts, info.percent);
     return info;
 }
 

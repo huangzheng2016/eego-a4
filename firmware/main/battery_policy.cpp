@@ -100,27 +100,15 @@ bool inNightWindow(uint64_t unix_s, int tz_offset_min, const NightWindow& window
   return true;
 }
 
-uint32_t effectiveIntervalMin(uint32_t base_min, bool battery_known, uint8_t battery_pct,
-                              uint32_t consecutive_failures) {
+uint32_t effectiveIntervalMin(uint32_t base_min, uint32_t consecutive_failures) {
   uint64_t interval = base_min == 0 ? 1 : base_min;
-  if (battery_known && battery_pct < kLowBatteryPct) interval *= 2;
   interval <<= std::min(consecutive_failures, kMaxBackoffShift);
   return static_cast<uint32_t>(std::min<uint64_t>(interval, kMaxIntervalMin));
 }
 
-bool acceptCriticalReading(uint16_t last_battery_mv, uint8_t strikes) {
-  return strikes > 0 || last_battery_mv == 0 || last_battery_mv < kPlausibleCriticalFromMv;
-}
-
 WakePlan planNextWake(const WakeInputs& in) {
   WakePlan plan;
-  if (in.battery_known && !in.charging && in.battery_pct < kCriticalBatteryPct) {
-    plan.kind = WakeKind::CriticalBattery;
-    plan.sleep_s = kCriticalRecheckS;
-    return plan;
-  }
-  plan.interval_min = effectiveIntervalMin(in.interval_min, in.battery_known, in.battery_pct,
-                                           in.consecutive_failures);
+  plan.interval_min = effectiveIntervalMin(in.interval_min, in.consecutive_failures);
   if (in.now_unix < kMinValidUnix) {
     plan.kind = WakeKind::NoClock;
     plan.sleep_s = static_cast<uint64_t>(plan.interval_min) * 60;
@@ -345,11 +333,8 @@ uint32_t rtcChecksum(const RtcState& s) {
   h = mix(h, s.ap_channel);
   h = fnv1a64(s.ap_bssid, sizeof(s.ap_bssid), h);
   h = fnv1a64(reinterpret_cast<const uint8_t*>(s.ap_ssid), sizeof(s.ap_ssid), h);
-  h = mix(h, s.low_battery_shown);
   h = mix(h, s.manual_sleep);
   h = mix(h, s.charge_suspect);
-  h = mix(h, s.critical_strikes);
-  h = mix(h, s.last_battery_mv);
   return static_cast<uint32_t>(h ^ (h >> 32));
 }
 

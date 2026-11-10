@@ -871,32 +871,4 @@ void drawBlePair(PortraitCanvas& c, const BlePairModel& m) {
   textCentered(c, geom::kInnerX, geom::kInnerW, y, line, style::kCaption);
 }
 
-void drawNoticeScreen(PortraitCanvas& c, const char* title, const char* line1,
-                      const char* line2, const char* line3) {
-  // Full-screen notices are read from across the room: headline title, scale-3 body
-  // (wrapping to two lines), the wake hint in gray.
-  c.clear();
-  c.useUiContentRect();
-  constexpr int16_t kTitleScale = 4;
-  constexpr int16_t kLineScale = 3;
-  const int16_t titleLh = lineHeight(kTitleScale);
-  const int16_t lineLh = lineHeight(kLineScale);
-  const int16_t gap = 24;
-  const int16_t blockH = static_cast<int16_t>(titleLh + gap + 4 * lineLh + 12);
-  int16_t y = static_cast<int16_t>((geom::kContentTop + geom::kContentBottom - blockH) / 2);
-  drawTextFit(c, geom::kInnerX, y, geom::kInnerW, title, kTitleScale, true, 0);
-  y = static_cast<int16_t>(y + titleLh + gap);
-  const char* lines[] = {line1, line2, line3};
-  for (int i = 0; i < 3; ++i) {
-    const char* line = lines[i];
-    if (line == nullptr || line[0] == '\0') continue;
-    const bool hint = i == 2;
-    if (hint) y = static_cast<int16_t>(y + 12);
-    const int16_t n = drawTextWrapped(c, geom::kInnerX, y, geom::kInnerW, line, kLineScale,
-                                      lineLh, i == 0 ? 2 : 1, hint ? 6 : 0, i == 0);
-    y = static_cast<int16_t>(y + std::max<int16_t>(n, 1) * lineLh);
-  }
-  c.resetClip();
-}
-
 }  // namespace panel

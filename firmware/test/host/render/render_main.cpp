@@ -370,16 +370,6 @@ int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const f
       save(std::string(asleepOnb ? "onboarding_asleep" : "onboarding") + suffix);
     }
 
-    // Low-battery notice.
-    {
-      char title[48];
-      std::snprintf(title, sizeof(title), tr(Str::LowBatteryTitle), 3u);
-      char last[64];
-      std::snprintf(last, sizeof(last), tr(Str::LastDataFmt), "11-10 08:30");
-      drawNoticeScreen(canvas, title, tr(Str::LowBatteryHint), last, tr(Str::WakeHint));
-      save(std::string("low_battery") + suffix);
-    }
-
     // Alert detail.
     canvas.clear();
     canvas.useUiContentRect();

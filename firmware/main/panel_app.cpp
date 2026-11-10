@@ -251,9 +251,6 @@ battery::WakeInputs PanelApp::wakeInputs(uint64_t now_unix) const {
   in.interval_min = settings_.battery_refresh_min;
   in.night.start_min = settings_.sleep_start_min;
   in.night.end_min = settings_.sleep_end_min;
-  in.battery_known = !externalPower() && batCache_.millivolts > 0;
-  in.battery_pct = batCache_.percent;
-  in.charging = chargingShown();
   in.consecutive_failures = battery::rtcState().consecutive_failures;
   return in;
 }
@@ -2441,42 +2438,14 @@ void PanelApp::sleepNow() {
            static_cast<int>(plan.kind), static_cast<unsigned>(plan.interval_min),
            static_cast<unsigned long long>(plan.wake_unix),
            static_cast<unsigned>(rtc.consecutive_failures));
-  battery::deepSleep(plan.sleep_s, plan.kind != battery::WakeKind::CriticalBattery);
+  battery::deepSleep(plan.sleep_s, true);
 }
 
 void PanelApp::readBatteryForSleep() {
-  battery::RtcState& rtc = battery::rtcState();
-  eego::PowerManager& pm = eego::PowerManager::instance();
+  // Read with the radios and frontlight off so the sleep frame shows an unloaded level.
   vTaskDelay(pdMS_TO_TICKS(50));
-  charging_ = pm.isCharging();
-  batCache_ = pm.readBattery();
-  if (externalPower() || chargingShown() || batCache_.millivolts == 0) {
-    rtc.critical_strikes = 0;
-    return;
-  }
-  // A low reading gets a few more quiet samples; the highest wins (sag only lowers it).
-  for (int i = 0; i < 3 && batCache_.percent < battery::kCriticalBatteryPct; ++i) {
-    vTaskDelay(pdMS_TO_TICKS(100));
-    const eego::BatteryInfo again = pm.readBattery();
-    if (again.millivolts > batCache_.millivolts) batCache_ = again;
-  }
-  if (batCache_.percent >= battery::kCriticalBatteryPct) {
-    rtc.critical_strikes = 0;
-    rtc.last_battery_mv = batCache_.millivolts;
-    return;
-  }
-  if (battery::acceptCriticalReading(rtc.last_battery_mv, rtc.critical_strikes)) {
-    ESP_LOGW(TAG, "battery critical: %umV (%u%%), previous %umV", batCache_.millivolts,
-             static_cast<unsigned>(batCache_.percent), rtc.last_battery_mv);
-    rtc.last_battery_mv = batCache_.millivolts;
-    return;
-  }
-  // Implausible drop: keep running on the last good reading; the next wake confirms.
-  ESP_LOGW(TAG, "battery reads %umV but was %umV last wake: ignoring once",
-           batCache_.millivolts, rtc.last_battery_mv);
-  ++rtc.critical_strikes;
-  batCache_.millivolts = rtc.last_battery_mv;
-  batCache_.percent = eego::PowerManager::percentFromMillivolts(rtc.last_battery_mv);
+  charging_ = eego::PowerManager::instance().isCharging();
+  batCache_ = eego::PowerManager::instance().readBattery();
 }
 
 void PanelApp::sleepByPowerKey(int64_t now) {
@@ -2543,11 +2512,6 @@ DeviceStateInfo PanelApp::sleepingState(uint64_t stamp, uint32_t interval_min) c
                                               settings_.timezone_offset_min, interval_min, night);
   }
   return info;
-}
-
-void PanelApp::drawNotice(const char* title, const char* line1, const char* line2,
-                          const char* line3) {
-  drawNoticeScreen(*deps_.canvas, title, line1, line2, line3);
 }
 
 RTC_DATA_ATTR static uint32_t s_rotateScreen = 0;
@@ -2617,7 +2581,6 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
   if (!deps_.boot.displayReady || deps_.canvas == nullptr || deps_.display == nullptr) return;
   battery::RtcState& rtc = battery::rtcState();
   battery::FrameRecord& rec = rtc.frame;
-  const bool critical = plan.kind == battery::WakeKind::CriticalBattery;
   const bool night = plan.kind == battery::WakeKind::NightPause;
   const bool panel_known = fastWake_ && rec.valid != 0;
   const uint32_t interval = plan.interval_min != 0 ? plan.interval_min : settings_.battery_refresh_min;
@@ -2636,19 +2599,7 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
 
   bool skip = false;
   uint64_t hash = 0;
-  if (critical) {
-    char title[48];
-    char last[64];
-    char when[24];
-    snprintf(title, sizeof(title), tr(Str::LowBatteryTitle),
-             static_cast<unsigned>(batCache_.percent));
-    formatTs(rtc.last_data_unix >= battery::kMinValidUnix ? rtc.last_data_unix : rec.refresh_unix,
-             when, sizeof(when));
-    snprintf(last, sizeof(last), tr(Str::LastDataFmt), when);
-    drawNotice(title, tr(Str::LowBatteryHint), last, tr(Str::WakeHint));
-    hash = frameHash();
-    skip = panel_known && rtc.low_battery_shown != 0 && hash == rec.hash;
-  } else if (dashboard_.available()) {
+  if (dashboard_.available()) {
     if (!fastWake_) {
       const bool keep_screen = manualSleep_ && page_ == Page::Dashboard;
       page_ = Page::Dashboard;
@@ -2728,7 +2679,7 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
     previous_loaded = displayedThisBoot_;
   }
   const battery::RefreshAction action =
-      battery::refreshMode(rec, now_unix, previous_loaded, critical);
+      battery::refreshMode(rec, now_unix, previous_loaded, false);
   if (action == battery::RefreshAction::Fast && previous_loaded && previous != nullptr) {
     deps_.display->setPreviousFrame(previous);
   }
@@ -2743,7 +2694,6 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
 
   battery::noteRefreshed(rec, action, hash, slot, now_unix);
   rtc.battery_bucket = static_cast<int16_t>(bucket);
-  rtc.low_battery_shown = critical ? 1 : 0;
   if (!battery::storeFrame(deps_.display->framebuffer(), eego::FRAMEBUFFER_SIZE, hash)) {
     ESP_LOGW(TAG, "frame not stored: next wake uses a full refresh");
   }

@@ -24,8 +24,6 @@ WakeInputs inputs(uint64_t now, uint32_t interval = 15) {
   in.now_unix = now;
   in.tz_offset_min = kTz;
   in.interval_min = interval;
-  in.battery_known = true;
-  in.battery_pct = 80;
   return in;
 }
 
@@ -89,39 +87,13 @@ TEST(battery_policy, next_wake_on_boundary_and_early_wake_tolerance) {
   }
 }
 
-TEST(battery_policy, low_battery_doubles_and_critical_rechecks_hourly) {
-  WakeInputs in = inputs(kBase + 20);
-  in.battery_pct = 19;
-  WakePlan p = planNextWake(in);
-  CHECK_EQ(p.interval_min, 30u);
-  CHECK_EQ(p.wake_unix, kBase + 30 * kMinS);
-  in.battery_pct = 4;
-  p = planNextWake(in);
-  CHECK(p.kind == WakeKind::CriticalBattery);
-  CHECK_EQ(p.sleep_s, kCriticalRecheckS);
-  // Charging never counts as critical; unknown battery is not scaled.
-  in.charging = true;
-  CHECK(planNextWake(in).kind == WakeKind::Boundary);
-  in.charging = false;
-  in.battery_known = false;
-  CHECK_EQ(planNextWake(in).interval_min, 15u);
-}
-
-TEST(battery_policy, critical_reading_needs_plausibility) {
-  // 95% one wake, "0%" the next: a glitch until a second wake confirms it.
-  CHECK(!acceptCriticalReading(4070, 0));
-  CHECK(acceptCriticalReading(4070, 1));
-  CHECK(acceptCriticalReading(3400, 0));
-  CHECK(acceptCriticalReading(0, 0));
-}
-
 TEST(battery_policy, failure_backoff_is_capped) {
-  CHECK_EQ(effectiveIntervalMin(15, true, 80, 0), 15u);
-  CHECK_EQ(effectiveIntervalMin(15, true, 80, 1), 30u);
-  CHECK_EQ(effectiveIntervalMin(15, true, 80, 2), 60u);
-  CHECK_EQ(effectiveIntervalMin(15, true, 80, 3), 120u);
-  CHECK_EQ(effectiveIntervalMin(15, true, 80, 9), 120u);
-  CHECK_EQ(effectiveIntervalMin(60, true, 10, 9), kMaxIntervalMin);
+  CHECK_EQ(effectiveIntervalMin(15, 0), 15u);
+  CHECK_EQ(effectiveIntervalMin(15, 1), 30u);
+  CHECK_EQ(effectiveIntervalMin(15, 2), 60u);
+  CHECK_EQ(effectiveIntervalMin(15, 3), 120u);
+  CHECK_EQ(effectiveIntervalMin(15, 9), 120u);
+  CHECK_EQ(effectiveIntervalMin(60, 9), kMaxIntervalMin);
   WakeInputs in = inputs(kBase + 20);
   in.consecutive_failures = 2;
   CHECK_EQ(planNextWake(in).wake_unix, kBase + kHourS);

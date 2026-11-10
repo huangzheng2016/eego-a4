@@ -203,10 +203,6 @@ int16_t drawTextWrapped(eego::PortraitCanvas& c, int16_t x, int16_t y, int16_t m
 
 int16_t lineHeight(int16_t scale);
 
-// Full-screen notice (low battery etc.): big title, scale-3 lines; line3 is a gray hint.
-void drawNoticeScreen(eego::PortraitCanvas& c, const char* title, const char* line1,
-                      const char* line2, const char* line3);
-
 uint8_t severityFillGray(uint8_t severity);
 uint8_t severityTextGray(uint8_t severity);
 

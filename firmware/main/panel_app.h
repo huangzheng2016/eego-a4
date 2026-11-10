@@ -219,7 +219,6 @@ class PanelApp {
   [[noreturn]] void sleepNow();
   void presentSleepFrame(const battery::WakePlan& plan, uint64_t nowUnix);
   DeviceStateInfo sleepingState(uint64_t stamp, uint32_t intervalMin) const;
-  void drawNotice(const char* title, const char* line1, const char* line2, const char* line3);
   uint64_t frameHash() const;
   bool batchSucceeded() const;
 

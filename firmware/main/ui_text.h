@@ -123,9 +123,6 @@ enum class Lang : uint8_t {
   X(BatStatusFmt, "电量 %u%% · 更新于 %02d:%02d · 最迟 %02d:%02d", "BAT %u%% · UPDATED %02d:%02d · BY %02d:%02d") \
   X(BatStatusNoClockFmt, "电量 %u%% · 时间不可用", "BAT %u%% · NO CLOCK") \
   X(NightPauseFmt, "夜间暂停 · %02d:%02d 恢复", "NIGHT PAUSE · RESUMES %02d:%02d") \
-  X(LowBatteryTitle, "电量过低（%u%%）", "BATTERY LOW (%u%%)") \
-  X(LowBatteryHint, "已暂停更新，充电后自动恢复", "UPDATES PAUSED; RESUME WHEN CHARGED") \
-  X(LastDataFmt, "最后更新 %s", "LAST UPDATE %s") \
   X(SetFrontlight, "前光", "FRONTLIGHT") \
   X(SetMutes, "静音列表", "MUTED LIST") \
   X(SetPollNow, "立即刷新数据", "REFRESH NOW") \
@@ -147,7 +144,6 @@ enum class Lang : uint8_t {
   X(ProvClosed, "设置热点已关闭 · 设置 → 开启设置热点", "SETUP HOTSPOT CLOSED · SETTINGS → SETUP HOTSPOT") \
   X(Busy, "忙，请稍后重试", "BUSY; TRY AGAIN") \
   X(Sleeping, "电池 · 休眠中", "ON BATTERY · ASLEEP") \
-  X(WakeHint, "按电源键唤醒", "PRESS POWER TO WAKE") \
   X(OnbOpen, "在浏览器中打开", "OPEN IN A BROWSER") \
   X(OnbNoAddress, "等待网络连接…", "WAITING FOR NETWORK…") \
   X(OnbStep1, "1. 电脑或手机连接与本机相同的网络", "1. Join the same network as this device") \
