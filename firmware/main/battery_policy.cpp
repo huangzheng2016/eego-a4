@@ -108,10 +108,15 @@ uint32_t effectiveIntervalMin(uint32_t base_min, bool battery_known, uint8_t bat
   return static_cast<uint32_t>(std::min<uint64_t>(interval, kMaxIntervalMin));
 }
 
+bool acceptCriticalReading(uint16_t last_battery_mv, uint8_t strikes) {
+  return strikes > 0 || last_battery_mv == 0 || last_battery_mv < kPlausibleCriticalFromMv;
+}
+
 WakePlan planNextWake(const WakeInputs& in) {
   WakePlan plan;
   if (in.battery_known && !in.charging && in.battery_pct < kCriticalBatteryPct) {
     plan.kind = WakeKind::CriticalBattery;
+    plan.sleep_s = kCriticalRecheckS;
     return plan;
   }
   plan.interval_min = effectiveIntervalMin(in.interval_min, in.battery_known, in.battery_pct,
@@ -343,6 +348,8 @@ uint32_t rtcChecksum(const RtcState& s) {
   h = mix(h, s.low_battery_shown);
   h = mix(h, s.manual_sleep);
   h = mix(h, s.charge_suspect);
+  h = mix(h, s.critical_strikes);
+  h = mix(h, s.last_battery_mv);
   return static_cast<uint32_t>(h ^ (h >> 32));
 }
 

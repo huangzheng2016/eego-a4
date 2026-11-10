@@ -207,20 +207,14 @@ int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const f
     bar.charging = true;
     bar.wifiState = 2;
     bar.state = DeviceState::KeepAwake;
-    std::snprintf(bar.stateText, sizeof(bar.stateText), "%s", deviceStateLabel(keep, kTz).c_str());
-    std::snprintf(bar.stateShort, sizeof(bar.stateShort), "%s",
-                  deviceStateLabels(keep, kTz)[1].c_str());
+    bar.stateLabels = deviceStateLabels(keep, kTz);
     drawStatusBar(canvas, bar);
     KvModel kv;
     auto big = [&](Str label, std::string value) {
       kv.rows.emplace_back(tr(label), std::move(value));
-      kv.big.resize(kv.rows.size(), false);
-      kv.big.back() = true;
     };
     auto heading = [&](Str label) {
       kv.rows.emplace_back(tr(label), "");
-      kv.big.resize(kv.rows.size(), false);
-      kv.big.back() = true;  // section headings: body-size bold
     };
     heading(Str::SecPower);
     PowerStatusInput power;
@@ -232,8 +226,6 @@ int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const f
     power.state = keep;
     for (auto& row : powerStatusRows(power, kTz)) {
       kv.rows.emplace_back(row.first, row.second);
-      kv.big.resize(kv.rows.size(), false);
-      kv.big.back() = true;
     }
     big(Str::LblWakeReason, tr(Str::WakeReset));
     char sleeps[48];
@@ -260,12 +252,9 @@ int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const f
     heading(Str::SecNetwork);
     big(Str::LblWifi, tr(Str::WifiOffline));
     kv.rows.emplace_back("HydrogenSH", std::string(eego::net::wifiReasonShort(2, en)) + " (2)");
-    kv.big.resize(kv.rows.size(), true);
     kv.rows.emplace_back("office-2g", std::string(eego::net::wifiReasonShort(201, en)) + " (201) · " +
                                           tr(Str::WifiNotSeen));
-    kv.big.resize(kv.rows.size(), true);
     kv.rows.emplace_back("phone-ap", tr(Str::WifiNotTried));
-    kv.big.resize(kv.rows.size(), true);
     big(Str::ApFallback, "EEGO-A4-Setup");
     big(Str::WifiDiag, "192.168.4.1/wifi-diag");
     big(Str::TimeLabel, "SNTP · 10-25 10:01");
@@ -280,9 +269,7 @@ int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const f
     canvas.useUiContentRect();
     bar.state = DeviceState::Idle;
     bar.charging = false;  // external power, battery full: plug, no bolt
-    std::snprintf(bar.stateText, sizeof(bar.stateText), "%s", deviceStateLabel(idle, kTz).c_str());
-    std::snprintf(bar.stateShort, sizeof(bar.stateShort), "%s",
-                  deviceStateLabels(idle, kTz)[1].c_str());
+    bar.stateLabels = deviceStateLabels(idle, kTz);
     drawStatusBar(canvas, bar);
     S4Model s4;
     S4RowModel row;
@@ -312,9 +299,7 @@ int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const f
     canvas.useUiContentRect();
     bar.mains = false;
     bar.state = DeviceState::Awake;
-    std::snprintf(bar.stateText, sizeof(bar.stateText), "%s", deviceStateLabel(awake, kTz).c_str());
-    std::snprintf(bar.stateShort, sizeof(bar.stateShort), "%s",
-                  deviceStateLabels(awake, kTz)[1].c_str());
+    bar.stateLabels = deviceStateLabels(awake, kTz);
     drawStatusBar(canvas, bar);
     kv = KvModel{};
     heading(Str::SecPower);
@@ -327,8 +312,6 @@ int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const f
     power.sleep_timeout_s = 60;
     for (auto& row : powerStatusRows(power, kTz)) {
       kv.rows.emplace_back(row.first, row.second);
-      kv.big.resize(kv.rows.size(), false);
-      kv.big.back() = true;
     }
     big(Str::LblWakeReason, tr(Str::WakeReset));
     big(Str::LblSleeps, sleeps);
@@ -337,6 +320,93 @@ int renderDeviceScreens(PortraitCanvas& canvas, Uc8279cDisplay& display, const f
     drawSoftKeys(canvas, keys, 3, 1);
     canvas.resetClip();
     save(std::string("status_page_battery") + suffix);
+
+    // Night pause + WiFi off + BLE pill: the longest label must degrade to a
+    // shorter one, never to a truncated "夜间暂停 · 06...".
+    DeviceStateInfo night;
+    night.state = DeviceState::NightPause;
+    night.next_unix = kSampleUnix + 20 * 3600;
+    canvas.clear();
+    canvas.useUiContentRect();
+    bar = StatusBarModel{};
+    std::snprintf(bar.timeText, sizeof(bar.timeText), "23:41");
+    bar.batPercent = 47;
+    bar.batMv = 3820;
+    bar.mains = false;
+    bar.wifiState = 0;
+    bar.bleLinked = true;
+    bar.mutedCount = 2;
+    bar.state = DeviceState::NightPause;
+    bar.stateLabels = deviceStateLabels(night, kTz);
+    drawStatusBar(canvas, bar);
+    KvModel help;
+    help.rows = helpRows();
+    drawHelp(canvas, help);
+    drawSoftKeys(canvas, keys, 3, 2);
+    canvas.resetClip();
+    save(std::string("help_night") + suffix);
+
+    // Onboarding awake (LAN) and asleep, with a long banner over the bar.
+    for (const bool asleepOnb : {false, true}) {
+      canvas.clear();
+      canvas.useUiContentRect();
+      bar = StatusBarModel{};
+      std::snprintf(bar.timeText, sizeof(bar.timeText), "10:05");
+      bar.batPercent = 62;
+      bar.batMv = 3870;
+      bar.mains = false;
+      bar.wifiState = asleepOnb ? 0 : 2;
+      bar.state = asleepOnb ? DeviceState::Sleeping : DeviceState::Awake;
+      bar.stateLabels = deviceStateLabels(asleepOnb ? asleep : awake, kTz);
+      if (asleepOnb) std::snprintf(bar.banner, sizeof(bar.banner), "%s", tr(Str::WifiResetDone));
+      drawStatusBar(canvas, bar);
+      OnboardingModel onb;
+      onb.url = "http://192.168.1.50/";
+      onb.network = "office-2g";
+      onb.asleep = asleepOnb;
+      drawOnboarding(canvas, onb);
+      drawBanner(canvas, bar);
+      canvas.resetClip();
+      save(std::string(asleepOnb ? "onboarding_asleep" : "onboarding") + suffix);
+    }
+
+    // Low-battery notice.
+    {
+      char title[48];
+      std::snprintf(title, sizeof(title), tr(Str::LowBatteryTitle), 3u);
+      char last[64];
+      std::snprintf(last, sizeof(last), tr(Str::LastDataFmt), "11-10 08:30");
+      drawNoticeScreen(canvas, title, tr(Str::LowBatteryHint), last, tr(Str::WakeHint));
+      save(std::string("low_battery") + suffix);
+    }
+
+    // Alert detail.
+    canvas.clear();
+    canvas.useUiContentRect();
+    bar = StatusBarModel{};
+    std::snprintf(bar.timeText, sizeof(bar.timeText), "10:05");
+    bar.batPercent = 62;
+    bar.batMv = 3870;
+    bar.mains = true;
+    bar.wifiState = 1;
+    bar.portalOpen = true;
+    bar.state = DeviceState::KeepAwake;
+    bar.stateLabels = deviceStateLabels(keep, kTz);
+    drawStatusBar(canvas, bar);
+    AlertDetailModel ad;
+    ad.severity = 2;
+    std::snprintf(ad.position, sizeof(ad.position), "2/5");
+    ad.typeName = "auth";
+    ad.title = en ? "Repeated authentication failures" : "多次认证失败";
+    ad.message = en ? "18 failures from one LAN client in the last 10 minutes; the client was blocked."
+                    : "过去 10 分钟内同一局域网客户端失败 18 次，已自动封禁该客户端。";
+    ad.meta = {{tr(Str::LblRule), "auth-burst"}, {tr(Str::LblTime), "11-09 10:01"},
+               {tr(Str::LblLastSeen), en ? "4 min ago" : "4 分钟前"}};
+    ad.fields = {{"client", "192.168.1.77"}, {"count", "18"}};
+    drawAlertDetail(canvas, ad);
+    drawSoftKeys(canvas, keys, 3, 0);
+    canvas.resetClip();
+    save(std::string("alert_detail") + suffix);
   }
   setLang(Lang::Zh);
   return failures;

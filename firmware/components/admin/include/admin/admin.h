@@ -42,6 +42,8 @@ struct AdminConfig {
 esp_err_t startAdminApi(const AdminConfig& cfg);
 bool adminApiRunning();
 int64_t lastAuthenticatedRequestMs();
+// Same, but only requests that arrived over WiFi (not the BLE loopback bridge).
+int64_t lastWifiAdminRequestMs();
 
 struct TimeSetResult {
   bool applied = false;

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <ctime>
 #include <vector>
 
 #include "battery_policy.h"
@@ -73,11 +74,16 @@ std::vector<std::string> deviceStateLabels(const DeviceStateInfo& info, int tz) 
       snprintf(buf, sizeof(buf), tr(Str::StateKeepAwakeShortFmt),
                static_cast<unsigned>(std::max<uint32_t>(1, info.keep_awake_min)));
       out.emplace_back(buf);
+      snprintf(buf, sizeof(buf), tr(Str::StateMinFmt),  // the icon says "keep awake"
+               static_cast<unsigned>(std::max<uint32_t>(1, info.keep_awake_min)));
+      out.emplace_back(buf);
       break;
     case DeviceState::Idle:
       if (clockValid(info.next_unix)) {
         battery::localHourMinute(info.next_unix, tz, h, m);
         snprintf(buf, sizeof(buf), tr(Str::StateIdleShortFmt), h, m);
+        out.emplace_back(buf);
+        snprintf(buf, sizeof(buf), tr(Str::StateClockFmt), h, m);  // clock icon = next refresh
         out.emplace_back(buf);
       }
       break;
@@ -102,12 +108,23 @@ std::vector<std::string> deviceStateLabels(const DeviceStateInfo& info, int tz) 
   return out;
 }
 
-std::string updatedLabel(uint64_t unix_s, int tz) {
+std::string updatedLabel(uint64_t unix_s, int tz, uint64_t now_unix) {
   if (!clockValid(unix_s)) return tr(Str::UpdatedNoClock);
   int h = 0;
   int m = 0;
   battery::localHourMinute(unix_s, tz, h, m);
   char buf[48];
+  const int64_t offset = static_cast<int64_t>(tz) * 60;
+  const int64_t local = static_cast<int64_t>(unix_s) + offset;
+  if (clockValid(now_unix) &&
+      local / 86400 != (static_cast<int64_t>(now_unix) + offset) / 86400) {
+    // Not from today: a bare HH:MM would read as fresh.
+    const time_t t = static_cast<time_t>(local);
+    struct tm tm_buf;
+    gmtime_r(&t, &tm_buf);
+    snprintf(buf, sizeof(buf), tr(Str::UpdatedDateFmt), tm_buf.tm_mon + 1, tm_buf.tm_mday, h, m);
+    return buf;
+  }
   snprintf(buf, sizeof(buf), tr(Str::UpdatedFmt), h, m);
   return buf;
 }

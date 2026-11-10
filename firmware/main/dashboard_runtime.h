@@ -90,7 +90,10 @@ class DashboardRuntime {
   void cancelBatteryCycle();
   bool networkIdle() const;
   void setDeviceState(const DeviceStateInfo& info, int tz_offset_min);
-  void setSleepFrame(bool enabled, uint64_t stamp_unix = 0, int battery_pct = -1);
+  // failed: the last fetch failed, so stamp_unix is the last good data time and
+  // the status line says so.
+  void setSleepFrame(bool enabled, uint64_t stamp_unix = 0, int battery_pct = -1,
+                     bool failed = false);
   void renderOffscreen();
   void setMains(bool mains);
   void invalidateAll();

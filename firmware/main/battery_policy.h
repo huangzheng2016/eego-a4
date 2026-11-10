@@ -15,6 +15,13 @@ inline constexpr uint32_t kFullEvery = 12;
 inline constexpr uint64_t kFullMaxAgeS = 86400;
 inline constexpr uint8_t kLowBatteryPct = 20;
 inline constexpr uint8_t kCriticalBatteryPct = 5;
+// Critical sleep still wakes on this timer: a radio-free voltage check (~0.2 s) that
+// resumes normal operation once charging or back above kCriticalExitPct.
+inline constexpr uint64_t kCriticalRecheckS = 3600;
+inline constexpr uint8_t kCriticalExitPct = 8;
+// A battery last read at or above this cannot be critical one wake later: such a
+// reading is a glitch (radio load, ADC noise) until a second wake confirms it.
+inline constexpr uint16_t kPlausibleCriticalFromMv = 3600;
 inline constexpr uint32_t kMaxIntervalMin = 240;
 inline constexpr uint32_t kMaxBackoffShift = 3;
 inline constexpr uint64_t kEarlyWakeToleranceS = 90;
@@ -132,17 +139,23 @@ struct RtcState {
   uint8_t low_battery_shown = 0;
   uint8_t manual_sleep = 0;
   uint8_t charge_suspect = 0;
+  uint8_t critical_strikes = 0;
+  uint16_t last_battery_mv = 0;
   uint32_t checksum = 0;
 };
 
 inline constexpr uint32_t kRtcMagic = 0x45424154u;  // "TABE"
-inline constexpr uint32_t kRtcVersion = 3;
+inline constexpr uint32_t kRtcVersion = 4;
 
 void rtcReset(RtcState& state);
 void rtcSeal(RtcState& state);
 bool rtcValid(const RtcState& state);
 
 bool mainsPowered(uint8_t power_mode, bool charging, uint16_t battery_mv);
+
+// A critical reading is acted on only when it is plausible: the previous accepted
+// reading was already low (or unknown), or an earlier wake already saw it (strikes).
+bool acceptCriticalReading(uint16_t last_battery_mv, uint8_t strikes);
 
 //
 //

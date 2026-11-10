@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "power_manager.h"
+
+#include <algorithm>
 #include "frontlight.h"
 
 #include <esp_log.h>
@@ -160,16 +162,20 @@ BatteryInfo PowerManager::readBattery() {
 
     if (!adcUnit_) return info;
 
-    int rawSum = 0;
-    const int samples = 4;
-    for (int i = 0; i < samples; i++) {
-        int raw = 0;
-        if (adc_oneshot_read(adcUnit_, ADC_CHANNEL_9, &raw) != ESP_OK) {
+    // 16 samples, the 4 highest and 4 lowest dropped: one noisy sample (radio burst,
+    // panel charge pump) must not swing the reading toward a false low battery.
+    constexpr int kSamples = 16;
+    constexpr int kTrim = 4;
+    int raws[kSamples];
+    for (int i = 0; i < kSamples; i++) {
+        if (adc_oneshot_read(adcUnit_, ADC_CHANNEL_9, &raws[i]) != ESP_OK) {
             return info;
         }
-        rawSum += raw;
     }
-    int avgRaw = rawSum / samples;
+    std::sort(raws, raws + kSamples);
+    int rawSum = 0;
+    for (int i = kTrim; i < kSamples - kTrim; i++) rawSum += raws[i];
+    int avgRaw = rawSum / (kSamples - 2 * kTrim);
 
     int adcMv = 0;
     if (adcCali_) {

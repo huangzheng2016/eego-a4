@@ -40,6 +40,8 @@ private:
     void detectLm3630a();
     void configureChargePin();
     void ensureInitialized();
+
+public:
     static uint8_t percentFromMillivolts(uint16_t mv);
 };
 

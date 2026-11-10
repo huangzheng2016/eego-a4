@@ -22,15 +22,24 @@ struct TextStyle {
   uint8_t gray;
 };
 
+// Text size standard for every device-drawn screen: nothing is drawn below
+// kMinTextScale (2x the 6 pt UI font, the size of "唤醒后才能打开管理地址").
+// Hierarchy comes from bold, gray and scale 3, never from smaller text;
+// drawTextFit/drawTextWrapped clamp to it. Long text wraps or truncates.
+constexpr int16_t kMinTextScale = 2;
+
 namespace style {
 constexpr TextStyle kTitle{2, true, 0};
 constexpr TextStyle kBody{2, false, 0};
 constexpr TextStyle kBodyStrong{2, true, 0};
 constexpr TextStyle kBodyMuted{2, false, 6};
-constexpr TextStyle kCaption{1, false, 6};
-constexpr TextStyle kCaptionStrong{1, true, 0};
-constexpr TextStyle kSmall{1, false, 0};
+constexpr TextStyle kCaption{2, false, 6};
+constexpr TextStyle kCaptionStrong{2, true, 0};
+constexpr TextStyle kSmall{2, false, 0};
 constexpr TextStyle kHeadline{3, true, 0};
+static_assert(kCaption.scale >= kMinTextScale && kCaptionStrong.scale >= kMinTextScale &&
+                  kSmall.scale >= kMinTextScale && kBodyMuted.scale >= kMinTextScale,
+              "device text never goes below kMinTextScale");
 }  // namespace style
 
 namespace geom {
@@ -63,23 +72,24 @@ constexpr int16_t kInnerX = kContentX + kPadX;                           // 40
 constexpr int16_t kInnerW = kContentW - 2 * kPadX;                       // 472
 constexpr int16_t kInnerRight = kInnerX + kInnerW;                       // 512
 
-constexpr int16_t kBannerH = 28;
-constexpr int16_t kTitleY = kContentTop + kBannerH + 4;                  // 108
+// Transient banners are drawn over the status bar, so pages start right below it.
+constexpr int16_t kTitleY = kContentTop + 4;                             // 80
 constexpr int16_t kTitleH = 40;
-constexpr int16_t kBodyTop = kTitleY + kTitleH + 4;                      // 152
+constexpr int16_t kBodyTop = kTitleY + kTitleH + 4;                      // 124
 
 constexpr int16_t kSevChip = 48;
 
-constexpr size_t kStatusRowsPerPage = 16;
+// Status page rows are paginated by pixel height (kvRowHeight) within this.
+constexpr int16_t kKvBodyH = kContentBottom - kBodyTop;
 
 constexpr int16_t kSettingsRowsPerPage = 8;
-constexpr int16_t kSettingsRowTop = kBodyTop;                            // 152
+constexpr int16_t kSettingsRowTop = kBodyTop;                            // 124
 constexpr int16_t kSettingsRowPitch = 58;
 constexpr int16_t kSettingsRowH = 54;
 constexpr int16_t kSettingsValueX0 = kContentX + kContentW / 2;           // 276
 constexpr int16_t kSettingsValueX1 = kContentX + kContentW - kRowPadX - 16 - 8;
 constexpr int16_t kSettingsPagerY =
-    kSettingsRowTop + kSettingsRowsPerPage * kSettingsRowPitch + 4;      // 620
+    kSettingsRowTop + kSettingsRowsPerPage * kSettingsRowPitch + 4;      // 592
 constexpr int16_t kSettingsPagerH = 48;
 static_assert(kSettingsPagerY + kSettingsPagerH <= kContentBottom,
               "S4 rows + pager must end above the soft-key bar");
@@ -88,8 +98,8 @@ static_assert(kSettingsPagerY + kSettingsPagerH <= kContentBottom,
 struct StatusBarModel {
   char timeText[24] = "--:--";
   DeviceState state = DeviceState::Running;
-  char stateText[96] = "";
-  char stateShort[64] = "";
+  // Longest first (deviceStateLabels); the bar shows the first one that fits.
+  std::vector<std::string> stateLabels;
   uint8_t batPercent = 0;
   uint16_t batMv = 0;
   bool charging = false;
@@ -161,6 +171,9 @@ struct ProvisionModel {
 };
 
 void drawStatusBar(eego::PortraitCanvas& c, const StatusBarModel& m);
+// Draws m.banner (if any) over the status bar; call after the page so a
+// two-line banner stays on top.
+void drawBanner(eego::PortraitCanvas& c, const StatusBarModel& m);
 void drawSoftKeys(eego::PortraitCanvas& c, const SoftKeyModel* keys, size_t n,
                   size_t focused);
 
@@ -168,12 +181,18 @@ void drawOnboarding(eego::PortraitCanvas& c, const OnboardingModel& m);
 void drawAlertDetail(eego::PortraitCanvas& c, const AlertDetailModel& m);
 void drawStatus(eego::PortraitCanvas& c, const KvModel& m);
 void drawS4(eego::PortraitCanvas& c, const S4Model& m);
+std::vector<std::pair<std::string, std::string>> helpRows();
 void drawHelp(eego::PortraitCanvas& c, const KvModel& m);
 void drawProvision(eego::PortraitCanvas& c, const ProvisionModel& m);
 void drawBlePair(eego::PortraitCanvas& c, const BlePairModel& m);
 void drawPoweredOff(eego::PortraitCanvas& c);
 
 void sanitizeClamped(std::string& s, size_t maxChars);
+
+// Key/value lists: label column width for a set of rows, and the pixel height
+// drawKvList uses for one row (heading when value is empty).
+int16_t kvLabelWidth(const std::vector<std::pair<std::string, std::string>>& rows);
+int16_t kvRowHeight(const std::string& value, int16_t labelW);
 
 int16_t drawTextFit(eego::PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW,
                     const char* text, int16_t scale, bool bold, uint8_t gray = 0);
@@ -183,6 +202,10 @@ int16_t drawTextWrapped(eego::PortraitCanvas& c, int16_t x, int16_t y, int16_t m
                         uint8_t gray = 0, bool bold = false);
 
 int16_t lineHeight(int16_t scale);
+
+// Full-screen notice (low battery etc.): big title, scale-3 lines; line3 is a gray hint.
+void drawNoticeScreen(eego::PortraitCanvas& c, const char* title, const char* line1,
+                      const char* line2, const char* line3);
 
 uint8_t severityFillGray(uint8_t severity);
 uint8_t severityTextGray(uint8_t severity);

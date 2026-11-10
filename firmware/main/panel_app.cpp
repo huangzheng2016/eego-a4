@@ -175,9 +175,9 @@ void PanelApp::applySettings(uint32_t changed) {
     eego::FrontlightManager& frontlight = eego::FrontlightManager::instance();
     if (frontlight.frontlightAvailable()) {
       frontlight.setWarm(settings_.frontlight_warmth);
-      frontlight.setBrightness(settings_.frontlight_enabled
-                                   ? settings_.frontlight_brightness
-                                   : 0);
+      // A timed battery wake is unattended: keep the light off until a key wake.
+      const bool lit = settings_.frontlight_enabled && battPhase_ != BattPhase::Fetching;
+      frontlight.setBrightness(lit ? settings_.frontlight_brightness : 0);
     }
   }
   if ((changed & eego::settings::kChangedFrontlightHardware) != 0) {
@@ -251,7 +251,7 @@ battery::WakeInputs PanelApp::wakeInputs(uint64_t now_unix) const {
   in.interval_min = settings_.battery_refresh_min;
   in.night.start_min = settings_.sleep_start_min;
   in.night.end_min = settings_.sleep_end_min;
-  in.battery_known = !mains_ && batCache_.millivolts > 0;
+  in.battery_known = !externalPower() && batCache_.millivolts > 0;
   in.battery_pct = batCache_.percent;
   in.charging = chargingShown();
   in.consecutive_failures = battery::rtcState().consecutive_failures;
@@ -383,7 +383,7 @@ void PanelApp::service() {
   serviceApFallback(now);
   serviceKeepAwake(now);
   if (!mains_ &&
-      eego::net::wifiAdminActive(now, admin::lastAuthenticatedRequestMs()) != adminActivePs_) {
+      eego::net::wifiAdminActive(now, admin::lastWifiAdminRequestMs()) != adminActivePs_) {
     applyWifiPowerSave();
   }
 
@@ -460,7 +460,10 @@ void PanelApp::service() {
     if (eego::net::wifiAdminActive(now, last_admin)) {
       eego::ble::BleManager::instance().deferObserverUntil(last_admin +
                                                            eego::net::kWifiAdminActiveMs);
-      NetStack::instance().wifi().deferRoamUntil(last_admin + eego::net::kWifiAdminActiveMs);
+      const int64_t wifi_admin = admin::lastWifiAdminRequestMs();
+      if (eego::net::wifiAdminActive(now, wifi_admin)) {
+        NetStack::instance().wifi().deferRoamUntil(wifi_admin + eego::net::kWifiAdminActiveMs);
+      }
     }
     eego::ble::BleManager::instance().setAdminAllowed(
         settings_.ble_admin_enabled && !sleepPending_ &&
@@ -719,8 +722,13 @@ void PanelApp::handleButton(const eego::ButtonEvent& ev) {
       clearConfirm();
     }
     if (ev.id == eego::ButtonId::Power) {
+      // On soft-key pages the power key only "selects" once the user has moved
+      // focus there; otherwise it sleeps (as Help says), so it can never ack an
+      // alert or toggle something by accident.
+      const bool softKeyPage = page_ == Page::Onboarding || page_ == Page::AlertDetail ||
+                               page_ == Page::Status || page_ == Page::Help;
       const std::string focused =
-          page_ == Page::Onboarding && !softFocusMoved_ ? std::string() : focusedControl();
+          softKeyPage && !softFocusMoved_ ? std::string() : focusedControl();
       if (!focused.empty() && page_ != Page::Provision) {
         activeInputControl_ = focused;
         activateFocused();
@@ -2168,7 +2176,7 @@ void PanelApp::clearConfirm() {
   confirmState_.cancel();
   confirmDashboard_ = DashboardConfirmRequest{};
   if (banner_ == tr(Str::ConfirmPress) || banner_ == tr(Str::ConfirmPhysicalPress) ||
-      banner_ == tr(Str::ConfirmShutdown)) {
+      banner_ == tr(Str::ConfirmShutdown) || banner_ == tr(Str::ConfirmSleep)) {
     banner_.clear();
   }
   if (page_ == Page::Dashboard) dashboard_.showStatusMessage("", 1);
@@ -2218,7 +2226,9 @@ void PanelApp::onModeChange(bool mains) {
   eego::ble::BleManager::instance().onPowerMode(mains);
   eego::ble::BleManager::instance().setBatteryScanWindow(false);
   if (mains) {
+    const bool wasFetching = battPhase_ == BattPhase::Fetching;
     battPhase_ = BattPhase::Mains;
+    if (wasFetching) applySettings(eego::settings::kChangedFrontlight);
     sleepPending_ = false;
     sleepIdleWait_.active = false;
     NetStack::instance().reconnectNow();
@@ -2232,13 +2242,15 @@ void PanelApp::onModeChange(bool mains) {
 
 void PanelApp::applyWifiPowerSave() {
   const int64_t now = nowMs();
-  adminActivePs_ = eego::net::wifiAdminActive(now, admin::lastAuthenticatedRequestMs());
+  adminActivePs_ = eego::net::wifiAdminActive(now, admin::lastWifiAdminRequestMs());
   NetStack::instance().wifi().setPowerSave(eego::net::wifiModemSleepWanted(
       mains_, keepAwakeUntil(now) != 0, battPhase_ == BattPhase::Interactive, adminActivePs_));
 }
 
 void PanelApp::enterInteractive(int64_t now) {
+  const bool wasFetching = battPhase_ == BattPhase::Fetching;
   battPhase_ = BattPhase::Interactive;
+  if (wasFetching) applySettings(eego::settings::kChangedFrontlight);
   phaseStartMs_ = now;
   batchStarted_ = false;
   noteInteraction(now);
@@ -2370,7 +2382,8 @@ void PanelApp::serviceSleep(int64_t now) {
 }
 
 bool PanelApp::batchSucceeded() const {
-  if (!wifiSeen_) return false;
+  // Data can arrive through the eego-link agent over BLE without WiFi.
+  if (!wifiSeen_ && !agentSeen_) return false;
   const int64_t since_ms = static_cast<int64_t>(wakeStartUnix_) * 1000;
   size_t enabled = 0;
   for (const DashboardSourceInfo& source : dashboard_.sources()) {
@@ -2383,8 +2396,6 @@ bool PanelApp::batchSucceeded() const {
 
 void PanelApp::sleepNow() {
   battery::RtcState& rtc = battery::rtcState();
-  charging_ = eego::PowerManager::instance().isCharging();
-  batCache_ = eego::PowerManager::instance().readBattery();
   const uint64_t now_unix = TimeSource::valid() ? TimeSource::now() : 0;
 
   if (!mains_ && batchStarted_) {
@@ -2395,7 +2406,6 @@ void PanelApp::sleepNow() {
       ++rtc.consecutive_failures;
     }
   }
-  const battery::WakePlan plan = battery::planNextWake(wakeInputs(now_unix));
 
   if (!fastWake_ && eego::ble::BleManager::instance().beforeSleep() != ESP_OK) {
     ESP_LOGW(TAG, "BLE stop failed; deep sleep powers the radio down anyway");
@@ -2412,6 +2422,11 @@ void PanelApp::sleepNow() {
   }
   NetStack::instance().wifi().powerOff();
 
+  // Battery is read only now, with the radios and frontlight off, so TX load does not
+  // sag the reading into a false "critical" (which stops automatic updates).
+  readBatteryForSleep();
+  const battery::WakePlan plan = battery::planNextWake(wakeInputs(now_unix));
+
   presentSleepFrame(plan, now_unix);
 
   rtc.last_wake_unix = now_unix;
@@ -2427,6 +2442,41 @@ void PanelApp::sleepNow() {
            static_cast<unsigned long long>(plan.wake_unix),
            static_cast<unsigned>(rtc.consecutive_failures));
   battery::deepSleep(plan.sleep_s, plan.kind != battery::WakeKind::CriticalBattery);
+}
+
+void PanelApp::readBatteryForSleep() {
+  battery::RtcState& rtc = battery::rtcState();
+  eego::PowerManager& pm = eego::PowerManager::instance();
+  vTaskDelay(pdMS_TO_TICKS(50));
+  charging_ = pm.isCharging();
+  batCache_ = pm.readBattery();
+  if (externalPower() || chargingShown() || batCache_.millivolts == 0) {
+    rtc.critical_strikes = 0;
+    return;
+  }
+  // A low reading gets a few more quiet samples; the highest wins (sag only lowers it).
+  for (int i = 0; i < 3 && batCache_.percent < battery::kCriticalBatteryPct; ++i) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+    const eego::BatteryInfo again = pm.readBattery();
+    if (again.millivolts > batCache_.millivolts) batCache_ = again;
+  }
+  if (batCache_.percent >= battery::kCriticalBatteryPct) {
+    rtc.critical_strikes = 0;
+    rtc.last_battery_mv = batCache_.millivolts;
+    return;
+  }
+  if (battery::acceptCriticalReading(rtc.last_battery_mv, rtc.critical_strikes)) {
+    ESP_LOGW(TAG, "battery critical: %umV (%u%%), previous %umV", batCache_.millivolts,
+             static_cast<unsigned>(batCache_.percent), rtc.last_battery_mv);
+    rtc.last_battery_mv = batCache_.millivolts;
+    return;
+  }
+  // Implausible drop: keep running on the last good reading; the next wake confirms.
+  ESP_LOGW(TAG, "battery reads %umV but was %umV last wake: ignoring once",
+           batCache_.millivolts, rtc.last_battery_mv);
+  ++rtc.critical_strikes;
+  batCache_.millivolts = rtc.last_battery_mv;
+  batCache_.percent = eego::PowerManager::percentFromMillivolts(rtc.last_battery_mv);
 }
 
 void PanelApp::sleepByPowerKey(int64_t now) {
@@ -2497,24 +2547,7 @@ DeviceStateInfo PanelApp::sleepingState(uint64_t stamp, uint32_t interval_min) c
 
 void PanelApp::drawNotice(const char* title, const char* line1, const char* line2,
                           const char* line3) {
-  eego::PortraitCanvas& c = *deps_.canvas;
-  c.clear();
-  c.useUiContentRect();
-  const int16_t titleLh = lineHeight(style::kTitle.scale);
-  const int16_t captionLh = lineHeight(style::kCaption.scale);
-  const int16_t blockH = static_cast<int16_t>(titleLh + 8 + 3 * captionLh);
-  int16_t y = static_cast<int16_t>((geom::kContentTop + geom::kContentBottom - blockH) / 2);
-  drawTextFit(c, geom::kInnerX, y, geom::kInnerW, title, style::kTitle.scale, style::kTitle.bold,
-              style::kTitle.gray);
-  y = static_cast<int16_t>(y + titleLh + 8);
-  for (const char* line : {line1, line2, line3}) {
-    if (line != nullptr && line[0] != '\0') {
-      drawTextFit(c, geom::kInnerX, y, geom::kInnerW, line, style::kCaption.scale,
-                  style::kCaption.bold, style::kCaption.gray);
-    }
-    y = static_cast<int16_t>(y + captionLh);
-  }
-  c.resetClip();
+  drawNoticeScreen(*deps_.canvas, title, line1, line2, line3);
 }
 
 RTC_DATA_ATTR static uint32_t s_rotateScreen = 0;
@@ -2594,6 +2627,13 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
       : fastWake_ ? battery::nominalSlot(now_unix, settings_.timezone_offset_min, interval)
                   : now_unix - now_unix % 60;
 
+  // After a failed fetch the frame must not claim fresh data: stamp it with the
+  // last successful fetch and flag the failure on the status line.
+  const bool dataFailed = !mains_ && rtc.consecutive_failures > 0 &&
+                          rtc.last_data_unix >= battery::kMinValidUnix;
+  const uint64_t frameStamp = dataFailed ? rtc.last_data_unix : slot;
+  const int frameBattery = externalPower() ? -1 : static_cast<int>(bucket);
+
   bool skip = false;
   uint64_t hash = 0;
   if (critical) {
@@ -2602,7 +2642,8 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
     char when[24];
     snprintf(title, sizeof(title), tr(Str::LowBatteryTitle),
              static_cast<unsigned>(batCache_.percent));
-    formatTs(rec.refresh_unix, when, sizeof(when));
+    formatTs(rtc.last_data_unix >= battery::kMinValidUnix ? rtc.last_data_unix : rec.refresh_unix,
+             when, sizeof(when));
     snprintf(last, sizeof(last), tr(Str::LastDataFmt), when);
     drawNotice(title, tr(Str::LowBatteryHint), last, tr(Str::WakeHint));
     hash = frameHash();
@@ -2621,7 +2662,7 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
       info.state = DeviceState::NightPause;
       info.next_unix = plan.wake_unix;
       dashboard_.setDeviceState(info, settings_.timezone_offset_min);
-      dashboard_.setSleepFrame(true, slot, mains_ ? -1 : static_cast<int>(bucket));
+      dashboard_.setSleepFrame(true, frameStamp, frameBattery, dataFailed);
       dashboard_.renderOffscreen();
       hash = frameHash();
       skip = panel_known && hash == rec.hash;
@@ -2633,14 +2674,15 @@ void PanelApp::presentSleepFrame(const battery::WakePlan& plan, uint64_t now_uni
       if (panel_known) {
         dashboard_.setDeviceState(sleepingState(rec.refresh_unix, interval),
                                   settings_.timezone_offset_min);
-        dashboard_.setSleepFrame(true, rec.refresh_unix, bucket);
+        dashboard_.setSleepFrame(true, dataFailed ? frameStamp : rec.refresh_unix, frameBattery,
+                                 dataFailed);
         dashboard_.renderOffscreen();
         hash = frameHash();
         skip = hash == rec.hash && !battery::frameStale(rec, now_unix, settings_.battery_max_stale_min);
       }
       if (!skip) {
         dashboard_.setDeviceState(sleepingState(slot, interval), settings_.timezone_offset_min);
-        dashboard_.setSleepFrame(true, slot, bucket);
+        dashboard_.setSleepFrame(true, frameStamp, frameBattery, dataFailed);
         dashboard_.renderOffscreen();
         hash = frameHash();
       }
@@ -3148,8 +3190,14 @@ void PanelApp::render(int64_t now) {
   SoftKeyModel keys[5];
   const size_t n = softKeyCount();
   softKeys(keys, 5);
-  const size_t focusIdx = page_ == Page::Settings ? static_cast<size_t>(-1) : focus_;
+  // No highlight until focus was moved on purpose (matches the power-key rule).
+  const bool softKeyPage = page_ == Page::Onboarding || page_ == Page::AlertDetail ||
+                           page_ == Page::Status || page_ == Page::Help;
+  const size_t focusIdx = page_ == Page::Settings || (softKeyPage && !softFocusMoved_)
+                              ? static_cast<size_t>(-1)
+                              : focus_;
   drawSoftKeys(c, keys, n, focusIdx);
+  drawBanner(c, sb);
   drawTouchMark(c);
 
   c.display(forceFull_ ? eego::RefreshMode::Full : eego::RefreshMode::Fast);
@@ -3174,13 +3222,12 @@ void PanelApp::buildStatusBar(StatusBarModel& m) {
   m.state = deviceState_.state;
   const std::vector<std::string> labels =
       deviceStateLabels(deviceState_, settings_.timezone_offset_min);
-  snprintf(m.stateText, sizeof(m.stateText), "%s", labels.front().c_str());
-  if (labels.size() > 1) snprintf(m.stateShort, sizeof(m.stateShort), "%s", labels[1].c_str());
+  m.stateLabels = labels;
   m.batPercent = batCache_.percent;
   m.batMv = batCache_.millivolts;
   m.charging = chargingShown();
   m.wifiState = wifiState_.load();
-  m.mains = mains_;
+  m.mains = externalPower();
   m.portalOpen = admin::ProvisionPortal::instance().isOpen();
   m.apFallback = admin::ProvisionPortal::instance().isApFallbackActive();
   m.bleLinked = bleLinkSeen_ == eego::ble::LinkState::Authenticated;
@@ -3327,10 +3374,7 @@ void PanelApp::buildDetail(AlertDetailModel& m) {
   }
 }
 
-size_t PanelApp::statusPageCount() const {
-  const size_t per = geom::kStatusRowsPerPage;
-  return std::max<size_t>(1, (statusRows_ + per - 1) / per);
-}
+size_t PanelApp::statusPageCount() const { return std::max<size_t>(1, statusPages_); }
 
 void PanelApp::buildStatus(KvModel& m) {
   const eego::net::NetStatusSnapshot& ns = netStatus();
@@ -3342,18 +3386,8 @@ void PanelApp::buildStatus(KvModel& m) {
     rows.emplace_back(label, std::move(value));
   };
   char buf[128];
-  std::vector<bool> big;
-  auto section = [&](Str label) {
-    rows.emplace_back(tr(label), "");
-    big.resize(rows.size(), false);
-    big.back() = true;
-  };
-  auto addBigText = [&](const std::string& label, std::string value) {
-    add(label, std::move(value));
-    big.resize(rows.size(), false);
-    big.back() = true;
-  };
-  auto addBig = [&](Str label, std::string value) { addBigText(tr(label), std::move(value)); };
+  auto section = [&](Str label) { rows.emplace_back(tr(label), ""); };
+  auto addStr = [&](Str label, std::string value) { add(tr(label), std::move(value)); };
 
   section(Str::SecPower);
   {
@@ -3370,38 +3404,38 @@ void PanelApp::buildStatus(KvModel& m) {
     in.auto_sleep = interactive && until == 0;
     in.sleep_timeout_s = settings_.battery_interactive_timeout_s;
     for (auto& row : powerStatusRows(in, settings_.timezone_offset_min)) {
-      addBigText(row.first, std::move(row.second));
+      add(row.first, std::move(row.second));
     }
     const uint64_t wake = plannedWakeAt();
     if (!interactive && wake != 0) {
       formatTs(wake, buf, sizeof(buf));
-      addBig(Str::LblNextWake, buf);
+      addStr(Str::LblNextWake, buf);
     }
-    addBig(Str::LblWakeReason, tr(wakeSourceText(wakeSource_)));
+    addStr(Str::LblWakeReason, tr(wakeSourceText(wakeSource_)));
     snprintf(buf, sizeof(buf), tr(Str::SleepsFmt),
              static_cast<unsigned>(battery::rtcState().wakes));
-    addBig(Str::LblSleeps, buf);
+    addStr(Str::LblSleeps, buf);
   }
 
   section(Str::SecNetwork);
   std::string wifi = wifiStateText(ns.wifi.state);
   if (wifi.rfind("WiFi ", 0) == 0) wifi.erase(0, 5);
   if (!ns.wifi.ssid.empty()) wifi += " · " + ns.wifi.ssid;
-  addBig(Str::LblWifi, wifi);
+  addStr(Str::LblWifi, wifi);
   if (ns.wifi.state == 2) {
     const bool en = currentLang() == Lang::En;
     const eego::net::WifiSignal q = eego::net::wifiSignalQuality(ns.wifi.rssi);
     snprintf(buf, sizeof(buf), "%d dBm · %s", ns.wifi.rssi, eego::net::wifiSignalLabel(q, en));
-    addBig(Str::LblSignal, buf);
+    addStr(Str::LblSignal, buf);
     if (ns.wifi.rssi_samples >= 3) {
       snprintf(buf, sizeof(buf), en ? "MIN %d · AVG %d dBm" : "最低 %d · 平均 %d dBm",
                ns.wifi.rssi_min, ns.wifi.rssi_avg);
-      addBig(Str::LblSignal10m, buf);
+      addStr(Str::LblSignal10m, buf);
     }
-    if (q == eego::net::WifiSignal::Weak) addBig(Str::LblTip, tr(Str::WifiWeakHint));
+    if (q == eego::net::WifiSignal::Weak) addStr(Str::LblTip, tr(Str::WifiWeakHint));
   }
   if (!ns.wifi.ip.empty()) {
-    addBig(Str::LblAddress, "http://" + ns.wifi.ip + "/");
+    addStr(Str::LblAddress, "http://" + ns.wifi.ip + "/");
   }
   if (ns.wifi.state != 2) {
     const bool en = currentLang() == Lang::En;
@@ -3420,12 +3454,12 @@ void PanelApp::buildStatus(KvModel& m) {
       if (!n.seen && diag.scan_ms >= 0) value += std::string(" · ") + tr(Str::WifiNotSeen);
       std::string label = n.ssid;
       sanitizeClamped(label, 10);
-      addBigText(label, value);
+      add(label, value);
     }
   }
   if (admin::ProvisionPortal::instance().apActive()) {
-    addBig(Str::SetupHotspot, admin::ProvisionPortal::kApSsid);
-    addBig(Str::WifiDiag, admin::ProvisionPortal::instance().isApFallbackActive()
+    addStr(Str::SetupHotspot, admin::ProvisionPortal::kApSsid);
+    addStr(Str::WifiDiag, admin::ProvisionPortal::instance().isApFallbackActive()
                               ? kWifiDiagUrl
                               : admin::ProvisionPortal::kApUrl);
   }
@@ -3440,7 +3474,7 @@ void PanelApp::buildStatus(KvModel& m) {
   } else {
     snprintf(buf, sizeof(buf), "%s", tr(Str::TimeUnavailable));
   }
-  addBig(Str::TimeLabel, buf);
+  addStr(Str::TimeLabel, buf);
 
   section(Str::SecDevice);
   if (eego::SdCard::instance().ready()) {
@@ -3519,27 +3553,30 @@ void PanelApp::buildStatus(KvModel& m) {
            static_cast<unsigned>(acked), static_cast<unsigned>(muted));
   add("  ", buf);
 
-  big.resize(rows.size(), false);
+  // Paginate by drawn height; a heading never ends a page.
+  // drawKvList sizes the label column per page; paginate with the widest
+  // overall label, which can only overestimate a row's height.
+  const int16_t labelW = kvLabelWidth(rows);
   std::vector<size_t> starts{0};
-  size_t weight = 0;
+  int used = 0;
   for (size_t i = 0; i < rows.size(); ++i) {
-    const size_t w = big[i] ? 2 : 1;
+    const int h = kvRowHeight(rows[i].second, labelW);
     const bool heading = rows[i].second.empty();
-    const size_t need = heading && i + 1 < rows.size() ? w + (big[i + 1] ? 2 : 1) : w;
-    if (weight > 0 && weight + need > geom::kStatusRowsPerPage) {
+    const int need =
+        heading && i + 1 < rows.size() ? h + kvRowHeight(rows[i + 1].second, labelW) : h;
+    if (used > 0 && used + need > geom::kKvBodyH) {
       starts.push_back(i);
-      weight = 0;
+      used = 0;
     }
-    weight += w;
+    used += h;
   }
-  statusRows_ = starts.size() * geom::kStatusRowsPerPage;
+  statusPages_ = starts.size();
   const size_t pages = statusPageCount();
   if (statusPage_ >= pages) statusPage_ = pages - 1;
   const size_t begin = starts[statusPage_];
   const size_t end = statusPage_ + 1 < starts.size() ? starts[statusPage_ + 1] : rows.size();
   for (size_t i = begin; i < end; ++i) {
     m.rows.push_back(std::move(rows[i]));
-    m.big.push_back(big[i]);
   }
   if (pages > 1) {
     snprintf(m.pageText, sizeof(m.pageText), "%u/%u", static_cast<unsigned>(statusPage_ + 1),
@@ -3547,21 +3584,7 @@ void PanelApp::buildStatus(KvModel& m) {
   }
 }
 
-void PanelApp::buildHelp(KvModel& m) {
-  auto add = [&m](Str label, Str value) {
-    m.rows.emplace_back(tr(label), tr(value));
-  };
-  add(Str::HelpUpDownShort, Str::HelpScreen);
-  add(Str::HelpUpDownLong, Str::HelpFocus);
-  add(Str::HelpPower, Str::HelpActivateBack);
-  add(Str::HelpFrontHome, Str::HelpHome);
-  add(Str::HelpFrontGestures, Str::HelpSettingsStatus);
-  add(Str::HelpSwipe, Str::HelpPage);
-  add(Str::HelpTapAlert, Str::HelpOpenDetail);
-  add(Str::HelpDanger, Str::HelpFreshPress);
-  add(Str::HelpUpDownChord, Str::HelpKeepAwake);
-  add(Str::HelpCustomBindings, Str::HelpWebBindings);
-}
+void PanelApp::buildHelp(KvModel& m) { m.rows = helpRows(); }
 
 void PanelApp::buildS4(S4Model& m) {
   const std::vector<SettingId> ids = visibleSettings();

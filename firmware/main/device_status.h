@@ -39,7 +39,8 @@ struct DeviceStateInfo {
 
 std::string deviceStateLabel(const DeviceStateInfo& info, int tz_offset_min);
 std::vector<std::string> deviceStateLabels(const DeviceStateInfo& info, int tz_offset_min);
-std::string updatedLabel(uint64_t unix_s, int tz_offset_min);
+// "更新于 HH:MM"; with a valid now_unix, stamps from another day get the date.
+std::string updatedLabel(uint64_t unix_s, int tz_offset_min, uint64_t now_unix = 0);
 enum class PowerDetail : uint8_t { None = 0, Forced, UsbHost, Charging, Full };
 struct PowerStatusInput {
   bool external = true;

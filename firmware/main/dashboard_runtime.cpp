@@ -323,6 +323,7 @@ struct DashboardRuntime::Impl {
   bool sleep_frame = false;
   uint64_t sleep_stamp_unix = 0;
   int sleep_battery_pct = -1;
+  bool sleep_failed = false;  // the last fetch failed: the frame shows older data
   int64_t message_deadline_ms = 0;
   size_t render_count = 0;
   size_t skipped_render_count = 0;
@@ -2052,14 +2053,15 @@ struct DashboardRuntime::Impl {
     dirty = true;
   }
 
-  void setSleepFrame(bool enabled, uint64_t stamp_unix, int battery_pct) {
+  void setSleepFrame(bool enabled, uint64_t stamp_unix, int battery_pct, bool failed) {
     if (enabled == sleep_frame && stamp_unix == sleep_stamp_unix &&
-        battery_pct == sleep_battery_pct) {
+        battery_pct == sleep_battery_pct && failed == sleep_failed) {
       return;
     }
     sleep_frame = enabled;
     sleep_stamp_unix = stamp_unix;
     sleep_battery_pct = battery_pct;
+    sleep_failed = enabled && failed;
     status_dirty = true;
     dirty = true;
   }
@@ -2184,7 +2186,8 @@ struct DashboardRuntime::Impl {
       out.pager = !sleep_frame;
     }
     if (sleep_frame) {
-      const std::string updated = updatedLabel(sleep_stamp_unix, tz_offset_min);
+      const std::string updated = updatedLabel(
+          sleep_stamp_unix, tz_offset_min, TimeSource::valid() ? TimeSource::now() : 0);
       out.right = updated;
       if (sleep_battery_pct >= 0) {
         out.right = std::to_string(sleep_battery_pct) + "% · " + updated;
@@ -2219,6 +2222,11 @@ struct DashboardRuntime::Impl {
         if (!pipeline->sourceStatus(source.id, status)) continue;
         if (status.offline || status.stale) ++offline;
       }
+    }
+    if (sleep_frame && sleep_failed) {
+      out.left_alt.insert(out.left_alt.begin(), out.left);
+      out.left = std::string(tr(Str::UpdateFailed)) + " · " + out.left;
+      out.left_alt.push_back(tr(Str::UpdateFailed));
     }
     if (offline > 0) {
       char text[48];
@@ -2299,7 +2307,12 @@ struct DashboardRuntime::Impl {
     if (!push) {
       ++skipped_render_count;
     } else if (dashboardShouldDisplay(last_render.refresh_needed, status_dirty)) {
-      const eego::RefreshMode mode = force_full ? eego::RefreshMode::Full : last_render.refresh_mode;
+      // Status-line-only updates (countdowns, "next HH:MM") are always fast; the
+      // renderer's every-4th-fast Full applies to panel changes only, or the
+      // screen would flash once a minute while nothing else changes.
+      const eego::RefreshMode mode = force_full                    ? eego::RefreshMode::Full
+                                     : last_render.refresh_needed ? last_render.refresh_mode
+                                                                  : eego::RefreshMode::Fast;
       deps.canvas->display(mode);
       deps.canvas->waitRefreshComplete();
       ++render_count;
@@ -2607,8 +2620,9 @@ void DashboardRuntime::cancelBatteryCycle() {
 void DashboardRuntime::setDeviceState(const DeviceStateInfo& info, int tz_offset_min) {
   if (impl_ != nullptr) impl_->setDeviceState(info, tz_offset_min);
 }
-void DashboardRuntime::setSleepFrame(bool enabled, uint64_t stamp_unix, int battery_pct) {
-  if (impl_ != nullptr) impl_->setSleepFrame(enabled, stamp_unix, battery_pct);
+void DashboardRuntime::setSleepFrame(bool enabled, uint64_t stamp_unix, int battery_pct,
+                                     bool failed) {
+  if (impl_ != nullptr) impl_->setSleepFrame(enabled, stamp_unix, battery_pct, failed);
 }
 void DashboardRuntime::renderOffscreen() {
   if (impl_ != nullptr) impl_->render(false);

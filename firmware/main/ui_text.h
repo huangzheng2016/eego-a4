@@ -124,7 +124,7 @@ enum class Lang : uint8_t {
   X(BatStatusNoClockFmt, "电量 %u%% · 时间不可用", "BAT %u%% · NO CLOCK") \
   X(NightPauseFmt, "夜间暂停 · %02d:%02d 恢复", "NIGHT PAUSE · RESUMES %02d:%02d") \
   X(LowBatteryTitle, "电量过低（%u%%）", "BATTERY LOW (%u%%)") \
-  X(LowBatteryHint, "已停止自动更新，请充电", "AUTO UPDATES STOPPED; PLEASE CHARGE") \
+  X(LowBatteryHint, "已暂停更新，充电后自动恢复", "UPDATES PAUSED; RESUME WHEN CHARGED") \
   X(LastDataFmt, "最后更新 %s", "LAST UPDATE %s") \
   X(SetFrontlight, "前光", "FRONTLIGHT") \
   X(SetMutes, "静音列表", "MUTED LIST") \
@@ -158,7 +158,7 @@ enum class Lang : uint8_t {
   X(OnbApStep3, "3. 联网后用新地址配置仪表盘", "3. THEN SET UP THE DASHBOARD AT THE NEW ADDRESS") \
   X(OnbNoWifi, "WiFi 未配置：设置 → 开启设置热点", "NO WIFI: SETTINGS → SETUP HOTSPOT") \
   X(OnbInvalidFmt, "仪表盘配置无效：%s", "DASHBOARD CONFIG INVALID: %s") \
-  X(OnbKeys, "前置键：长按 设置 · 双击 状态", "FRONT KEY: HOLD = SETTINGS · DOUBLE = STATUS") \
+  X(OnbKeys, "前置键：长按 设置 · 双击 状态", "FRONT: HOLD = SETTINGS · TWICE = STATUS") \
   X(AgeNow, "刚刚", "NOW") \
   X(AgeMinFmt, "%u 分钟前", "%um ago") \
   X(AgeHourFmt, "%u 小时前", "%uh ago") \
@@ -174,6 +174,7 @@ enum class Lang : uint8_t {
   X(BleStatePairing, "配对中", "PAIRING") \
   X(BleStateLinked, "已连接", "CONNECTED") \
   X(BleLinkedPill, "蓝牙", "BLE") \
+  X(HotspotPill, "热点", "AP") \
   X(AgentUplinkPill, "电脑", "PC LINK") \
   X(BlePairTitle, "蓝牙配对", "BLUETOOTH PAIRING") \
   X(BlePairHint, "在电脑或手机的配对弹窗中输入下面的 6 位配对码", "ENTER THIS 6-DIGIT CODE IN THE PAIRING PROMPT ON YOUR COMPUTER OR PHONE") \
@@ -245,24 +246,24 @@ enum class Lang : uint8_t {
   X(TouchCalRedo, "重做", "REDO") \
   X(TouchCalCancel, "取消", "CANCEL") \
   X(TouchCalSaved, "触摸校准已保存", "TOUCH CALIBRATION SAVED") \
-  X(HelpUpDownShort, "↑/↓ 短按", "UP/DOWN SHORT") \
-  X(HelpScreen, "上/下一屏；列表中上/下一项", "PREV/NEXT SCREEN; ITEM IN LISTS") \
-  X(HelpUpDownLong, "↑/↓ 长按", "UP/DOWN LONG") \
-  X(HelpFocus, "选择面板（焦点框）", "SELECT PANEL (FOCUS)") \
-  X(HelpPower, "电源键 短按 / 长按", "POWER SHORT / LONG") \
-  X(HelpActivateBack, "选择焦点项（无焦点时休眠） / 关机", "SELECT (SLEEP IF NOTHING FOCUSED) / SHUT DOWN") \
-  X(HelpFrontHome, "前置键 短按", "FRONT SHORT") \
-  X(HelpHome, "返回 / 回到仪表盘（固定）", "BACK / DASHBOARD (FIXED)") \
-  X(HelpFrontGestures, "前置键 长按 / 双击", "FRONT LONG / DOUBLE") \
-  X(HelpSettingsStatus, "设置 / 状态", "SETTINGS / STATUS") \
-  X(HelpSwipe, "滑动 左/上 · 右/下", "SWIPE LEFT/UP · RIGHT/DOWN") \
-  X(HelpPage, "下一屏 / 上一屏；首屏右滑返回", "NEXT / PREV; RIGHT ON FIRST = BACK") \
+  X(HelpUpDownShort, "↑/↓ 短按", "UP/DOWN") \
+  X(HelpScreen, "上/下一屏，列表中移动", "PREV/NEXT SCREEN") \
+  X(HelpUpDownLong, "↑/↓ 长按", "HOLD UP/DOWN") \
+  X(HelpFocus, "移动焦点框", "MOVE FOCUS") \
+  X(HelpPower, "电源键 短按", "POWER") \
+  X(HelpActivateBack, "选择；无焦点时休眠", "SELECT, OR SLEEP") \
+  X(HelpFrontHome, "前置键 短按", "FRONT") \
+  X(HelpHome, "返回 / 回到仪表盘", "BACK / DASHBOARD") \
+  X(HelpFrontGestures, "前置键 长按", "HOLD FRONT") \
+  X(HelpSettingsStatus, "设置", "SETTINGS") \
+  X(HelpSwipe, "滑动", "SWIPE") \
+  X(HelpPage, "左右或上下翻屏", "CHANGE SCREEN") \
   X(HelpTapAlert, "点按", "TAP") \
-  X(HelpOpenDetail, "选择；告警 → 详情", "SELECT; ALERT → DETAIL") \
-  X(HelpDanger, "危险操作", "DANGEROUS ACTION") \
-  X(HelpFreshPress, "再按一次确认", "PRESS AGAIN TO CONFIRM") \
-  X(HelpCustomBindings, "自定义按键", "CUSTOM BINDINGS") \
-  X(HelpWebBindings, "网页端设置；设置 → 重置按键映射", "WEB ADMIN; SETTINGS → RESET INPUT") \
+  X(HelpOpenDetail, "选择；告警看详情", "SELECT / OPEN ALERT") \
+  X(HelpDanger, "危险操作", "RISKY ACTION") \
+  X(HelpFreshPress, "再按一次确认", "PRESS AGAIN") \
+  X(HelpCustomBindings, "自定义按键", "KEY MAPPING") \
+  X(HelpWebBindings, "在网页端设置", "SET IN WEB ADMIN") \
   X(LangZh, "中文", "CHINESE") \
   X(LangEn, "英文", "ENGLISH") \
   X(PrevPage, "上一页", "PREV") \
@@ -280,11 +281,15 @@ enum class Lang : uint8_t {
   X(StateKeepAwakeShortFmt, "保持唤醒 %u 分", "AWAKE %uMIN") \
   X(StateIdleShortFmt, "节电 %02d:%02d", "ECO %02d:%02d") \
   X(StateAwake, "已唤醒", "AWAKE") \
+  X(StateMinFmt, "%u 分", "%uMIN") \
+  X(StateClockFmt, "%02d:%02d", "%02d:%02d") \
   X(StateSleepingNextFmt, "休眠中 · 下次 %02d:%02d", "ASLEEP · NEXT %02d:%02d") \
   X(StateSleepingShort, "休眠中", "ASLEEP") \
-  X(StateNightShort, "夜间暂停", "NIGHT PAUSE") \
+  X(StateNightShort, "夜间暂停", "NIGHT") \
   X(StateNightFmt, "夜间暂停 · %02d:%02d 恢复 · 按键唤醒", "NIGHT PAUSE · %02d:%02d · PRESS A KEY") \
   X(UpdatedFmt, "更新于 %02d:%02d", "UPDATED %02d:%02d") \
+  X(UpdatedDateFmt, "更新于 %02d-%02d %02d:%02d", "UPDATED %02d-%02d %02d:%02d") \
+  X(UpdateFailed, "更新失败", "UPDATE FAILED") \
   X(UpdatedNoClock, "更新于 --:--", "UPDATED --:--") \
   X(OfflineCountFmt, "离线 %u", "OFF %u") \
   X(PreviewTag, "预览", "PREVIEW") \
@@ -308,8 +313,12 @@ enum class Lang : uint8_t {
   X(ReasonCharging, "充电中", "CHARGING") \
   X(ReasonUsbHost, "USB 已连接", "USB HOST") \
   X(ReasonFullHold, "满电", "FULL") \
-  X(HelpUpDownChord, "↑+↓ 同按", "UP+DOWN TOGETHER") \
-  X(HelpKeepAwake, "保持唤醒（再按延长/取消）", "KEEP AWAKE (AGAIN: EXTEND/CANCEL)")
+  X(HelpPowerLong, "电源键 长按", "HOLD POWER") \
+  X(HelpShutDown, "关机", "SHUT DOWN") \
+  X(HelpFrontDouble, "前置键 双击", "FRONT TWICE") \
+  X(HelpStatusPage, "设备状态", "DEVICE STATUS") \
+  X(HelpUpDownChord, "↑+↓ 同按", "UP+DOWN") \
+  X(HelpKeepAwake, "保持唤醒（再按延长）", "KEEP AWAKE / EXTEND")
 
 enum class Str : uint16_t {  // >255 entries possible
 #define X(k, zh, en) k,

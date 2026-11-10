@@ -446,6 +446,21 @@ extern "C" void app_main(void) {
       esp_restart();
     }
   }
+  // Hourly check from a critical-battery sleep: no radio, no panel, ~0.2 s awake. Stay
+  // asleep until charging or back above kCriticalExitPct, then boot normally.
+  if (fastWake && panel::battery::rtcState().low_battery_shown != 0) {
+    eego::PowerManager& pm = eego::PowerManager::instance();
+    const eego::BatteryInfo bat = pm.readBattery();
+    const bool charging = pm.isCharging() || bat.charging;
+    if (!charging && bat.millivolts > 0 && bat.percent < panel::battery::kCriticalExitPct) {
+      ESP_LOGI(TAG, "critical battery recheck: %umV (%u%%), staying asleep", bat.millivolts,
+               static_cast<unsigned>(bat.percent));
+      panel::battery::commitRtcState();
+      panel::battery::deepSleep(panel::battery::kCriticalRecheckS, false);
+    }
+    ESP_LOGI(TAG, "critical battery recheck: %umV (%u%%)%s, resuming", bat.millivolts,
+             static_cast<unsigned>(bat.percent), charging ? " charging" : "");
+  }
   eego::FrontlightManager::instance().setOverride(
       toFrontlightOverride(deviceSettings.snapshot().values.frontlight_hardware));
   eego::settings::Capabilities capabilities;

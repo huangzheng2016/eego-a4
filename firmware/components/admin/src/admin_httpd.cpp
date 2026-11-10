@@ -34,6 +34,7 @@
 #include "esp_heap_caps.h"
 #include "esp_sleep.h"
 #include "esp_http_server.h"
+#include "lwip/sockets.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -335,6 +336,31 @@ bool ingestKeyPresented(httpd_req_t* req) {
 }
 
 std::atomic<int64_t> g_last_authenticated_ms{0};
+std::atomic<int64_t> g_last_wifi_admin_ms{0};
+
+// BLE admin requests reach httpd through the lwIP loopback (ble_bridge); they
+// must not count as WiFi activity, or a BLE session would pin WiFi at PS_NONE.
+bool fromLoopback(httpd_req_t* req) {
+  const int fd = httpd_req_to_sockfd(req);
+  if (fd < 0) return false;
+  sockaddr_storage peer{};
+  socklen_t len = sizeof(peer);
+  if (getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &len) != 0) return false;
+  if (peer.ss_family == AF_INET) {
+    const auto* in = reinterpret_cast<const sockaddr_in*>(&peer);
+    return (ntohl(in->sin_addr.s_addr) >> 24) == 127;
+  }
+#if LWIP_IPV6
+  if (peer.ss_family == AF_INET6) {
+    const auto* in6 = reinterpret_cast<const sockaddr_in6*>(&peer);
+    const uint8_t* a = reinterpret_cast<const uint8_t*>(&in6->sin6_addr);
+    static constexpr uint8_t kLoop6[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    static constexpr uint8_t kMapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+    return std::memcmp(a, kLoop6, 16) == 0 || (std::memcmp(a, kMapped, 12) == 0 && a[12] == 127);
+  }
+#endif
+  return false;
+}
 
 bool requireBearer(httpd_req_t* req, std::string& token_out, bool activity = true) {
   if (ingestKeyPresented(req)) {
@@ -348,7 +374,9 @@ bool requireBearer(httpd_req_t* req, std::string& token_out, bool activity = tru
   }
   token_out = std::move(token);
   if (activity) {
-    g_last_authenticated_ms.store(esp_timer_get_time() / 1000, std::memory_order_relaxed);
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+    g_last_authenticated_ms.store(now_ms, std::memory_order_relaxed);
+    if (!fromLoopback(req)) g_last_wifi_admin_ms.store(now_ms, std::memory_order_relaxed);
     ProvisionPortal::instance().notePortalActivity();
   }
   return true;
@@ -417,6 +445,10 @@ bool runCommand(httpd_req_t* req, const AdminCommand& cmd, AdminResult& res) {
 
 int64_t lastAuthenticatedRequestMs() {
   return g_last_authenticated_ms.load(std::memory_order_relaxed);
+}
+
+int64_t lastWifiAdminRequestMs() {
+  return g_last_wifi_admin_ms.load(std::memory_order_relaxed);
 }
 
 }  // namespace eego::admin

@@ -89,7 +89,7 @@ TEST(battery_policy, next_wake_on_boundary_and_early_wake_tolerance) {
   }
 }
 
-TEST(battery_policy, low_battery_doubles_and_critical_stops_timer) {
+TEST(battery_policy, low_battery_doubles_and_critical_rechecks_hourly) {
   WakeInputs in = inputs(kBase + 20);
   in.battery_pct = 19;
   WakePlan p = planNextWake(in);
@@ -98,13 +98,21 @@ TEST(battery_policy, low_battery_doubles_and_critical_stops_timer) {
   in.battery_pct = 4;
   p = planNextWake(in);
   CHECK(p.kind == WakeKind::CriticalBattery);
-  CHECK_EQ(p.sleep_s, 0u);
+  CHECK_EQ(p.sleep_s, kCriticalRecheckS);
   // Charging never counts as critical; unknown battery is not scaled.
   in.charging = true;
   CHECK(planNextWake(in).kind == WakeKind::Boundary);
   in.charging = false;
   in.battery_known = false;
   CHECK_EQ(planNextWake(in).interval_min, 15u);
+}
+
+TEST(battery_policy, critical_reading_needs_plausibility) {
+  // 95% one wake, "0%" the next: a glitch until a second wake confirms it.
+  CHECK(!acceptCriticalReading(4070, 0));
+  CHECK(acceptCriticalReading(4070, 1));
+  CHECK(acceptCriticalReading(3400, 0));
+  CHECK(acceptCriticalReading(0, 0));
 }
 
 TEST(battery_policy, failure_backoff_is_capped) {

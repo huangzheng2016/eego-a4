@@ -229,7 +229,7 @@ void TouchCalScreen::render() {
   c.resetClip();
   c.clear();
   const int16_t lh2 = lineHeight(2);
-  const int16_t lh1 = lineHeight(1);
+  const int16_t lh1 = lineHeight(2);
   char buf[96];
 
   switch (phase_) {
@@ -243,10 +243,10 @@ void TouchCalScreen::render() {
       c.drawTextCentered(kTextX, 468, kTextW, buf, 2, false);
       if (rejected_) {
         c.drawTextCentered(kTextX, static_cast<int16_t>(468 + lh2 + 8), kTextW,
-                           tr(Str::TouchCalHoldStill), 1, true);
+                           tr(Str::TouchCalHoldStill), 2, true);
       }
       c.drawTextCentered(kTextX, static_cast<int16_t>(468 + lh2 + 8 + lh1 + 6), kTextW,
-                         tr(Str::TouchCalCancelHint), 1, false);
+                         tr(Str::TouchCalCancelHint), 2, false);
       break;
     }
     case Phase::Verify: {
@@ -259,10 +259,10 @@ void TouchCalScreen::render() {
                       tr(Str::TouchCalVerify), 2, lh2, 2);
       snprintf(buf, sizeof(buf), tr(Str::TouchCalErrorFmt),
                static_cast<unsigned>(std::lround(fit_.maxResidualPx)));
-      c.drawTextCentered(kTextX, static_cast<int16_t>(112 + 3 * lh2 + 16), kTextW, buf, 1, false);
+      c.drawTextCentered(kTextX, static_cast<int16_t>(112 + 3 * lh2 + 16), kTextW, buf, 2, false);
       drawButtons();
       c.drawTextCentered(kTextX, static_cast<int16_t>(kBtnY + kBtnH + 10), kTextW,
-                         tr(Str::TouchCalKeys), 1, false);
+                         tr(Str::TouchCalKeys), 2, false);
       for (size_t i = 0; i < dotCount_; ++i) {
         c.fillCircle(dots_[i].x, dots_[i].y, 7, 0);
         c.drawCircle(dots_[i].x, dots_[i].y, 9, 0);
@@ -278,7 +278,7 @@ void TouchCalScreen::render() {
       } else {
         snprintf(buf, sizeof(buf), "%s", eego::touchcal::fitErrorName(fit_.error));
       }
-      c.drawTextCentered(kTextX, static_cast<int16_t>(300 + 3 * lh2 + 12), kTextW, buf, 1, false);
+      c.drawTextCentered(kTextX, static_cast<int16_t>(300 + 3 * lh2 + 12), kTextW, buf, 2, false);
       break;
     }
   }

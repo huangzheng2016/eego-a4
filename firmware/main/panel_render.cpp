@@ -12,9 +12,13 @@ using eego::PortraitCanvas;
 
 constexpr uint8_t kDividerGray = 9;
 constexpr uint8_t kRuleGray = 6;
-constexpr int16_t kKvLabelW = 136;
-constexpr int16_t kMetaLabelW = 72;
+constexpr int16_t kKvLabelW = 152;   // alert-detail meta column
+constexpr int16_t kKvLabelMin = 96;
+constexpr int16_t kKvLabelMax = 228;
+constexpr int16_t kKvValueLines = 2;
 constexpr int16_t kFieldLabelW = 150;
+
+int16_t clampScale(int16_t scale) { return std::max<int16_t>(scale, kMinTextScale); }
 
 int16_t textW(const char* s, int16_t scale) {
   return static_cast<int16_t>(FontManager::instance().uiTextWidth(s) * scale);
@@ -250,45 +254,34 @@ int16_t drawWifiIcon(PortraitCanvas& c, int16_t x, int16_t y, int16_t h, int sta
   return w;
 }
 
+int16_t kvHeadingH() { return static_cast<int16_t>(fontH(style::kBodyStrong.scale) + 12); }
+
+int16_t kvValueW(int16_t labelW = kKvLabelW) {
+  return static_cast<int16_t>(geom::kInnerW - labelW);
+}
+
 int16_t drawKvList(PortraitCanvas& c, const std::vector<std::pair<std::string, std::string>>& rows,
-                   const std::vector<bool>& big, int16_t y) {
-  const int16_t lh = lineHeight(style::kSmall.scale);
-  const int16_t fh = fontH(style::kSmall.scale);
-  for (size_t i = 0; i < rows.size(); ++i) {
-    const auto& row = rows[i];
-    const bool large = i < big.size() && big[i];
-    if (large && row.second.empty()) {
+                   int16_t y) {
+  const int16_t labelW = kvLabelWidth(rows);
+  const int16_t lh = lineHeight(style::kBody.scale);
+  const int16_t fh = fontH(style::kBody.scale);
+  for (const auto& row : rows) {
+    if (row.second.empty()) {
       const int16_t fhBig = fontH(style::kBodyStrong.scale);
       if (y + fhBig > geom::kContentBottom) break;
       textFit(c, geom::kInnerX, y, geom::kInnerW, row.first.c_str(), style::kBodyStrong);
       hline(c, geom::kInnerX, static_cast<int16_t>(y + fhBig + 3), geom::kInnerW, kRuleGray);
-      y = static_cast<int16_t>(y + fhBig + 12);
-      continue;
-    }
-    if (large && !row.second.empty()) {
-      const int16_t lhBig = lineHeight(style::kBody.scale);
-      if (y + fontH(style::kBody.scale) > geom::kContentBottom) break;
-      const int16_t labelW = kKvLabelW + 16;
-      textFit(c, geom::kInnerX, y, static_cast<int16_t>(labelW - 8), row.first.c_str(),
-              style::kBodyMuted);
-      textFit(c, static_cast<int16_t>(geom::kInnerX + labelW), y,
-              static_cast<int16_t>(geom::kInnerW - labelW), row.second.c_str(), style::kBody);
-      y = static_cast<int16_t>(y + lhBig);
+      y = static_cast<int16_t>(y + kvHeadingH());
       continue;
     }
     if (y + fh > geom::kContentBottom) break;
-    if (row.second.empty()) {
-      textFit(c, geom::kInnerX, y, geom::kInnerW, row.first.c_str(), style::kCaptionStrong);
-      hline(c, geom::kInnerX, static_cast<int16_t>(y + fh + 3), geom::kInnerW, kRuleGray);
-      y = static_cast<int16_t>(y + fh + 10);
-    } else {
-      textFit(c, geom::kInnerX, y, static_cast<int16_t>(kKvLabelW - 8), row.first.c_str(),
-              style::kCaption);
-      textFit(c, static_cast<int16_t>(geom::kInnerX + kKvLabelW), y,
-              static_cast<int16_t>(geom::kInnerW - kKvLabelW), row.second.c_str(),
-              style::kSmall);
-      y = static_cast<int16_t>(y + lh);
-    }
+    const int16_t room = static_cast<int16_t>((geom::kContentBottom - y - fh) / lh + 1);
+    textFit(c, geom::kInnerX, y, static_cast<int16_t>(labelW - 12), row.first.c_str(),
+            style::kBodyMuted);
+    const int16_t lines = drawTextWrapped(
+        c, static_cast<int16_t>(geom::kInnerX + labelW), y, kvValueW(labelW), row.second.c_str(),
+        style::kBody.scale, lh, std::min<int16_t>(kKvValueLines, room), style::kBody.gray);
+    y = static_cast<int16_t>(y + std::max<int16_t>(1, lines) * lh);
   }
   return y;
 }
@@ -322,6 +315,7 @@ int16_t lineHeight(int16_t scale) {
 int16_t drawTextFit(PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW,
                     const char* text, int16_t scale, bool bold, uint8_t gray) {
   if (text == nullptr || *text == '\0' || maxW <= 0) return 0;
+  scale = clampScale(scale);
   const int16_t extra = boldExtra(bold, scale);
   std::string s(text);
   if (textW(s.c_str(), scale) + extra <= maxW) {
@@ -342,15 +336,14 @@ int16_t drawTextFit(PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW,
   return static_cast<int16_t>(textW("...", scale) + extra);
 }
 
-int16_t drawTextWrapped(PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW,
-                        const char* text, int16_t scale, int16_t lineH, int16_t maxLines,
-                        uint8_t gray, bool bold) {
-  if (text == nullptr || *text == '\0' || maxLines <= 0) return 0;
-  const int16_t fitW = static_cast<int16_t>(maxW - boldExtra(bold, scale));
-  std::string s(text);
-  int16_t line = 0;
+namespace {
+std::vector<std::string> wrapLines(const char* text, int16_t scale, int16_t fitW,
+                                   int16_t maxLines) {
+  std::vector<std::string> out;
+  if (text == nullptr || *text == '\0' || maxLines <= 0) return out;
+  const std::string s(text);
   size_t pos = 0;
-  while (pos < s.size() && line < maxLines) {
+  while (pos < s.size() && static_cast<int16_t>(out.size()) < maxLines) {
     size_t end = pos;
     size_t lastSpace = std::string::npos;
     while (end < s.size()) {
@@ -362,14 +355,16 @@ int16_t drawTextWrapped(PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW,
       end += len;
     }
     if (end == pos) end = s.size();
-    const bool lastLine = (line == maxLines - 1);
-    const bool more = end < s.size();
+    const bool lastLine = static_cast<int16_t>(out.size()) == maxLines - 1;
     std::string cur = s.substr(pos, end - pos);
-    if (lastSpace != std::string::npos && lastSpace > pos && end < s.size()) {
+    // Break at a space only when that keeps most of the line (Latin words);
+    // CJK text breaks anywhere, so a space early on must not strand a stub.
+    if (lastSpace != std::string::npos && lastSpace > pos && end < s.size() &&
+        textW(s.substr(pos, lastSpace - pos).c_str(), scale) * 3 >= fitW * 2) {
       cur = s.substr(pos, lastSpace - pos);
       end = lastSpace + 1;
     }
-    if (lastLine && more) {
+    if (lastLine && end < s.size()) {
       while (!cur.empty() && textW((cur + "...").c_str(), scale) > fitW) {
         size_t cut = cur.size() - 1;
         while (cut > 0 && (static_cast<unsigned char>(cur[cut]) & 0xC0) == 0x80) cut--;
@@ -377,12 +372,39 @@ int16_t drawTextWrapped(PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW,
       }
       cur += "...";
     }
-    textGray(c, x, static_cast<int16_t>(y + line * lineH), cur.c_str(), scale, gray, bold);
-    line++;
+    out.push_back(std::move(cur));
     pos = end;
-    if (!lastLine && pos >= s.size()) break;
   }
-  return line;
+  return out;
+}
+}  // namespace
+
+int16_t drawTextWrapped(PortraitCanvas& c, int16_t x, int16_t y, int16_t maxW,
+                        const char* text, int16_t scale, int16_t lineH, int16_t maxLines,
+                        uint8_t gray, bool bold) {
+  scale = clampScale(scale);
+  const std::vector<std::string> lines =
+      wrapLines(text, scale, static_cast<int16_t>(maxW - boldExtra(bold, scale)), maxLines);
+  for (size_t i = 0; i < lines.size(); ++i) {
+    textGray(c, x, static_cast<int16_t>(y + static_cast<int16_t>(i) * lineH), lines[i].c_str(),
+             scale, gray, bold);
+  }
+  return static_cast<int16_t>(lines.size());
+}
+
+int16_t kvLabelWidth(const std::vector<std::pair<std::string, std::string>>& rows) {
+  int16_t w = 0;
+  for (const auto& row : rows) {
+    if (!row.second.empty()) w = std::max(w, styleW(row.first.c_str(), style::kBodyMuted));
+  }
+  return std::clamp<int16_t>(static_cast<int16_t>(w + 12), kKvLabelMin, kKvLabelMax);
+}
+
+int16_t kvRowHeight(const std::string& value, int16_t labelW) {
+  if (value.empty()) return kvHeadingH();
+  const size_t lines =
+      wrapLines(value.c_str(), style::kBody.scale, kvValueW(labelW), kKvValueLines).size();
+  return static_cast<int16_t>(std::max<size_t>(1, lines) * lineHeight(style::kBody.scale));
 }
 
 uint8_t severityFillGray(uint8_t severity) {
@@ -408,19 +430,19 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
   c.drawLine(x, static_cast<int16_t>(y + barH), static_cast<int16_t>(x + w - 1),
              static_cast<int16_t>(y + barH), 0);
 
-  TextStyle body = style::kBody;
-  if (fontH(body.scale) > barH - 4) body.scale = 1;
+  const TextStyle body = style::kBody;
   TextStyle strong = body;
   strong.bold = true;
   TextStyle muted = body;
   muted.gray = 6;
   const int16_t ty = centerY(y, barH, body.scale);
-  const int16_t capH = std::max<int16_t>(12, static_cast<int16_t>(fontH(body.scale) / 2));
 
+  const int16_t capH = std::max<int16_t>(12, static_cast<int16_t>(fontH(body.scale) / 2));
   const int16_t leftEnd = static_cast<int16_t>(
       geom::kInnerX + drawTextFit(c, geom::kInnerX, ty, static_cast<int16_t>(w / 2 - geom::kPadX),
                                   m.timeText, strong.scale, strong.bold, strong.gray));
 
+  // Right cluster, icons only: WiFi (crossed out unless connected), plug, battery, %.
   int16_t rx = geom::kInnerRight;
   const bool hasBattery = m.batMv > 0;
   if (hasBattery) {
@@ -442,80 +464,74 @@ void drawStatusBar(PortraitCanvas& c, const StatusBarModel& m) {
     drawPlugIcon(c, rx, static_cast<int16_t>(y + (barH - plugH) / 2), plugH);
   }
   rx = static_cast<int16_t>(rx - 12);
-
-  const int16_t wifiH = static_cast<int16_t>(capH + 2);
+  const int16_t wifiH = static_cast<int16_t>(capH + 4);
   rx = static_cast<int16_t>(rx - wifiIconWidth(wifiH));
   drawWifiIcon(c, rx, static_cast<int16_t>(y + (barH - wifiH) / 2), wifiH, m.wifiState);
-  if (m.wifiState != 2) {
-    const char* wifi = tr(Str::WifiDisconnected);
-    switch (m.wifiState) {
-      case 1: wifi = tr(Str::WifiConnecting); break;
-      case 3: wifi = tr(Str::WifiFailed); break;
-      case 4: wifi = tr(Str::WifiOffline); break;
-      default: break;
-    }
-    const int16_t avail = static_cast<int16_t>(rx - 6 - (leftEnd + 12));
-    const int16_t maxW = std::min<int16_t>(avail, 160);
-    if (maxW >= styleW("...", muted) + textW("W", muted.scale)) {
-      const int16_t lw = std::min(styleW(wifi, muted), maxW);
-      rx = static_cast<int16_t>(rx - 6 - lw);
-      textFit(c, rx, ty, lw, wifi, muted);
-    }
-  }
 
-  const int16_t mx0 = static_cast<int16_t>(leftEnd + 16);
+  // Middle: link pill, then the longest state label that fits, then the mute count.
   const int16_t mx1 = static_cast<int16_t>(rx - 12);
-  const char* portal = m.portalOpen || m.apFallback ? tr(Str::SetupHotspotOn)
-                       : m.agentUplink              ? tr(Str::AgentUplinkPill)
-                       : m.bleLinked                ? tr(Str::BleLinkedPill)
-                                                    : nullptr;
+  int16_t bx = static_cast<int16_t>(leftEnd + 16);
+  const char* pill = m.portalOpen || m.apFallback ? tr(Str::HotspotPill)
+                     : m.agentUplink              ? tr(Str::AgentUplinkPill)
+                     : m.bleLinked                ? tr(Str::BleLinkedPill)
+                                                  : nullptr;
+  const int16_t pillPad = 8;
+  const int16_t pillW =
+      pill != nullptr ? static_cast<int16_t>(styleW(pill, strong) + 2 * pillPad) : 0;
+  if (pillW > 0 && bx + pillW <= mx1) {
+    const int16_t pillH = std::min<int16_t>(static_cast<int16_t>(fontH(body.scale) + 4),
+                                            static_cast<int16_t>(barH - 4));
+    const int16_t py = static_cast<int16_t>(y + (barH - pillH) / 2);
+    c.fillRoundRectGray(bx, py, pillW, pillH, static_cast<int16_t>(pillH / 2), 0);
+    TextStyle onDark = strong;
+    onDark.gray = 15;
+    text(c, static_cast<int16_t>(bx + pillPad), ty, pill, onDark);
+    bx = static_cast<int16_t>(bx + pillW + 10);
+  }
   char mute[24] = "";
   if (m.mutedCount > 0) {
     snprintf(mute, sizeof(mute), "%s%u", tr(Str::Mute), static_cast<unsigned>(m.mutedCount));
   }
-  const int16_t pillPad = 8;
-  const int16_t portalW =
-      portal != nullptr ? static_cast<int16_t>(styleW(portal, strong) + 2 * pillPad) : 0;
-  int16_t bx = mx0;
-  if (portalW > 0 && bx + portalW <= mx1) {
-    const int16_t pillH = std::min<int16_t>(static_cast<int16_t>(fontH(body.scale) + 4),
-                                            static_cast<int16_t>(barH - 4));
-    const int16_t py = static_cast<int16_t>(y + (barH - pillH) / 2);
-    c.fillRoundRectGray(bx, py, portalW, pillH, static_cast<int16_t>(pillH / 2), 0);
-    TextStyle onDark = strong;
-    onDark.gray = 15;
-    text(c, static_cast<int16_t>(bx + pillPad), ty, portal, onDark);
-    bx = static_cast<int16_t>(bx + portalW + 10);
-  }
   const int16_t muteW = mute[0] != '\0' ? styleW(mute, muted) : 0;
-  if (m.stateText[0] != '\0') {
+  if (!m.stateLabels.empty()) {
     const int16_t icon = stateIconSize(fontH(body.scale));
-    const char* label = m.stateText;
-    if (m.stateShort[0] != '\0' &&
-        styleW(m.stateText, body) > static_cast<int16_t>(mx1 - bx - icon - 6)) {
-      label = m.stateShort;
+    const int16_t room = static_cast<int16_t>(mx1 - bx - icon - 6);
+    const std::string* label = &m.stateLabels.back();
+    for (const std::string& l : m.stateLabels) {
+      if (styleW(l.c_str(), body) <= room) {
+        label = &l;
+        break;
+      }
     }
-    const int16_t stateW = styleW(label, body);
-    int16_t room = static_cast<int16_t>(mx1 - bx - icon - 6);
-    const bool muteFits = muteW > 0 && stateW + 10 + muteW <= room;
-    if (muteFits) room = static_cast<int16_t>(room - muteW - 10);
+    const int16_t stateW = std::min(styleW(label->c_str(), body), room);
     if (room >= styleW("...", body) + textW("W", body.scale)) {
       drawStateIcon(c, bx, static_cast<int16_t>(y + (barH - icon) / 2), icon, m.state);
-      const int16_t used = textFit(c, static_cast<int16_t>(bx + icon + 6), ty, room, label, body);
-      bx = static_cast<int16_t>(bx + icon + 6 + used + 10);
-      if (muteFits) text(c, bx, ty, mute, muted);
+      textFit(c, static_cast<int16_t>(bx + icon + 6), ty, room, label->c_str(), body);
+      bx = static_cast<int16_t>(bx + icon + 6 + stateW + 10);
     }
-  } else if (muteW > 0 && bx + muteW <= mx1) {
-    text(c, bx, ty, mute, muted);
   }
+  if (muteW > 0 && bx + muteW <= mx1) text(c, bx, ty, mute, muted);
+}
 
-  if (m.banner[0] != '\0') {
-    c.fillRect(x, geom::kContentTop, w, geom::kBannerH, 1);
-    c.fillRoundRectGray(x, geom::kContentTop, w, geom::kBannerH, 4, 11);
-    textFit(c, static_cast<int16_t>(x + geom::kRowPadX),
-            centerY(geom::kContentTop, geom::kBannerH, style::kCaptionStrong.scale),
-            static_cast<int16_t>(w - 2 * geom::kRowPadX), m.banner, style::kCaptionStrong);
-  }
+void drawBanner(PortraitCanvas& c, const StatusBarModel& m) {
+  if (m.banner[0] == '\0') return;
+  const int16_t x = geom::kContentX;
+  const int16_t y = geom::kContentY;
+  const int16_t w = geom::kContentW;
+  const int16_t barH = static_cast<int16_t>(geom::kStatusBarH - 1);
+  const TextStyle strong = style::kBodyStrong;
+  const int16_t ty = centerY(y, barH, strong.scale);
+  // A transient banner replaces the whole bar for its few seconds; a long one
+  // grows to two lines over the top of the page instead of shrinking.
+  const int16_t lh = lineHeight(strong.scale);
+  const int16_t textW2 = static_cast<int16_t>(geom::kInnerW - 4);
+  const bool two = styleW(m.banner, strong) > textW2;
+  const int16_t boxH = two ? static_cast<int16_t>(barH - 4 + lh) : static_cast<int16_t>(barH - 4);
+  c.fillRect(x, y, w, static_cast<int16_t>(boxH + 4), 1);
+  c.fillRoundRectGray(static_cast<int16_t>(x + 2), static_cast<int16_t>(y + 2),
+                      static_cast<int16_t>(w - 4), boxH, 6, 11);
+  drawTextWrapped(c, geom::kInnerX, ty, textW2, m.banner, strong.scale, lh, 2, strong.gray,
+                  strong.bold);
 }
 
 void drawSoftKeys(PortraitCanvas& c, const SoftKeyModel* keys, size_t n, size_t focused) {
@@ -593,27 +609,22 @@ void drawAlertDetail(PortraitCanvas& c, const AlertDetailModel& m) {
   const int16_t lh1 = lineHeight(style::kSmall.scale);
   const int16_t fh1 = fontH(style::kSmall.scale);
   const int16_t msgMax = std::max<int16_t>(
-      0, std::min<int16_t>(5, static_cast<int16_t>((geom::kContentBottom - y) / lh1)));
+      0, std::min<int16_t>(3, static_cast<int16_t>((geom::kContentBottom - y) / lh1)));
   const int16_t msgLines = drawTextWrapped(c, geom::kInnerX, y, geom::kInnerW, m.message.c_str(),
                                            style::kSmall.scale, lh1, msgMax, style::kSmall.gray);
   y = static_cast<int16_t>(y + msgLines * lh1 + 8);
 
-  const int16_t colW = static_cast<int16_t>(geom::kInnerW / 2);
-  const int16_t metaPitch = lh1;
+  // Meta: one column (two columns of 2x text leave no room for values).
   size_t i = 0;
   for (; i < m.meta.size() && i < 8; i++) {
-    const int16_t cx = static_cast<int16_t>(geom::kInnerX + static_cast<int16_t>(i % 2) * colW);
-    const int16_t cy = static_cast<int16_t>(y + static_cast<int16_t>(i / 2) * metaPitch);
-    if (cy + fh1 > geom::kContentBottom) break;
-    textFit(c, cx, cy, static_cast<int16_t>(kMetaLabelW - 6), m.meta[i].first.c_str(),
+    if (y + fh1 > geom::kContentBottom) break;
+    textFit(c, geom::kInnerX, y, static_cast<int16_t>(kKvLabelW - 8), m.meta[i].first.c_str(),
             style::kCaption);
-    textFit(c, static_cast<int16_t>(cx + kMetaLabelW), cy,
-            static_cast<int16_t>(colW - kMetaLabelW - 8), m.meta[i].second.c_str(),
-            style::kSmall);
+    textFit(c, static_cast<int16_t>(geom::kInnerX + kKvLabelW), y, kvValueW(),
+            m.meta[i].second.c_str(), style::kSmall);
+    y = static_cast<int16_t>(y + lh1);
   }
-  if (i > 0) {
-    y = static_cast<int16_t>(y + static_cast<int16_t>((i + 1) / 2) * metaPitch + 6);
-  }
+  if (i > 0) y = static_cast<int16_t>(y + 6);
 
   const int16_t stripH = static_cast<int16_t>(fh1 + 6);
   for (size_t f = 0; f < m.fields.size() && f < 4; f++) {
@@ -635,7 +646,7 @@ void drawStatus(PortraitCanvas& c, const KvModel& m) {
     textRight(c, geom::kInnerRight, centerY(geom::kTitleY, geom::kTitleH, style::kCaption.scale),
               120, m.pageText, style::kCaption);
   }
-  const int16_t y = drawKvList(c, m.rows, m.big, geom::kBodyTop);
+  const int16_t y = drawKvList(c, m.rows, geom::kBodyTop);
   const int16_t stripH = static_cast<int16_t>(fontH(style::kCaptionStrong.scale) + 8);
   if (!m.configValid && y + 4 + stripH <= geom::kContentBottom) {
     const int16_t sy = static_cast<int16_t>(y + 4);
@@ -647,9 +658,23 @@ void drawStatus(PortraitCanvas& c, const KvModel& m) {
   }
 }
 
+std::vector<std::pair<std::string, std::string>> helpRows() {
+  static constexpr std::pair<Str, Str> kRows[] = {
+      {Str::HelpUpDownShort, Str::HelpScreen},     {Str::HelpUpDownLong, Str::HelpFocus},
+      {Str::HelpPower, Str::HelpActivateBack},     {Str::HelpPowerLong, Str::HelpShutDown},
+      {Str::HelpFrontHome, Str::HelpHome},         {Str::HelpFrontGestures, Str::HelpSettingsStatus},
+      {Str::HelpFrontDouble, Str::HelpStatusPage}, {Str::HelpSwipe, Str::HelpPage},
+      {Str::HelpTapAlert, Str::HelpOpenDetail},    {Str::HelpUpDownChord, Str::HelpKeepAwake},
+      {Str::HelpDanger, Str::HelpFreshPress},      {Str::HelpCustomBindings, Str::HelpWebBindings},
+  };
+  std::vector<std::pair<std::string, std::string>> rows;
+  for (const auto& [label, value] : kRows) rows.emplace_back(tr(label), tr(value));
+  return rows;
+}
+
 void drawHelp(PortraitCanvas& c, const KvModel& m) {
   drawPageTitle(c, Str::PageHelp);
-  drawKvList(c, m.rows, m.big, geom::kBodyTop);
+  drawKvList(c, m.rows, geom::kBodyTop);
 }
 
 void drawS4(PortraitCanvas& c, const S4Model& m) {
@@ -685,10 +710,7 @@ void drawS4(PortraitCanvas& c, const S4Model& m) {
     textFit(c, labelX, ty, labelMax, row.label.c_str(), labelSt);
     if (vW > 0) {
       const int16_t valueMax = static_cast<int16_t>(avail - labelUsed);
-      TextStyle vs = valueSt;
-      if (vW > valueMax && styleW(row.value.c_str(), style::kCaption) <= valueMax) {
-        vs.scale = style::kCaption.scale;
-      }
+      const TextStyle vs = valueSt;
       textRight(c, valueRight, centerY(ry, geom::kSettingsRowH, vs.scale), valueMax,
                 row.value.c_str(), vs);
     }
@@ -713,7 +735,7 @@ void drawOnboarding(PortraitCanvas& c, const OnboardingModel& m) {
   drawPageTitle(c, Str::PageOnboarding);
   int16_t y = geom::kBodyTop;
 
-  textFit(c, geom::kInnerX, y, geom::kInnerW, tr(Str::OnbOpen), style::kCaption);
+  if (!m.asleep) textFit(c, geom::kInnerX, y, geom::kInnerW, tr(Str::OnbOpen), style::kCaption);
   y = static_cast<int16_t>(y + lineHeight(style::kCaption.scale) + 4);
 
   const int16_t boxH = 84;
@@ -743,8 +765,11 @@ void drawOnboarding(PortraitCanvas& c, const OnboardingModel& m) {
   const Str apSteps[3] = {Str::OnbApStep1, Str::OnbApStep2, Str::OnbApStep3};
   const Str* steps = m.apMode ? apSteps : lanSteps;
   const int16_t lh = lineHeight(style::kBody.scale);
+  const int16_t footLh = lineHeight(style::kCaption.scale);
+  const int16_t footLines = static_cast<int16_t>(
+      wrapLines(tr(Str::OnbKeys), style::kCaption.scale, geom::kInnerW, 2).size());
   const int16_t footerY =
-      static_cast<int16_t>(geom::kContentBottom - lineHeight(style::kCaption.scale));
+      static_cast<int16_t>(geom::kContentBottom - std::max<int16_t>(1, footLines) * footLh);
   for (int i = 0; i < 3; ++i) {
     const int16_t room = static_cast<int16_t>((footerY - 8 - y) / lh);
     if (room <= 0) break;
@@ -765,7 +790,10 @@ void drawOnboarding(PortraitCanvas& c, const OnboardingModel& m) {
             static_cast<int16_t>(geom::kInnerW - 16), reason, st);
   }
 
-  textFit(c, geom::kInnerX, footerY, geom::kInnerW, tr(Str::OnbKeys), style::kCaption);
+  if (!m.asleep) {
+    drawTextWrapped(c, geom::kInnerX, footerY, geom::kInnerW, tr(Str::OnbKeys),
+                    style::kCaption.scale, footLh, 2, style::kCaption.gray);
+  }
 }
 
 void drawPoweredOff(PortraitCanvas& c) {
@@ -841,6 +869,34 @@ void drawBlePair(PortraitCanvas& c, const BlePairModel& m) {
   char line[64];
   snprintf(line, sizeof(line), tr(Str::BlePairExpiresFmt), static_cast<unsigned>(m.remainingS));
   textCentered(c, geom::kInnerX, geom::kInnerW, y, line, style::kCaption);
+}
+
+void drawNoticeScreen(PortraitCanvas& c, const char* title, const char* line1,
+                      const char* line2, const char* line3) {
+  // Full-screen notices are read from across the room: headline title, scale-3 body
+  // (wrapping to two lines), the wake hint in gray.
+  c.clear();
+  c.useUiContentRect();
+  constexpr int16_t kTitleScale = 4;
+  constexpr int16_t kLineScale = 3;
+  const int16_t titleLh = lineHeight(kTitleScale);
+  const int16_t lineLh = lineHeight(kLineScale);
+  const int16_t gap = 24;
+  const int16_t blockH = static_cast<int16_t>(titleLh + gap + 4 * lineLh + 12);
+  int16_t y = static_cast<int16_t>((geom::kContentTop + geom::kContentBottom - blockH) / 2);
+  drawTextFit(c, geom::kInnerX, y, geom::kInnerW, title, kTitleScale, true, 0);
+  y = static_cast<int16_t>(y + titleLh + gap);
+  const char* lines[] = {line1, line2, line3};
+  for (int i = 0; i < 3; ++i) {
+    const char* line = lines[i];
+    if (line == nullptr || line[0] == '\0') continue;
+    const bool hint = i == 2;
+    if (hint) y = static_cast<int16_t>(y + 12);
+    const int16_t n = drawTextWrapped(c, geom::kInnerX, y, geom::kInnerW, line, kLineScale,
+                                      lineLh, i == 0 ? 2 : 1, hint ? 6 : 0, i == 0);
+    y = static_cast<int16_t>(y + std::max<int16_t>(n, 1) * lineLh);
+  }
+  c.resetClip();
 }
 
 }  // namespace panel

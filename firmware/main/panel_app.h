@@ -200,11 +200,15 @@ class PanelApp {
       __attribute__((format(printf, 3, 4)));
 
   bool computeMains();
+  void readBatteryForSleep();
   // What the UI and the wake planner treat as charging: the raw charge pin, unless the
   // detector has caught it reporting charging while the battery drains.
   bool chargingShown() const {
     return (charging_ || batCache_.charging) && !mainsDetector_.chargeSuspect();
   }
+  // Power is physically external, even while a manual sleep runs the battery policy
+  // (mains_ is forced false then). Low-battery decisions must use this.
+  bool externalPower() const { return mains_ || mainsDetector_.mains(); }
   void onModeChange(bool mains);
   void applyWifiPowerSave();
   bool dashboardLive() const { return mains_ || battPhase_ == BattPhase::Interactive; }
@@ -278,7 +282,7 @@ class PanelApp {
   bool softFocusMoved_ = false;
   bool adminActivePs_ = false;
   size_t statusPage_ = 0;
-  size_t statusRows_ = 0;
+  size_t statusPages_ = 1;
   std::string detailPanel_;
   std::string detailIdentity_;
   size_t detailIndex_ = 0;
